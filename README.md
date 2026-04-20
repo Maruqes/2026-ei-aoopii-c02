@@ -1,3 +1,4 @@
-# 2026-ei-aoopii-c2
+# Discord Anthropologist
 
-I was Here
+- 31415 Gonçalo Marques
+- 31394 Ricardo Fernandes
