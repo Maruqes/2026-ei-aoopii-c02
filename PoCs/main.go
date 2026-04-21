@@ -12,6 +12,46 @@ import (
 	"github.com/joho/godotenv"
 )
 
+var APP_ID string
+
+func registerCommand(dg *discordgo.Session, appID, command, desc string, hook func(s *discordgo.Session, i *discordgo.InteractionCreate)) error {
+
+	dg.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+		if i.Type != discordgo.InteractionApplicationCommand {
+			return
+		}
+
+		hook(s, i)
+	})
+
+	_, err := dg.ApplicationCommandBulkOverwrite(appID, "", []*discordgo.ApplicationCommand{
+		{
+			Name:        command,
+			Description: desc,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func pingHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if i.Type != discordgo.InteractionApplicationCommand {
+		return
+	}
+
+	data := i.ApplicationCommandData()
+	if strings.ToLower(data.Name) != "ping" {
+		return
+	}
+
+	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{Content: "PONGGG!"},
+	})
+}
+
 func main() {
 	_ = godotenv.Load()
 
@@ -29,38 +69,18 @@ func main() {
 		log.Fatalf("erro ao criar sessao do bot: %v", err)
 	}
 
-	dg.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
-		if i.Type != discordgo.InteractionApplicationCommand {
-			return
-		}
+	err = registerCommand(dg, appID, "ping", "Responde com PONG!", pingHook)
+	if err != nil {
+		log.Fatalf("erro ao registar comandos: %v", err)
+	}
+	dg.AddHandler(OnVoiceStateUpdate)
 
-		data := i.ApplicationCommandData()
-		if strings.ToLower(data.Name) != "ping" {
-			return
-		}
-
-		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{Content: "Pong!"},
-		})
-	})
-
-	dg.Identify.Intents = discordgo.IntentsGuilds
+	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildVoiceStates
 
 	if err := dg.Open(); err != nil {
 		log.Fatalf("erro ao ligar bot: %v", err)
 	}
 	defer dg.Close()
-
-	_, err = dg.ApplicationCommandBulkOverwrite(appID, "", []*discordgo.ApplicationCommand{
-		{
-			Name:        "ping",
-			Description: "Responde com Pong!",
-		},
-	})
-	if err != nil {
-		log.Fatalf("erro ao registar comando /ping: %v", err)
-	}
 
 	fmt.Println("Bot online. Comando: /ping")
 	stop := make(chan os.Signal, 1)
