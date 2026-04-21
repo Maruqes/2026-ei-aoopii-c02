@@ -4,6 +4,7 @@ go 1.22.0
 
 require (
 	github.com/bwmarrin/discordgo v0.29.0
+	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1
 	gopkg.in/hraban/opus.v2 v2.0.0-20230925203106-0188a62cb302
 )

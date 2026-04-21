@@ -4,8 +4,10 @@ import (
 	"encoding/binary"
 	"log"
 	"os"
+	"path/filepath"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/google/uuid"
 	"gopkg.in/hraban/opus.v2"
 )
 
@@ -18,7 +20,7 @@ sudo dnf install opus opus-devel opusfile opusfile-devel pkgconf-pkg-config
 
 const (
 	sampleRate    = 48000
-	channels      = 2
+	channels      = 1
 	bitsPerSample = 16
 	maxFrameMs    = 120
 )
@@ -128,18 +130,44 @@ func (w *WAVWriter) Close() error {
 	return w.f.Close()
 }
 
-func ListenAndWriteOpusToWAV(vc *discordgo.VoiceConnection, outPath string) error {
-	wav, err := NewWAVWriter(outPath, sampleRate, channels, bitsPerSample)
-	if err != nil {
+func newUserAudioPath(outDir string, discordID string) string {
+	filename := discordID + "-" + uuid.NewString() + ".wav"
+	return filepath.Join(outDir, filename)
+}
+
+func closeUserWriters(writers map[string]*WAVWriter) error {
+	var firstErr error
+
+	for discordID, wav := range writers {
+		if wav == nil {
+			continue
+		}
+		if err := wav.Close(); err != nil && firstErr == nil {
+			firstErr = err
+			log.Printf("erro ao fechar WAV de user=%s: %v", discordID, err)
+		}
+	}
+
+	return firstErr
+}
+
+func ListenAndWriteOpusToWAV(vc *discordgo.VoiceConnection, outDir string, ssrcUsers *SSRCUserMap) error {
+	if outDir == "" {
+		outDir = "."
+	}
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
 	}
-	defer wav.Close()
 
-	log.Printf("a gravar áudio para %s", outPath)
+	log.Printf("a gravar áudio para a pasta %s", outDir)
 
 	maxSamplesPerChannel := maxFrameMs * sampleRate / 1000
 	pcm := make([]int16, maxSamplesPerChannel*channels)
 	decoders := make(map[uint32]*opus.Decoder)
+	userWriters := make(map[string]*WAVWriter)
+	identifiedUsers := make(map[uint32]string)
+	unknownSSRCs := make(map[uint32]bool)
+	defer closeUserWriters(userWriters)
 
 	for {
 		packet, ok := <-vc.OpusRecv
@@ -151,19 +179,50 @@ func ListenAndWriteOpusToWAV(vc *discordgo.VoiceConnection, outPath string) erro
 			continue
 		}
 
+		var discordID string
+		if ssrcUsers != nil {
+			if user, ok := ssrcUsers.GetBySSRC(packet.SSRC); ok {
+				discordID = user.DiscordID
+				if identifiedUsers[packet.SSRC] != user.DiscordID {
+					identifiedUsers[packet.SSRC] = user.DiscordID
+					log.Printf("a receber áudio de user=%s ssrc=%d", user.DiscordID, user.SSRC)
+				}
+			} else if !unknownSSRCs[packet.SSRC] {
+				unknownSSRCs[packet.SSRC] = true
+				log.Printf("a receber áudio de ssrc=%d sem user associado", packet.SSRC)
+			}
+		}
+
 		dec := decoders[packet.SSRC]
 		if dec == nil {
-			dec, err = opus.NewDecoder(sampleRate, channels)
+			newDecoder, err := opus.NewDecoder(sampleRate, channels)
 			if err != nil {
 				return err
 			}
+			dec = newDecoder
 			decoders[packet.SSRC] = dec
+		}
+
+		if discordID == "" {
+			continue
 		}
 
 		n, err := dec.Decode(packet.Opus, pcm)
 		if err != nil {
 			log.Printf("erro a descodificar opus (ssrc=%d): %v", packet.SSRC, err)
 			continue
+		}
+
+		wav := userWriters[discordID]
+		if wav == nil {
+			outPath := newUserAudioPath(outDir, discordID)
+			newWriter, err := NewWAVWriter(outPath, sampleRate, channels, bitsPerSample)
+			if err != nil {
+				return err
+			}
+			wav = newWriter
+			userWriters[discordID] = wav
+			log.Printf("a gravar user=%s para %s", discordID, outPath)
 		}
 
 		if err := wav.WritePCM(pcm[:n*channels]); err != nil {
