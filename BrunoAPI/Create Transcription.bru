@@ -1,0 +1,33 @@
+meta {
+  name: Create Transcription
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{base_url}}/v1/transcriptions
+  body: multipartForm
+  auth: none
+}
+
+body:multipart-form {
+  audio: @file({{audio_file}})
+  discord_id: {{discord_id}}
+  username: {{username}}
+  display_name: {{display_name}}
+  channel_name: {{channel_name}}
+  recording_started_at: {{recording_started_at}}
+}
+
+tests {
+  test("transcription request succeeds", function() {
+    expect(res.status).to.equal(200);
+  });
+
+  test("response includes persisted messages and chunks", function() {
+    expect(res.body).to.have.property("text");
+    expect(res.body).to.have.property("segments");
+    expect(res.body).to.have.property("message_ids");
+    expect(res.body).to.have.property("affected_chunks");
+  });
+}

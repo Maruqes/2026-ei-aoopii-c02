@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: discord-anthropologist-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-discord_anthropologist}
+      POSTGRES_USER: ${POSTGRES_USER:-discord}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-discord}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-discord} -d ${POSTGRES_DB:-discord_anthropologist}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: src/transcription-api/Dockerfile
+    container_name: discord-anthropologist-api
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-discord}:${POSTGRES_PASSWORD:-discord}@postgres:5432/${POSTGRES_DB:-discord_anthropologist}
+      WHISPER_MODEL: ${WHISPER_MODEL:-base}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-262144000}
+      UPLOAD_TMP_DIR: ${UPLOAD_TMP_DIR:-.tmp/uploads}
+      KEEP_UPLOADS: ${KEEP_UPLOADS:-false}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - ./src:/app/src
+      - api_uploads:/app/.tmp/uploads
+      - whisper_cache:/root/.cache/whisper
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  api_uploads:
+  whisper_cache:

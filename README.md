@@ -17,3 +17,12 @@
       -"USERID1_USERNAME1_MESSAGE1" ; "USERID2_USERNAME2_MESSAGE2";"USERID1_USERNAME1_MESSAGE3"
 - OpenClaw for autonomous agent??
 - API for openclaw usage search_chunks() get_user() update_userReport()
+
+## Real implementation
+
+The production code starts under `src/` while `PoCs/` remains untouched.
+
+- `src/data`: Postgres migrations and DB/chunk rebuilding helpers.
+- `src/transcription-api`: local FastAPI wrapper around Whisper.
+- `docker-compose.yml`: local Postgres only.
+- `BrunoAPI`: Bruno collection for local API requests.

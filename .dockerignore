@@ -1,0 +1,9 @@
+.git
+.venv
+__pycache__
+.pytest_cache
+.tmp
+PoCs/.env
+PoCs/recordings
+recordings
+postgres_data
