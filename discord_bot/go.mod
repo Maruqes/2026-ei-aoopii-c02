@@ -1,4 +1,4 @@
-module pocs-discord-bot
+module discord_bot-discord-bot
 
 go 1.22.0
 

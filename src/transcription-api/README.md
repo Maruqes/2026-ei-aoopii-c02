@@ -26,7 +26,7 @@ Transcribe an audio file:
 
 ```powershell
 curl -X POST http://localhost:8000/v1/transcriptions `
-  -F "audio=@PoCs/Whisper/harvard.wav" `
+  -F "audio=@discord_bot/Whisper/harvard.wav" `
   -F "discord_id=123" `
   -F "username=Ricardo" `
   -F "channel_name=general" `

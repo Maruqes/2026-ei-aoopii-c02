@@ -3,7 +3,7 @@
 __pycache__
 .pytest_cache
 .tmp
-PoCs/.env
-PoCs/recordings
+discord_bot/.env
+discord_bot/recordings
 recordings
 postgres_data

@@ -20,7 +20,7 @@
 
 ## Real implementation
 
-The production code starts under `src/` while `PoCs/` remains untouched.
+The production code starts under `src/` while `discord_bot/` remains untouched.
 
 - `src/data`: Postgres migrations and DB/chunk rebuilding helpers.
 - `src/transcription-api`: local FastAPI wrapper around Whisper.
