@@ -331,6 +331,7 @@ func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 			return
 		}
 		ssrcUsers.Set(uint32(vs.SSRC), vs.UserID)
+		log.Printf("SSRC associado user=%s ssrc=%d", vs.UserID, vs.SSRC)
 		if !state.hasUserInfo(vs.UserID) {
 			state.rememberUser(resolveVoiceUserInfo(s, guildID, vs.UserID, nil))
 		}

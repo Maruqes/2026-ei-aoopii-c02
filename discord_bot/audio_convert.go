@@ -290,9 +290,20 @@ func ListenAndWriteOpusToWAV(
 						identifiedUsers[packet.SSRC] = user.DiscordID
 						log.Printf("a receber áudio de user=%s ssrc=%d", user.DiscordID, user.SSRC)
 					}
-				} else if !unknownSSRCs[packet.SSRC] {
-					unknownSSRCs[packet.SSRC] = true
-					log.Printf("a receber áudio de ssrc=%d sem user associado", packet.SSRC)
+				} else {
+					if syncSSRCUserMapFromVoiceConnection(vc, ssrcUsers) {
+						if user, ok := ssrcUsers.GetBySSRC(packet.SSRC); ok {
+							discordID = user.DiscordID
+							if identifiedUsers[packet.SSRC] != user.DiscordID {
+								identifiedUsers[packet.SSRC] = user.DiscordID
+								log.Printf("SSRC associado pelo voice websocket user=%s ssrc=%d", user.DiscordID, user.SSRC)
+							}
+						}
+					}
+					if discordID == "" && !unknownSSRCs[packet.SSRC] {
+						unknownSSRCs[packet.SSRC] = true
+						log.Printf("a receber áudio de ssrc=%d sem user associado", packet.SSRC)
+					}
 				}
 			}
 
