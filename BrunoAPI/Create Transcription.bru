@@ -11,7 +11,7 @@ post {
 }
 
 body:multipart-form {
-  audio: @file({{audio_file}})
+  recording_filename: {{recording_filename}}
   discord_id: {{discord_id}}
   username: {{username}}
   display_name: {{display_name}}
@@ -25,9 +25,7 @@ tests {
   });
 
   test("response includes persisted messages and chunks", function() {
-    expect(res.body).to.have.property("text");
-    expect(res.body).to.have.property("segments");
-    expect(res.body).to.have.property("message_ids");
-    expect(res.body).to.have.property("affected_chunks");
+    expect(res.body).to.have.property("status", "accepted");
+    expect(res.body).to.have.property("recording_filename");
   });
 }

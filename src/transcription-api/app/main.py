@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import os
+import logging
 import sys
+import threading
 import time
-import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi import Depends, FastAPI, Form, HTTPException, status
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
 from data.repository import DataRepository, MessageInsert  # noqa: E402
 
 from .config import Settings
-from .schemas import ChunkResponse, TranscriptionResponse, TranscriptSegment
+from .schemas import TranscriptionAcceptedResponse
 from .transcriber import WhisperResult, WhisperTranscriber
 
 
@@ -32,6 +32,8 @@ SUPPORTED_EXTENSIONS = {
     ".flac",
 }
 
+logger = logging.getLogger("uvicorn.error")
+
 
 def create_app() -> FastAPI:
     service = FastAPI(title="Discord Anthropologist Transcription API")
@@ -41,15 +43,16 @@ def create_app() -> FastAPI:
         try:
             repository.healthcheck()
         except Exception as exc:
+            logger.exception("healthcheck falhou: database indisponivel")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=f"Database unavailable: {exc}",
             ) from exc
         return {"status": "ok"}
 
-    @service.post("/v1/transcriptions", response_model=TranscriptionResponse)
+    @service.post("/v1/transcriptions", response_model=TranscriptionAcceptedResponse)
     async def create_transcription(
-        audio: UploadFile = File(...),
+        recording_filename: str = Form(...),
         discord_id: str = Form(...),
         username: str = Form(...),
         channel_name: str = Form(...),
@@ -58,49 +61,66 @@ def create_app() -> FastAPI:
         settings: Settings = Depends(get_settings),
         repository: DataRepository = Depends(get_repository),
         transcriber: WhisperTranscriber = Depends(get_transcriber),
-    ) -> TranscriptionResponse:
+    ) -> TranscriptionAcceptedResponse:
         started = time.perf_counter()
-        validate_metadata(discord_id, username, channel_name)
-        validate_upload_name(audio.filename)
+        logger.info(
+            "API /v1/transcriptions recebida recording_filename=%s discord_id=%s username=%s channel=%s started_at=%s",
+            recording_filename,
+            discord_id,
+            username,
+            channel_name,
+            recording_started_at.isoformat(),
+        )
 
-        upload_path = await save_upload(audio, settings)
         try:
-            whisper_result = transcriber.transcribe(upload_path)
-            messages = messages_from_segments(recording_started_at, whisper_result)
-            insert_result = repository.insert_transcription_segments(
+            validate_metadata(discord_id, username, channel_name)
+            validate_recording_filename(recording_filename)
+            recording_path = resolve_recording_path(recording_filename, settings)
+            validate_upload_name(recording_path.name)
+            validate_recording_file(recording_path, settings)
+
+            schedule_transcription_job(
+                recording_path=recording_path,
                 discord_id=discord_id.strip(),
                 username=username.strip(),
                 display_name=display_name.strip() if display_name else None,
                 channel_name=channel_name.strip(),
-                messages=messages,
+                recording_started_at=recording_started_at,
+                settings=settings,
+                repository=repository,
+                transcriber=transcriber,
             )
-        except HTTPException:
+        except HTTPException as exc:
+            logger.warning(
+                "API /v1/transcriptions rejeitada recording_filename=%s discord_id=%s status=%s detail=%s elapsed_ms=%d",
+                recording_filename,
+                discord_id,
+                exc.status_code,
+                exc.detail,
+                int((time.perf_counter() - started) * 1000),
+            )
             raise
         except Exception as exc:
+            logger.exception(
+                "API /v1/transcriptions erro recording_filename=%s discord_id=%s elapsed_ms=%d",
+                recording_filename,
+                discord_id,
+                int((time.perf_counter() - started) * 1000),
+            )
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
-        finally:
-            if not settings.keep_uploads:
-                upload_path.unlink(missing_ok=True)
 
-        return TranscriptionResponse(
-            text=whisper_result.text,
-            segments=[
-                TranscriptSegment(start=segment.start, end=segment.end, text=segment.text)
-                for segment in whisper_result.segments
-            ],
-            user_id=insert_result.user_id,
-            message_ids=insert_result.message_ids,
-            affected_chunks=[
-                ChunkResponse(
-                    id=chunk.id,
-                    channel_name=chunk.channel_name,
-                    start_at=chunk.start_at,
-                    end_at=chunk.end_at,
-                )
-                for chunk in insert_result.affected_chunks
-            ],
-            model=settings.whisper_model,
-            processing_ms=int((time.perf_counter() - started) * 1000),
+        processing_ms = int((time.perf_counter() - started) * 1000)
+        logger.info(
+            "API /v1/transcriptions aceite discord_id=%s recording_filename=%s processing_ms=%d",
+            discord_id.strip(),
+            recording_path.name,
+            processing_ms,
+        )
+
+        return TranscriptionAcceptedResponse(
+            status="accepted",
+            recording_filename=recording_path.name,
+            message="Transcription scheduled",
         )
 
     return service
@@ -144,33 +164,148 @@ def validate_upload_name(filename: str | None) -> None:
         )
 
 
-async def save_upload(audio: UploadFile, settings: Settings) -> Path:
-    settings.upload_tmp_dir.mkdir(parents=True, exist_ok=True)
-    suffix = Path(audio.filename or "").suffix.lower()
-    upload_path = settings.upload_tmp_dir / f"{uuid.uuid4()}{suffix}"
-    total = 0
+def validate_recording_filename(recording_filename: str) -> None:
+    value = recording_filename.strip()
+    if not value:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Missing required metadata: recording_filename",
+        )
 
+    if "/" in value or "\\" in value or value in {".", ".."} or Path(value).name != value:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="recording_filename must be a file name inside the shared recordings folder",
+        )
+
+
+def resolve_recording_path(recording_filename: str, settings: Settings) -> Path:
+    recordings_dir = settings.recordings_dir.resolve()
+    recording_path = (recordings_dir / recording_filename.strip()).resolve()
+    if recording_path.parent != recordings_dir:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="recording_filename must resolve inside the shared recordings folder",
+        )
+    return recording_path
+
+
+def validate_recording_file(recording_path: Path, settings: Settings) -> None:
+    if not recording_path.exists() or not recording_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Recording file not found: {recording_path.name}",
+        )
+
+    size = recording_path.stat().st_size
+    if size == 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Recording file is empty")
+    if size > settings.max_upload_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Recording exceeds {settings.max_upload_bytes} bytes",
+        )
+
+
+def schedule_transcription_job(
+    *,
+    recording_path: Path,
+    discord_id: str,
+    username: str,
+    display_name: str | None,
+    channel_name: str,
+    recording_started_at: datetime,
+    settings: Settings,
+    repository: DataRepository,
+    transcriber: WhisperTranscriber,
+) -> None:
+    logger.info(
+        "job transcricao agendado file=%s discord_id=%s username=%s channel=%s",
+        recording_path,
+        discord_id,
+        username,
+        channel_name,
+    )
+    thread = threading.Thread(
+        target=process_recording_file,
+        kwargs={
+            "recording_path": recording_path,
+            "discord_id": discord_id,
+            "username": username,
+            "display_name": display_name,
+            "channel_name": channel_name,
+            "recording_started_at": recording_started_at,
+            "settings": settings,
+            "repository": repository,
+            "transcriber": transcriber,
+        },
+        daemon=True,
+    )
+    thread.start()
+
+
+def process_recording_file(
+    *,
+    recording_path: Path,
+    discord_id: str,
+    username: str,
+    display_name: str | None,
+    channel_name: str,
+    recording_started_at: datetime,
+    settings: Settings,
+    repository: DataRepository,
+    transcriber: WhisperTranscriber,
+) -> None:
+    started = time.perf_counter()
     try:
-        with upload_path.open("wb") as out:
-            while chunk := await audio.read(1024 * 1024):
-                total += len(chunk)
-                if total > settings.max_upload_bytes:
-                    raise HTTPException(
-                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                        detail=f"Upload exceeds {settings.max_upload_bytes} bytes",
-                    )
-                out.write(chunk)
+        logger.info(
+            "job transcricao inicio file=%s bytes=%d model=%s discord_id=%s",
+            recording_path,
+            recording_path.stat().st_size,
+            settings.whisper_model,
+            discord_id,
+        )
+        whisper_result = transcriber.transcribe(recording_path)
+        logger.info(
+            "job whisper concluido file=%s discord_id=%s segmentos=%d texto_chars=%d",
+            recording_path,
+            discord_id,
+            len(whisper_result.segments),
+            len(whisper_result.text),
+        )
+
+        messages = messages_from_segments(recording_started_at, whisper_result)
+        logger.info(
+            "job escrita DB inicio file=%s discord_id=%s username=%s channel=%s mensagens=%d",
+            recording_path,
+            discord_id,
+            username,
+            channel_name,
+            len(messages),
+        )
+        insert_result = repository.insert_transcription_segments(
+            discord_id=discord_id,
+            username=username,
+            display_name=display_name,
+            channel_name=channel_name,
+            messages=messages,
+        )
+        logger.info(
+            "job escrita DB concluida file=%s discord_id=%s user_id=%s message_ids=%d chunks_afetados=%d elapsed_ms=%d",
+            recording_path,
+            discord_id,
+            insert_result.user_id,
+            len(insert_result.message_ids),
+            len(insert_result.affected_chunks),
+            int((time.perf_counter() - started) * 1000),
+        )
     except Exception:
-        upload_path.unlink(missing_ok=True)
-        raise
-    finally:
-        await audio.close()
-
-    if total == 0:
-        upload_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded audio is empty")
-
-    return upload_path
+        logger.exception(
+            "job transcricao erro file=%s discord_id=%s elapsed_ms=%d",
+            recording_path,
+            discord_id,
+            int((time.perf_counter() - started) * 1000),
+        )
 
 
 def messages_from_segments(recording_started_at: datetime, result: WhisperResult) -> list[MessageInsert]:

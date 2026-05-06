@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
@@ -31,6 +32,14 @@ type WAVWriter struct {
 	sampleRate uint32
 	channels   uint16
 	bitDepth   uint16
+}
+
+type userAudioRecording struct {
+	wav       *WAVWriter
+	path      string
+	startedAt time.Time
+	user      voiceUserInfo
+	channel   string
 }
 
 func NewWAVWriter(path string, sampleRate uint32, channels uint16, bitDepth uint16) (*WAVWriter, error) {
@@ -135,23 +144,98 @@ func newUserAudioPath(outDir string, discordID string) string {
 	return filepath.Join(outDir, filename)
 }
 
-func closeUserWriters(writers map[string]*WAVWriter) error {
+func closeUserRecordings(recordings map[string]*userAudioRecording, transcriptions *TranscriptionClient) error {
 	var firstErr error
 
-	for discordID, wav := range writers {
-		if wav == nil {
+	for discordID, recording := range recordings {
+		if recording == nil {
 			continue
 		}
-		if err := wav.Close(); err != nil && firstErr == nil {
+
+		delete(recordings, discordID)
+		if err := closeAndTranscribeRecording(recording, voiceUserInfo{}, transcriptions); err != nil && firstErr == nil {
 			firstErr = err
-			log.Printf("erro ao fechar WAV de user=%s: %v", discordID, err)
 		}
 	}
 
 	return firstErr
 }
 
-func ListenAndWriteOpusToWAV(vc *discordgo.VoiceConnection, outDir string, ssrcUsers *SSRCUserMap) error {
+func finishUserRecording(recordings map[string]*userAudioRecording, info voiceUserInfo, transcriptions *TranscriptionClient) error {
+	info = info.withFallbacks()
+	if info.DiscordID == "" {
+		return nil
+	}
+
+	recording := recordings[info.DiscordID]
+	if recording == nil {
+		return nil
+	}
+
+	delete(recordings, info.DiscordID)
+	return closeAndTranscribeRecording(recording, info, transcriptions)
+}
+
+func closeAndTranscribeRecording(recording *userAudioRecording, info voiceUserInfo, transcriptions *TranscriptionClient) error {
+	if recording == nil || recording.wav == nil {
+		return nil
+	}
+
+	user := mergeVoiceUserInfo(info, recording.user)
+	if user.DiscordID == "" {
+		user = recording.user.withFallbacks()
+	}
+
+	log.Printf(
+		"a finalizar WAV user=%s username=%s channel=%s file=%s data_bytes=%d started_at=%s",
+		user.DiscordID,
+		user.Username,
+		recording.channel,
+		recording.path,
+		recording.wav.dataSize,
+		recording.startedAt.UTC().Format(time.RFC3339Nano),
+	)
+
+	if err := recording.wav.Close(); err != nil {
+		log.Printf("erro ao fechar WAV de user=%s: %v", user.DiscordID, err)
+		return err
+	}
+
+	if recording.wav.dataSize == 0 {
+		log.Printf("WAV sem áudio para user=%s file=%s; transcrição ignorada", user.DiscordID, recording.path)
+		return nil
+	}
+
+	log.Printf(
+		"WAV finalizado; a chamar API transcrição user=%s username=%s channel=%s file=%s data_bytes=%d elapsed_recording=%s",
+		user.DiscordID,
+		user.Username,
+		recording.channel,
+		recording.path,
+		recording.wav.dataSize,
+		time.Since(recording.startedAt).Round(time.Second),
+	)
+	transcriptions.QueueTranscription(TranscriptionRequest{
+		AudioPath:          recording.path,
+		DiscordID:          user.DiscordID,
+		Username:           user.Username,
+		DisplayName:        user.DisplayName,
+		ChannelName:        recording.channel,
+		RecordingStartedAt: recording.startedAt,
+	})
+
+	return nil
+}
+
+func ListenAndWriteOpusToWAV(
+	vc *discordgo.VoiceConnection,
+	outDir string,
+	ssrcUsers *SSRCUserMap,
+	recordingEvents <-chan recordingControlEvent,
+	transcriptions *TranscriptionClient,
+	lookupUserInfo func(string) voiceUserInfo,
+	currentChannelName func() string,
+) error {
 	if outDir == "" {
 		outDir = "."
 	}
@@ -164,69 +248,119 @@ func ListenAndWriteOpusToWAV(vc *discordgo.VoiceConnection, outDir string, ssrcU
 	maxSamplesPerChannel := maxFrameMs * sampleRate / 1000
 	pcm := make([]int16, maxSamplesPerChannel*channels)
 	decoders := make(map[uint32]*opus.Decoder)
-	userWriters := make(map[string]*WAVWriter)
+	userRecordings := make(map[string]*userAudioRecording)
 	identifiedUsers := make(map[uint32]string)
 	unknownSSRCs := make(map[uint32]bool)
-	defer closeUserWriters(userWriters)
+	defer closeUserRecordings(userRecordings, transcriptions)
 
 	for {
-		packet, ok := <-vc.OpusRecv
-		if !ok {
-			log.Println("OpusRecv fechado")
-			return nil
-		}
-		if packet == nil || len(packet.Opus) == 0 {
-			continue
-		}
-
-		var discordID string
-		if ssrcUsers != nil {
-			if user, ok := ssrcUsers.GetBySSRC(packet.SSRC); ok {
-				discordID = user.DiscordID
-				if identifiedUsers[packet.SSRC] != user.DiscordID {
-					identifiedUsers[packet.SSRC] = user.DiscordID
-					log.Printf("a receber áudio de user=%s ssrc=%d", user.DiscordID, user.SSRC)
+		select {
+		case event, ok := <-recordingEvents:
+			if !ok {
+				recordingEvents = nil
+				continue
+			}
+			if event.finishAll {
+				log.Printf("evento recebido: finalizar todas as gravações ativas count=%d", len(userRecordings))
+				if err := closeUserRecordings(userRecordings, transcriptions); err != nil {
+					return err
 				}
-			} else if !unknownSSRCs[packet.SSRC] {
-				unknownSSRCs[packet.SSRC] = true
-				log.Printf("a receber áudio de ssrc=%d sem user associado", packet.SSRC)
+				continue
 			}
-		}
-
-		dec := decoders[packet.SSRC]
-		if dec == nil {
-			newDecoder, err := opus.NewDecoder(sampleRate, channels)
-			if err != nil {
+			log.Printf("evento recebido: finalizar gravação user=%s", event.user.DiscordID)
+			if err := finishUserRecording(userRecordings, event.user, transcriptions); err != nil {
 				return err
 			}
-			dec = newDecoder
-			decoders[packet.SSRC] = dec
-		}
-
-		if discordID == "" {
 			continue
-		}
 
-		n, err := dec.Decode(packet.Opus, pcm)
-		if err != nil {
-			log.Printf("erro a descodificar opus (ssrc=%d): %v", packet.SSRC, err)
-			continue
-		}
+		case packet, ok := <-vc.OpusRecv:
+			if !ok {
+				log.Println("OpusRecv fechado")
+				return nil
+			}
+			if packet == nil || len(packet.Opus) == 0 {
+				continue
+			}
 
-		wav := userWriters[discordID]
-		if wav == nil {
-			outPath := newUserAudioPath(outDir, discordID)
-			newWriter, err := NewWAVWriter(outPath, sampleRate, channels, bitsPerSample)
+			var discordID string
+			if ssrcUsers != nil {
+				if user, ok := ssrcUsers.GetBySSRC(packet.SSRC); ok {
+					discordID = user.DiscordID
+					if identifiedUsers[packet.SSRC] != user.DiscordID {
+						identifiedUsers[packet.SSRC] = user.DiscordID
+						log.Printf("a receber áudio de user=%s ssrc=%d", user.DiscordID, user.SSRC)
+					}
+				} else if !unknownSSRCs[packet.SSRC] {
+					unknownSSRCs[packet.SSRC] = true
+					log.Printf("a receber áudio de ssrc=%d sem user associado", packet.SSRC)
+				}
+			}
+
+			dec := decoders[packet.SSRC]
+			if dec == nil {
+				newDecoder, err := opus.NewDecoder(sampleRate, channels)
+				if err != nil {
+					return err
+				}
+				dec = newDecoder
+				decoders[packet.SSRC] = dec
+			}
+
+			if discordID == "" {
+				continue
+			}
+
+			n, err := dec.Decode(packet.Opus, pcm)
 			if err != nil {
+				log.Printf("erro a descodificar opus (ssrc=%d): %v", packet.SSRC, err)
+				continue
+			}
+
+			recording := userRecordings[discordID]
+			if recording == nil {
+				outPath := newUserAudioPath(outDir, discordID)
+				newWriter, err := NewWAVWriter(outPath, sampleRate, channels, bitsPerSample)
+				if err != nil {
+					return err
+				}
+				recording = &userAudioRecording{
+					wav:       newWriter,
+					path:      outPath,
+					startedAt: time.Now().UTC(),
+					user:      getRecordingUserInfo(discordID, lookupUserInfo),
+					channel:   getCurrentChannelName(currentChannelName, vc.ChannelID),
+				}
+				userRecordings[discordID] = recording
+				log.Printf("a gravar user=%s para %s", discordID, outPath)
+			}
+
+			if err := recording.wav.WritePCM(pcm[:n*channels]); err != nil {
 				return err
 			}
-			wav = newWriter
-			userWriters[discordID] = wav
-			log.Printf("a gravar user=%s para %s", discordID, outPath)
-		}
-
-		if err := wav.WritePCM(pcm[:n*channels]); err != nil {
-			return err
 		}
 	}
+}
+
+func getRecordingUserInfo(discordID string, lookupUserInfo func(string) voiceUserInfo) voiceUserInfo {
+	if lookupUserInfo == nil {
+		return voiceUserInfo{DiscordID: discordID}.withFallbacks()
+	}
+
+	info := lookupUserInfo(discordID)
+	if info.DiscordID == "" {
+		info.DiscordID = discordID
+	}
+	return info.withFallbacks()
+}
+
+func getCurrentChannelName(currentChannelName func() string, fallback string) string {
+	if currentChannelName != nil {
+		if channelName := currentChannelName(); channelName != "" {
+			return channelName
+		}
+	}
+	if fallback != "" {
+		return fallback
+	}
+	return "voice"
 }

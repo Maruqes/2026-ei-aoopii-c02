@@ -26,3 +26,9 @@ class TranscriptionResponse(BaseModel):
     affected_chunks: list[ChunkResponse]
     model: str
     processing_ms: int
+
+
+class TranscriptionAcceptedResponse(BaseModel):
+    status: str
+    recording_filename: str
+    message: str

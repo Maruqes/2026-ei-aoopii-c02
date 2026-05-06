@@ -26,11 +26,13 @@ services:
       WHISPER_MODEL: ${WHISPER_MODEL:-base}
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-262144000}
       UPLOAD_TMP_DIR: ${UPLOAD_TMP_DIR:-.tmp/uploads}
+      RECORDINGS_DIR: /app/recordings
       KEEP_UPLOADS: ${KEEP_UPLOADS:-false}
     ports:
       - "${API_PORT:-8000}:8000"
     volumes:
       - ./src:/app/src
+      - ./discord_bot/recordings:/app/recordings
       - api_uploads:/app/.tmp/uploads
       - whisper_cache:/root/.cache/whisper
     depends_on:

@@ -29,6 +29,8 @@ go.work.sum
 .tmp/
 __pycache__/
 .pytest_cache/
+recordings/
+discord_bot/recordings/
 
 # Editor/IDE
 # .idea/

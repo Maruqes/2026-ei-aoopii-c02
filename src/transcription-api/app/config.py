@@ -21,6 +21,7 @@ class Settings:
     whisper_model: str = "base"
     max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES
     upload_tmp_dir: Path = Path(".tmp/uploads")
+    recordings_dir: Path = Path("discord_bot/recordings")
     keep_uploads: bool = False
 
     @classmethod
@@ -34,5 +35,6 @@ class Settings:
             whisper_model=os.getenv("WHISPER_MODEL", "base"),
             max_upload_bytes=int(os.getenv("MAX_UPLOAD_BYTES", str(DEFAULT_MAX_UPLOAD_BYTES))),
             upload_tmp_dir=Path(os.getenv("UPLOAD_TMP_DIR", ".tmp/uploads")),
+            recordings_dir=Path(os.getenv("RECORDINGS_DIR", "discord_bot/recordings")),
             keep_uploads=env_bool("KEEP_UPLOADS", False),
         )
