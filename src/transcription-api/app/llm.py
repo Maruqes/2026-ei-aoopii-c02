@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from typing import Protocol
-from urllib import request
+from urllib import error, request
 
 from data.repository import UserProfile
 
@@ -13,7 +13,7 @@ class GeneratedProfile:
     summary: str
     interests: str
     communication_style: str
-    known_facts: str
+    persona_notes: str
     recent_updates: str
 
 
@@ -60,14 +60,15 @@ class GrokClient:
         existing = asdict(existing_profile) if existing_profile else {}
         content = self._complete(
             system=(
-                "You update observational Discord user profiles from transcripts. "
-                "Use only supported facts and careful observations. Do not diagnose, rank, or infer sensitive traits. "
-                "Return strict JSON with keys: summary, interests, communication_style, known_facts, recent_updates."
+                "You write lively, creative Discord user profiles from voice-call transcripts. "
+                "Make the profile feel specific, colorful, and useful for understanding the person's vibe, while staying grounded in what they actually said. "
+                "Do not list identifiers, usernames, Discord IDs, or generic account facts. "
+                "Return strict JSON with keys: summary, interests, communication_style, persona_notes, recent_updates."
             ),
             user=(
                 f"User: {username}\n\n"
                 f"Existing cached profile JSON:\n{json.dumps(existing, default=str)}\n\n"
-                f"Existing Google Doc text:\n{existing_doc_text or '<empty>'}\n\n"
+                f"Existing profile document text:\n{existing_doc_text or '<empty>'}\n\n"
                 f"Latest session transcript:\n{transcript}"
             ),
         )
@@ -124,17 +125,17 @@ class OllamaClient:
         existing = asdict(existing_profile) if existing_profile else {}
         content = self._chat(
             system=(
-                "You update observational Discord user profiles from transcripts. "
-                "Use only supported facts and careful observations. Do not diagnose, rank, or infer sensitive traits. "
-                "Return only valid JSON with keys: summary, interests, communication_style, known_facts, recent_updates."
+                "You write lively, creative Discord user profiles from voice-call transcripts. "
+                "Make the profile feel specific, colorful, and useful for understanding the person's vibe, while staying grounded in what they actually said. "
+                "Do not list identifiers, usernames, Discord IDs, or generic account facts. "
+                "Return only valid JSON with keys: summary, interests, communication_style, persona_notes, recent_updates."
             ),
             user=(
                 f"User: {username}\n\n"
                 f"Existing cached profile JSON:\n{json.dumps(existing, default=str)}\n\n"
-                f"Existing Google Doc text:\n{existing_doc_text or '<empty>'}\n\n"
+                f"Existing profile document text:\n{existing_doc_text or '<empty>'}\n\n"
                 f"Latest session transcript:\n{transcript}"
             ),
-            json_format=True,
         )
         return generated_profile_from_json(content)
 
@@ -157,13 +158,24 @@ class OllamaClient:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with request.urlopen(req, timeout=180) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        try:
+            with request.urlopen(req, timeout=180) as response:
+                raw = response.read().decode("utf-8")
+        except error.HTTPError as exc:
+            raw_error = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Ollama HTTP {exc.code}: {raw_error}") from exc
+        except error.URLError as exc:
+            raise RuntimeError(f"Ollama is not reachable at {self.base_url}: {exc.reason}") from exc
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Ollama returned non-JSON response: {raw[:500]}") from exc
 
         message = data.get("message") or {}
         content = str(message.get("content", "")).strip()
         if not content:
-            raise RuntimeError("Ollama response did not include message.content")
+            raise RuntimeError(f"Ollama response did not include message.content: {json.dumps(data)[:1000]}")
         return content
 
 
@@ -178,6 +190,6 @@ def generated_profile_from_json(raw: str) -> GeneratedProfile:
         summary=str(data.get("summary", "")).strip(),
         interests=str(data.get("interests", "")).strip(),
         communication_style=str(data.get("communication_style", "")).strip(),
-        known_facts=str(data.get("known_facts", "")).strip(),
+        persona_notes=str(data.get("persona_notes", data.get("known_facts", ""))).strip(),
         recent_updates=str(data.get("recent_updates", "")).strip(),
     )

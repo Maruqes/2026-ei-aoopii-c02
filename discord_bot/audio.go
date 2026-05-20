@@ -342,6 +342,9 @@ func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 	channelName := resolveVoiceChannelName(s, channelID)
 	transcriptionClient := NewTranscriptionClientFromEnv()
 	summaryChannelID := strings.TrimSpace(os.Getenv("DISCORD_SUMMARY_CHANNEL_ID"))
+	if summaryChannelID == "" {
+		log.Printf("DISCORD_SUMMARY_CHANNEL_ID nao definido; resumos nao serao publicados no Discord")
+	}
 	sessionID := createAPISession(transcriptionClient, guildID, channelID, channelName, summaryChannelID)
 	state := newVoiceConnectionState(vc, ssrcUsers, channelName, transcriptionClient, sessionID, summaryChannelID)
 	state.rememberUser(userInfo)

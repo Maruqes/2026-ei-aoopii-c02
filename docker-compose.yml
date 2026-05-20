@@ -34,13 +34,14 @@ services:
       XAI_MODEL: ${XAI_MODEL:-grok-4.3}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
-      GOOGLE_SERVICE_ACCOUNT_FILE: ${GOOGLE_SERVICE_ACCOUNT_FILE:-}
-      GOOGLE_DRIVE_FOLDER_ID: ${GOOGLE_DRIVE_FOLDER_ID:-}
+      PROFILE_DOCS_PROVIDER: ${PROFILE_DOCS_PROVIDER:-local}
+      LOCAL_PROFILE_DIR: ${LOCAL_PROFILE_DIR:-/app/profiles}
     ports:
       - "${API_PORT:-8000}:8000"
     volumes:
       - ./src:/app/src
       - ./discord_bot/recordings:/app/recordings
+      - ./profiles:/app/profiles
       - api_uploads:/app/.tmp/uploads
       - whisper_cache:/root/.cache/whisper
     depends_on:

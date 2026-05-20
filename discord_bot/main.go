@@ -81,7 +81,7 @@ func profileHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		respondText(s, i, fmt.Sprintf("Ainda nao ha perfil para %s.", targetName))
 		return
 	}
-	if strings.TrimSpace(profile.Summary+profile.Interests+profile.CommunicationStyle+profile.KnownFacts+profile.RecentUpdates) == "" {
+	if strings.TrimSpace(profile.Summary+profile.Interests+profile.CommunicationStyle+profile.PersonaNotes+profile.RecentUpdates) == "" {
 		respondText(s, i, fmt.Sprintf("Ainda nao ha perfil gerado para %s.", displayProfileName(profile, targetName)))
 		return
 	}
@@ -116,11 +116,11 @@ func profileEmbed(profile *UserProfileResponse, fallbackName string) *discordgo.
 		profileField("Summary", profile.Summary),
 		profileField("Interests", profile.Interests),
 		profileField("Communication Style", profile.CommunicationStyle),
-		profileField("Known Facts", profile.KnownFacts),
+		profileField("Persona Notes", profile.PersonaNotes),
 		profileField("Recent Updates", profile.RecentUpdates),
 	}
-	if strings.TrimSpace(stringValue(profile.GoogleDocURL)) != "" {
-		fields = append(fields, profileField("Google Doc", stringValue(profile.GoogleDocURL)))
+	if strings.TrimSpace(stringValue(profile.ProfileFileURL)) != "" {
+		fields = append(fields, profileField("Profile File", stringValue(profile.ProfileFileURL)))
 	}
 	return &discordgo.MessageEmbed{
 		Title:  "Profile: " + name,
@@ -172,7 +172,7 @@ func truncateDiscordField(value string) string {
 }
 
 func main() {
-	_ = godotenv.Load()
+	_ = godotenv.Load("../.env", ".env")
 
 	token := strings.TrimSpace(os.Getenv("DISCORD_TOKEN"))
 	appID := strings.TrimSpace(os.Getenv("DISCORD_APP_ID"))

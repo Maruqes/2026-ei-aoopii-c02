@@ -73,7 +73,7 @@ class UserProfileResponse(BaseModel):
     summary: str
     interests: str
     communication_style: str
-    known_facts: str
+    persona_notes: str
     recent_updates: str
     google_doc_url: str | None
     last_updated_at: datetime | None

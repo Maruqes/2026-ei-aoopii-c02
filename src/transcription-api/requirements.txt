@@ -4,7 +4,5 @@ python-multipart
 psycopg2-binary
 openai-whisper
 openai
-google-api-python-client
-google-auth
 pytest
 httpx

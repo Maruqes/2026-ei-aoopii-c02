@@ -69,9 +69,9 @@ type UserProfileResponse struct {
 	Summary            string  `json:"summary"`
 	Interests          string  `json:"interests"`
 	CommunicationStyle string  `json:"communication_style"`
-	KnownFacts         string  `json:"known_facts"`
+	PersonaNotes       string  `json:"persona_notes"`
 	RecentUpdates      string  `json:"recent_updates"`
-	GoogleDocURL       *string `json:"google_doc_url"`
+	ProfileFileURL     *string `json:"google_doc_url"`
 }
 
 func NewTranscriptionClientFromEnv() *TranscriptionClient {

@@ -4,7 +4,7 @@ from datetime import datetime
 
 from data.repository import DataRepository, SessionParticipant, UserProfile, normalize_timestamp
 
-from .docs_client import GoogleDocsProfileClient
+from .docs_client import LocalMarkdownProfileClient
 from .llm import GeneratedProfile, LLMClient
 
 
@@ -14,7 +14,7 @@ class SessionAgent:
         *,
         repository: DataRepository,
         llm: LLMClient,
-        docs: GoogleDocsProfileClient,
+        docs: LocalMarkdownProfileClient,
     ):
         self.repository = repository
         self.llm = llm
@@ -55,7 +55,7 @@ class SessionAgent:
                 summary=generated.summary,
                 interests=generated.interests,
                 communication_style=generated.communication_style,
-                known_facts=generated.known_facts,
+                known_facts=generated.persona_notes,
                 recent_updates=generated.recent_updates,
                 google_doc_id=stored_doc.doc_id,
                 google_doc_url=stored_doc.url,
@@ -91,6 +91,6 @@ def blank_profile() -> GeneratedProfile:
         summary="",
         interests="",
         communication_style="",
-        known_facts="",
+        persona_notes="",
         recent_updates="",
     )

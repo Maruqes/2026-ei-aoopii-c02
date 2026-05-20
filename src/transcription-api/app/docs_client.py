@@ -1,15 +1,10 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from .llm import GeneratedProfile
-
-
-DOC_SCOPES = [
-    "https://www.googleapis.com/auth/documents",
-    "https://www.googleapis.com/auth/drive.file",
-]
 
 
 @dataclass(frozen=True)
@@ -18,23 +13,17 @@ class StoredDoc:
     url: str | None
 
 
-class GoogleDocsProfileClient:
-    def __init__(self, *, service_account_file: Path | None, drive_folder_id: str | None):
-        self.service_account_file = service_account_file
-        self.drive_folder_id = drive_folder_id
-        self._docs = None
-        self._drive = None
-
-    @property
-    def enabled(self) -> bool:
-        return self.service_account_file is not None and self.service_account_file.exists()
+class LocalMarkdownProfileClient:
+    def __init__(self, *, profile_dir: Path):
+        self.profile_dir = profile_dir
 
     def read_doc_text(self, doc_id: str | None) -> str:
-        if not self.enabled or not doc_id:
+        if not doc_id:
             return ""
-
-        document = self._docs_service().documents().get(documentId=doc_id).execute()
-        return document_plain_text(document)
+        path = self._resolve_path(doc_id)
+        if not path.exists():
+            return ""
+        return path.read_text(encoding="utf-8")
 
     def upsert_profile_doc(
         self,
@@ -43,101 +32,30 @@ class GoogleDocsProfileClient:
         username: str,
         profile: GeneratedProfile,
     ) -> StoredDoc:
-        if not self.enabled:
-            return StoredDoc(doc_id=doc_id, url=doc_url(doc_id))
+        self.profile_dir.mkdir(parents=True, exist_ok=True)
+        filename = doc_id or f"{safe_filename(username)}.md"
+        path = self.profile_dir / filename
+        path.write_text(format_profile_markdown(username, profile), encoding="utf-8")
+        return StoredDoc(doc_id=filename, url=str(path))
 
-        if not doc_id:
-            doc_id = self._create_doc(username)
-
-        document = self._docs_service().documents().get(documentId=doc_id).execute()
-        end_index = document_end_index(document)
-        text = format_profile_doc(username, profile)
-        requests = []
-        if end_index > 2:
-            requests.append({"deleteContentRange": {"range": {"startIndex": 1, "endIndex": end_index - 1}}})
-        requests.append({"insertText": {"location": {"index": 1}, "text": text}})
-        self._docs_service().documents().batchUpdate(
-            documentId=doc_id,
-            body={"requests": requests},
-        ).execute()
-        return StoredDoc(doc_id=doc_id, url=doc_url(doc_id))
-
-    def _create_doc(self, username: str) -> str:
-        title = f"Discord Profile - {username}"
-        if self.drive_folder_id:
-            file = (
-                self._drive_service()
-                .files()
-                .create(
-                    body={
-                        "name": title,
-                        "mimeType": "application/vnd.google-apps.document",
-                        "parents": [self.drive_folder_id],
-                    },
-                    fields="id",
-                )
-                .execute()
-            )
-            return str(file["id"])
-
-        document = self._docs_service().documents().create(body={"title": title}).execute()
-        return str(document["documentId"])
-
-    def _credentials(self):
-        from google.oauth2 import service_account
-
-        return service_account.Credentials.from_service_account_file(
-            str(self.service_account_file),
-            scopes=DOC_SCOPES,
-        )
-
-    def _docs_service(self):
-        if self._docs is None:
-            from googleapiclient.discovery import build
-
-            self._docs = build("docs", "v1", credentials=self._credentials())
-        return self._docs
-
-    def _drive_service(self):
-        if self._drive is None:
-            from googleapiclient.discovery import build
-
-            self._drive = build("drive", "v3", credentials=self._credentials())
-        return self._drive
+    def _resolve_path(self, doc_id: str) -> Path:
+        path = Path(doc_id)
+        if path.is_absolute():
+            return path
+        return self.profile_dir / doc_id
 
 
-def doc_url(doc_id: str | None) -> str | None:
-    if not doc_id:
-        return None
-    return f"https://docs.google.com/document/d/{doc_id}/edit"
-
-
-def format_profile_doc(username: str, profile: GeneratedProfile) -> str:
+def format_profile_markdown(username: str, profile: GeneratedProfile) -> str:
     return (
-        f"{username}\n\n"
-        f"Summary\n{profile.summary}\n\n"
-        f"Interests\n{profile.interests}\n\n"
-        f"Communication Style\n{profile.communication_style}\n\n"
-        f"Known Facts\n{profile.known_facts}\n\n"
-        f"Recent Updates\n{profile.recent_updates}\n"
+        f"# {username}\n\n"
+        f"## Summary\n{profile.summary}\n\n"
+        f"## Interests\n{profile.interests}\n\n"
+        f"## Communication Style\n{profile.communication_style}\n\n"
+        f"## Persona Notes\n{profile.persona_notes}\n\n"
+        f"## Recent Updates\n{profile.recent_updates}\n"
     )
 
 
-def document_plain_text(document: dict) -> str:
-    parts: list[str] = []
-    for element in document.get("body", {}).get("content", []):
-        paragraph = element.get("paragraph")
-        if not paragraph:
-            continue
-        for item in paragraph.get("elements", []):
-            text_run = item.get("textRun")
-            if text_run:
-                parts.append(text_run.get("content", ""))
-    return "".join(parts).strip()
-
-
-def document_end_index(document: dict) -> int:
-    content = document.get("body", {}).get("content", [])
-    if not content:
-        return 1
-    return int(content[-1].get("endIndex", 1))
+def safe_filename(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip("-._")
+    return cleaned or "profile"

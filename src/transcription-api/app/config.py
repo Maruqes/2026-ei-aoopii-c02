@@ -29,8 +29,8 @@ class Settings:
     xai_model: str = "grok-4.3"
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3.5:2b"
-    google_service_account_file: Path | None = None
-    google_drive_folder_id: str | None = None
+    profile_docs_provider: str = "local"
+    local_profile_dir: Path = Path("profiles")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -38,7 +38,6 @@ class Settings:
         if not database_url:
             database_url = "postgresql://discord:discord@127.0.0.1:5432/discord_anthropologist"
 
-        service_account = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
         return cls(
             database_url=database_url,
             whisper_model=os.getenv("WHISPER_MODEL", "base"),
@@ -52,6 +51,6 @@ class Settings:
             xai_model=os.getenv("XAI_MODEL", "grok-4.3"),
             ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             ollama_model=os.getenv("OLLAMA_MODEL", "qwen3.5:2b"),
-            google_service_account_file=Path(service_account) if service_account else None,
-            google_drive_folder_id=os.getenv("GOOGLE_DRIVE_FOLDER_ID"),
+            profile_docs_provider=os.getenv("PROFILE_DOCS_PROVIDER", "local").strip().lower(),
+            local_profile_dir=Path(os.getenv("LOCAL_PROFILE_DIR", "profiles")),
         )

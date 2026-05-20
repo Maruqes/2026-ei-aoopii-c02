@@ -68,3 +68,13 @@ OLLAMA_BASE_URL=http://host.docker.internal:11434
 ```
 
 Use `http://localhost:11434` for `OLLAMA_BASE_URL` only when the API is running directly on the host instead of inside Docker.
+
+Profiles are written to local Markdown files by default:
+
+```text
+PROFILE_DOCS_PROVIDER=local
+LOCAL_PROFILE_DIR=/app/profiles
+```
+
+Docker maps `/app/profiles` to `./profiles` in the repo.
+Generated profile files use these sections: Summary, Interests, Communication Style, Persona Notes, and Recent Updates.

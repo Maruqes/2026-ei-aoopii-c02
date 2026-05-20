@@ -17,7 +17,7 @@ from data.repository import DataRepository, MessageInsert, UserProfile, VoiceSes
 
 from .agent import SessionAgent
 from .config import Settings
-from .docs_client import GoogleDocsProfileClient
+from .docs_client import LocalMarkdownProfileClient
 from .llm import GrokClient, LLMClient, OllamaClient
 from .schemas import (
     CreateSessionRequest,
@@ -73,7 +73,7 @@ def create_app() -> FastAPI:
         repository: DataRepository = Depends(get_repository),
         transcriber: WhisperTranscriber = Depends(get_transcriber),
         llm: LLMClient = Depends(get_llm_client),
-        docs: GoogleDocsProfileClient = Depends(get_docs_client),
+        docs: LocalMarkdownProfileClient = Depends(get_docs_client),
     ) -> TranscriptionAcceptedResponse:
         started = time.perf_counter()
         logger.info(
@@ -166,7 +166,7 @@ def create_app() -> FastAPI:
         request: FinishSessionRequest,
         repository: DataRepository = Depends(get_repository),
         llm: LLMClient = Depends(get_llm_client),
-        docs: GoogleDocsProfileClient = Depends(get_docs_client),
+        docs: LocalMarkdownProfileClient = Depends(get_docs_client),
     ) -> VoiceSessionResponse:
         session = repository.finish_voice_session(session_id, request.ended_at or datetime.now(timezone.utc))
         if session is None:
@@ -222,11 +222,10 @@ def get_llm_client(settings: Settings = Depends(get_settings)) -> LLMClient:
     return GrokClient(api_key=settings.xai_api_key, base_url=settings.xai_base_url, model=settings.xai_model)
 
 
-def get_docs_client(settings: Settings = Depends(get_settings)) -> GoogleDocsProfileClient:
-    return GoogleDocsProfileClient(
-        service_account_file=settings.google_service_account_file,
-        drive_folder_id=settings.google_drive_folder_id,
-    )
+def get_docs_client(settings: Settings = Depends(get_settings)):
+    if settings.profile_docs_provider != "local":
+        raise RuntimeError(f"Unsupported PROFILE_DOCS_PROVIDER: {settings.profile_docs_provider}")
+    return LocalMarkdownProfileClient(profile_dir=settings.local_profile_dir)
 
 
 def validate_metadata(discord_id: str, username: str, channel_name: str) -> None:
@@ -312,7 +311,7 @@ def schedule_transcription_job(
     repository: DataRepository,
     transcriber: WhisperTranscriber,
     llm: LLMClient,
-    docs: GoogleDocsProfileClient,
+    docs: LocalMarkdownProfileClient,
 ) -> None:
     logger.info(
         "job transcricao agendado file=%s discord_id=%s username=%s channel=%s",
@@ -357,7 +356,7 @@ def process_recording_file(
     repository: DataRepository,
     transcriber: WhisperTranscriber,
     llm: LLMClient | None = None,
-    docs: GoogleDocsProfileClient | None = None,
+    docs: LocalMarkdownProfileClient | None = None,
 ) -> None:
     started = time.perf_counter()
     try:
@@ -439,7 +438,7 @@ def maybe_schedule_session_agent(
     session_id: int,
     repository: DataRepository,
     llm: LLMClient,
-    docs: GoogleDocsProfileClient,
+    docs: LocalMarkdownProfileClient,
 ) -> None:
     thread = threading.Thread(
         target=process_session_agent,
@@ -459,7 +458,7 @@ def process_session_agent(
     session_id: int,
     repository: DataRepository,
     llm: LLMClient,
-    docs: GoogleDocsProfileClient,
+    docs: LocalMarkdownProfileClient,
 ) -> None:
     try:
         if not repository.claim_session_agent_run(session_id):
@@ -495,7 +494,7 @@ def user_profile_response(profile: UserProfile) -> UserProfileResponse:
         summary=profile.summary,
         interests=profile.interests,
         communication_style=profile.communication_style,
-        known_facts=profile.known_facts,
+        persona_notes=profile.known_facts,
         recent_updates=profile.recent_updates,
         google_doc_url=profile.google_doc_url,
         last_updated_at=profile.last_updated_at,
