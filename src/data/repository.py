@@ -32,6 +32,44 @@ class TranscriptionInsertResult:
     affected_chunks: list[ChunkInfo]
 
 
+@dataclass(frozen=True)
+class VoiceSession:
+    id: int
+    guild_id: str
+    voice_channel_id: str
+    channel_name: str
+    summary_channel_id: str | None
+    started_at: datetime
+    ended_at: datetime | None
+    status: str
+    summary: str | None
+    agent_error: str | None
+
+
+@dataclass(frozen=True)
+class SessionParticipant:
+    user_id: int
+    discord_id: str
+    username: str
+    display_name: str | None
+
+
+@dataclass(frozen=True)
+class UserProfile:
+    user_id: int
+    discord_id: str
+    username: str
+    display_name: str | None
+    summary: str
+    interests: str
+    communication_style: str
+    known_facts: str
+    recent_updates: str
+    google_doc_id: str | None
+    google_doc_url: str | None
+    last_updated_at: datetime | None
+
+
 def normalize_timestamp(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
@@ -77,6 +115,7 @@ class DataRepository:
     def insert_transcription_segments(
         self,
         *,
+        session_id: int | None = None,
         discord_id: str,
         username: str,
         display_name: str | None,
@@ -92,7 +131,7 @@ class DataRepository:
         conn = connect(self.database_url)
         try:
             user_id = self._upsert_user(conn, discord_id, username, display_name)
-            message_ids = self._insert_messages(conn, user_id, channel_name, normalized_messages)
+            message_ids = self._insert_messages(conn, user_id, session_id, channel_name, normalized_messages)
             chunks = self._rebuild_chunks(conn, channel_name, [message.tstamp for message in normalized_messages])
             conn.commit()
             return TranscriptionInsertResult(
@@ -131,6 +170,7 @@ class DataRepository:
         self,
         conn,
         user_id: int,
+        session_id: int | None,
         channel_name: str,
         messages: list[MessageInsert],
     ) -> list[int]:
@@ -139,11 +179,11 @@ class DataRepository:
         for message in messages:
             cur.execute(
                 """
-                INSERT INTO messages (user_id, source_type, channel_name, content, tstamp)
-                VALUES (%s, 'voice', %s, %s, %s)
+                INSERT INTO messages (user_id, session_id, source_type, channel_name, content, tstamp)
+                VALUES (%s, %s, 'voice', %s, %s, %s)
                 RETURNING id
                 """,
-                (user_id, channel_name, message.content, message.tstamp),
+                (user_id, session_id, channel_name, message.content, message.tstamp),
             )
             ids.append(int(cur.fetchone()[0]))
         return ids
@@ -195,6 +235,342 @@ class DataRepository:
             )
         return rebuilt
 
+    def create_voice_session(
+        self,
+        *,
+        guild_id: str,
+        voice_channel_id: str,
+        channel_name: str,
+        summary_channel_id: str | None,
+        started_at: datetime,
+    ) -> VoiceSession:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO voice_sessions (
+                    guild_id, voice_channel_id, channel_name, summary_channel_id, started_at, status
+                )
+                VALUES (%s, %s, %s, %s, %s, 'open')
+                RETURNING id, guild_id, voice_channel_id, channel_name, summary_channel_id,
+                          started_at, ended_at, status, summary, agent_error
+                """,
+                (
+                    guild_id.strip(),
+                    voice_channel_id.strip(),
+                    channel_name.strip() or "voice",
+                    summary_channel_id.strip() if summary_channel_id else None,
+                    normalize_timestamp(started_at),
+                ),
+            )
+            session = voice_session_from_row(cur.fetchone())
+            conn.commit()
+            return session
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def finish_voice_session(self, session_id: int, ended_at: datetime) -> VoiceSession | None:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE voice_sessions
+                SET ended_at = COALESCE(ended_at, %s),
+                    status = CASE WHEN status = 'open' THEN 'finished' ELSE status END,
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING id, guild_id, voice_channel_id, channel_name, summary_channel_id,
+                          started_at, ended_at, status, summary, agent_error
+                """,
+                (normalize_timestamp(ended_at), session_id),
+            )
+            row = cur.fetchone()
+            conn.commit()
+            return voice_session_from_row(row) if row else None
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def get_voice_session(self, session_id: int) -> VoiceSession | None:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT id, guild_id, voice_channel_id, channel_name, summary_channel_id,
+                       started_at, ended_at, status, summary, agent_error
+                FROM voice_sessions
+                WHERE id = %s
+                """,
+                (session_id,),
+            )
+            row = cur.fetchone()
+            return voice_session_from_row(row) if row else None
+        finally:
+            conn.close()
+
+    def start_recording(self, *, session_id: int | None, recording_filename: str, discord_id: str) -> int | None:
+        if session_id is None:
+            return None
+
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO voice_recordings (session_id, recording_filename, discord_id, status, error)
+                VALUES (%s, %s, %s, 'transcribing', NULL)
+                ON CONFLICT (recording_filename) DO UPDATE
+                SET session_id = EXCLUDED.session_id,
+                    discord_id = EXCLUDED.discord_id,
+                    status = 'transcribing',
+                    error = NULL,
+                    updated_at = NOW()
+                RETURNING id
+                """,
+                (session_id, recording_filename, discord_id),
+            )
+            recording_id = int(cur.fetchone()[0])
+            conn.commit()
+            return recording_id
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def mark_recording_completed(self, recording_id: int | None) -> None:
+        self._mark_recording(recording_id, "completed", None)
+
+    def mark_recording_failed(self, recording_id: int | None, error: str) -> None:
+        self._mark_recording(recording_id, "failed", error)
+
+    def _mark_recording(self, recording_id: int | None, status: str, error: str | None) -> None:
+        if recording_id is None:
+            return
+
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE voice_recordings
+                SET status = %s,
+                    error = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (status, error, recording_id),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def claim_session_agent_run(self, session_id: int) -> bool:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE voice_sessions
+                SET status = 'agent_running',
+                    agent_error = NULL,
+                    updated_at = NOW()
+                WHERE id = %s
+                  AND status = 'finished'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM voice_recordings
+                      WHERE session_id = voice_sessions.id
+                        AND status IN ('transcribing', 'pending')
+                  )
+                RETURNING id
+                """,
+                (session_id,),
+            )
+            claimed = cur.fetchone() is not None
+            conn.commit()
+            return claimed
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def mark_session_agent_done(self, session_id: int, summary: str) -> None:
+        self._mark_session_agent_result(session_id, "agent_done", summary, None)
+
+    def mark_session_agent_failed(self, session_id: int, error: str) -> None:
+        self._mark_session_agent_result(session_id, "agent_failed", None, error)
+
+    def _mark_session_agent_result(
+        self,
+        session_id: int,
+        status: str,
+        summary: str | None,
+        error: str | None,
+    ) -> None:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE voice_sessions
+                SET status = %s,
+                    summary = COALESCE(%s, summary),
+                    agent_error = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (status, summary, error, session_id),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def get_session_messages(self, session_id: int) -> list[dict]:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT m.tstamp, u.discord_id, u.username, u.display_name, m.channel_name, m.content
+                FROM messages m
+                JOIN users u ON u.id = m.user_id
+                WHERE m.session_id = %s
+                ORDER BY m.tstamp ASC, m.id ASC
+                """,
+                (session_id,),
+            )
+            return [
+                {
+                    "tstamp": row[0],
+                    "discord_id": row[1],
+                    "username": row[2],
+                    "display_name": row[3],
+                    "channel_name": row[4],
+                    "content": row[5],
+                }
+                for row in cur.fetchall()
+            ]
+        finally:
+            conn.close()
+
+    def get_session_participants(self, session_id: int) -> list[SessionParticipant]:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT DISTINCT u.id, u.discord_id, u.username, u.display_name
+                FROM messages m
+                JOIN users u ON u.id = m.user_id
+                WHERE m.session_id = %s
+                ORDER BY u.username ASC
+                """,
+                (session_id,),
+            )
+            return [
+                SessionParticipant(
+                    user_id=int(row[0]),
+                    discord_id=row[1],
+                    username=row[2],
+                    display_name=row[3],
+                )
+                for row in cur.fetchall()
+            ]
+        finally:
+            conn.close()
+
+    def get_user_profile_by_discord_id(self, discord_id: str) -> UserProfile | None:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT u.id, u.discord_id, u.username, u.display_name,
+                       COALESCE(p.summary, ''),
+                       COALESCE(p.interests, ''),
+                       COALESCE(p.communication_style, ''),
+                       COALESCE(p.known_facts, ''),
+                       COALESCE(p.recent_updates, ''),
+                       p.google_doc_id,
+                       p.google_doc_url,
+                       p.last_updated_at
+                FROM users u
+                LEFT JOIN user_profiles p ON p.user_id = u.id
+                WHERE u.discord_id = %s
+                """,
+                (discord_id.strip(),),
+            )
+            row = cur.fetchone()
+            return user_profile_from_row(row) if row else None
+        finally:
+            conn.close()
+
+    def upsert_user_profile(
+        self,
+        *,
+        user_id: int,
+        summary: str,
+        interests: str,
+        communication_style: str,
+        known_facts: str,
+        recent_updates: str,
+        google_doc_id: str | None,
+        google_doc_url: str | None,
+    ) -> None:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO user_profiles (
+                    user_id, summary, interests, communication_style, known_facts,
+                    recent_updates, google_doc_id, google_doc_url, last_updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (user_id) DO UPDATE
+                SET summary = EXCLUDED.summary,
+                    interests = EXCLUDED.interests,
+                    communication_style = EXCLUDED.communication_style,
+                    known_facts = EXCLUDED.known_facts,
+                    recent_updates = EXCLUDED.recent_updates,
+                    google_doc_id = COALESCE(EXCLUDED.google_doc_id, user_profiles.google_doc_id),
+                    google_doc_url = COALESCE(EXCLUDED.google_doc_url, user_profiles.google_doc_url),
+                    last_updated_at = NOW()
+                """,
+                (
+                    user_id,
+                    summary.strip(),
+                    interests.strip(),
+                    communication_style.strip(),
+                    known_facts.strip(),
+                    recent_updates.strip(),
+                    google_doc_id,
+                    google_doc_url,
+                ),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
 
 def connect(database_url: str):
     parsed = urlparse(database_url)
@@ -206,4 +582,36 @@ def connect(database_url: str):
         host=parsed.hostname or "localhost",
         port=parsed.port or 5432,
         dbname=parsed.path.lstrip("/"),
+    )
+
+
+def voice_session_from_row(row) -> VoiceSession:
+    return VoiceSession(
+        id=int(row[0]),
+        guild_id=row[1],
+        voice_channel_id=row[2],
+        channel_name=row[3],
+        summary_channel_id=row[4],
+        started_at=row[5],
+        ended_at=row[6],
+        status=row[7],
+        summary=row[8],
+        agent_error=row[9],
+    )
+
+
+def user_profile_from_row(row) -> UserProfile:
+    return UserProfile(
+        user_id=int(row[0]),
+        discord_id=row[1],
+        username=row[2],
+        display_name=row[3],
+        summary=row[4],
+        interests=row[5],
+        communication_style=row[6],
+        known_facts=row[7],
+        recent_updates=row[8],
+        google_doc_id=row[9],
+        google_doc_url=row[10],
+        last_updated_at=row[11],
     )

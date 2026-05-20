@@ -37,3 +37,34 @@ The API returns `200` immediately and transcribes the recording in a background 
 It expects `recording_filename` to exist inside `RECORDINGS_DIR`. Locally, the default is
 `discord_bot/recordings`; in Docker Compose, `./discord_bot/recordings` is mounted into
 the API container as `/app/recordings`, so the Go bot and Python API share the same WAV files.
+
+Session flow:
+
+```powershell
+curl -X POST http://localhost:8000/v1/sessions `
+  -H "Content-Type: application/json" `
+  -d '{"guild_id":"guild","voice_channel_id":"voice","channel_name":"General","summary_channel_id":"text"}'
+
+curl -X POST http://localhost:8000/v1/sessions/1/finish `
+  -H "Content-Type: application/json" `
+  -d '{}'
+
+curl http://localhost:8000/v1/sessions/1/summary
+curl http://localhost:8000/v1/users/123/profile
+```
+
+Use Ollama instead of Grok for free local testing:
+
+```powershell
+ollama pull qwen2.5:7b
+```
+
+Then set:
+
+```text
+LLM_PROVIDER=ollama
+OLLAMA_MODEL=qwen2.5:7b
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+```
+
+Use `http://localhost:11434` for `OLLAMA_BASE_URL` only when the API is running directly on the host instead of inside Docker.

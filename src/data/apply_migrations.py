@@ -19,13 +19,9 @@ def apply_migrations(database_url: str) -> None:
     try:
         cur = conn.cursor()
         for migration in migrations:
-            statements = [
-                statement.strip()
-                for statement in migration.read_text(encoding="utf-8").split(";")
-                if statement.strip()
-            ]
-            for statement in statements:
-                cur.execute(statement)
+            sql = migration.read_text(encoding="utf-8").strip()
+            if sql:
+                cur.execute(sql)
         conn.commit()
     except Exception:
         conn.rollback()

@@ -13,10 +13,20 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from data.repository import DataRepository, MessageInsert  # noqa: E402
+from data.repository import DataRepository, MessageInsert, UserProfile, VoiceSession  # noqa: E402
 
+from .agent import SessionAgent
 from .config import Settings
-from .schemas import TranscriptionAcceptedResponse
+from .docs_client import GoogleDocsProfileClient
+from .llm import GrokClient, LLMClient, OllamaClient
+from .schemas import (
+    CreateSessionRequest,
+    FinishSessionRequest,
+    SessionSummaryResponse,
+    TranscriptionAcceptedResponse,
+    UserProfileResponse,
+    VoiceSessionResponse,
+)
 from .transcriber import WhisperResult, WhisperTranscriber
 
 
@@ -57,10 +67,13 @@ def create_app() -> FastAPI:
         username: str = Form(...),
         channel_name: str = Form(...),
         recording_started_at: datetime = Form(...),
+        session_id: int | None = Form(None),
         display_name: str | None = Form(None),
         settings: Settings = Depends(get_settings),
         repository: DataRepository = Depends(get_repository),
         transcriber: WhisperTranscriber = Depends(get_transcriber),
+        llm: LLMClient = Depends(get_llm_client),
+        docs: GoogleDocsProfileClient = Depends(get_docs_client),
     ) -> TranscriptionAcceptedResponse:
         started = time.perf_counter()
         logger.info(
@@ -78,9 +91,16 @@ def create_app() -> FastAPI:
             recording_path = resolve_recording_path(recording_filename, settings)
             validate_upload_name(recording_path.name)
             validate_recording_file(recording_path, settings)
+            recording_id = repository.start_recording(
+                session_id=session_id,
+                recording_filename=recording_path.name,
+                discord_id=discord_id.strip(),
+            )
 
             schedule_transcription_job(
                 recording_path=recording_path,
+                session_id=session_id,
+                recording_id=recording_id,
                 discord_id=discord_id.strip(),
                 username=username.strip(),
                 display_name=display_name.strip() if display_name else None,
@@ -89,6 +109,8 @@ def create_app() -> FastAPI:
                 settings=settings,
                 repository=repository,
                 transcriber=transcriber,
+                llm=llm,
+                docs=docs,
             )
         except HTTPException as exc:
             logger.warning(
@@ -123,6 +145,60 @@ def create_app() -> FastAPI:
             message="Transcription scheduled",
         )
 
+    @service.post("/v1/sessions", response_model=VoiceSessionResponse)
+    def create_session(
+        request: CreateSessionRequest,
+        repository: DataRepository = Depends(get_repository),
+    ) -> VoiceSessionResponse:
+        validate_metadata(request.guild_id, request.voice_channel_id, request.channel_name)
+        session = repository.create_voice_session(
+            guild_id=request.guild_id,
+            voice_channel_id=request.voice_channel_id,
+            channel_name=request.channel_name,
+            summary_channel_id=request.summary_channel_id,
+            started_at=request.started_at or datetime.now(timezone.utc),
+        )
+        return voice_session_response(session)
+
+    @service.post("/v1/sessions/{session_id}/finish", response_model=VoiceSessionResponse)
+    def finish_session(
+        session_id: int,
+        request: FinishSessionRequest,
+        repository: DataRepository = Depends(get_repository),
+        llm: LLMClient = Depends(get_llm_client),
+        docs: GoogleDocsProfileClient = Depends(get_docs_client),
+    ) -> VoiceSessionResponse:
+        session = repository.finish_voice_session(session_id, request.ended_at or datetime.now(timezone.utc))
+        if session is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+        maybe_schedule_session_agent(session_id, repository, llm, docs)
+        return voice_session_response(session)
+
+    @service.get("/v1/sessions/{session_id}/summary", response_model=SessionSummaryResponse)
+    def get_session_summary(
+        session_id: int,
+        repository: DataRepository = Depends(get_repository),
+    ) -> SessionSummaryResponse:
+        session = repository.get_voice_session(session_id)
+        if session is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+        return SessionSummaryResponse(
+            session_id=session.id,
+            status=session.status,
+            summary=session.summary,
+            agent_error=session.agent_error,
+        )
+
+    @service.get("/v1/users/{discord_id}/profile", response_model=UserProfileResponse)
+    def get_user_profile(
+        discord_id: str,
+        repository: DataRepository = Depends(get_repository),
+    ) -> UserProfileResponse:
+        profile = repository.get_user_profile_by_discord_id(discord_id)
+        if profile is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        return user_profile_response(profile)
+
     return service
 
 
@@ -136,6 +212,21 @@ def get_repository(settings: Settings = Depends(get_settings)) -> DataRepository
 
 def get_transcriber(settings: Settings = Depends(get_settings)) -> WhisperTranscriber:
     return WhisperTranscriber(settings.whisper_model)
+
+
+def get_llm_client(settings: Settings = Depends(get_settings)) -> LLMClient:
+    if settings.llm_provider == "ollama":
+        return OllamaClient(base_url=settings.ollama_base_url, model=settings.ollama_model)
+    if settings.llm_provider != "xai":
+        raise RuntimeError(f"Unsupported LLM_PROVIDER: {settings.llm_provider}")
+    return GrokClient(api_key=settings.xai_api_key, base_url=settings.xai_base_url, model=settings.xai_model)
+
+
+def get_docs_client(settings: Settings = Depends(get_settings)) -> GoogleDocsProfileClient:
+    return GoogleDocsProfileClient(
+        service_account_file=settings.google_service_account_file,
+        drive_folder_id=settings.google_drive_folder_id,
+    )
 
 
 def validate_metadata(discord_id: str, username: str, channel_name: str) -> None:
@@ -210,6 +301,8 @@ def validate_recording_file(recording_path: Path, settings: Settings) -> None:
 def schedule_transcription_job(
     *,
     recording_path: Path,
+    session_id: int | None,
+    recording_id: int | None,
     discord_id: str,
     username: str,
     display_name: str | None,
@@ -218,6 +311,8 @@ def schedule_transcription_job(
     settings: Settings,
     repository: DataRepository,
     transcriber: WhisperTranscriber,
+    llm: LLMClient,
+    docs: GoogleDocsProfileClient,
 ) -> None:
     logger.info(
         "job transcricao agendado file=%s discord_id=%s username=%s channel=%s",
@@ -230,6 +325,8 @@ def schedule_transcription_job(
         target=process_recording_file,
         kwargs={
             "recording_path": recording_path,
+            "session_id": session_id,
+            "recording_id": recording_id,
             "discord_id": discord_id,
             "username": username,
             "display_name": display_name,
@@ -238,6 +335,8 @@ def schedule_transcription_job(
             "settings": settings,
             "repository": repository,
             "transcriber": transcriber,
+            "llm": llm,
+            "docs": docs,
         },
         daemon=True,
     )
@@ -247,6 +346,8 @@ def schedule_transcription_job(
 def process_recording_file(
     *,
     recording_path: Path,
+    session_id: int | None = None,
+    recording_id: int | None = None,
     discord_id: str,
     username: str,
     display_name: str | None,
@@ -255,6 +356,8 @@ def process_recording_file(
     settings: Settings,
     repository: DataRepository,
     transcriber: WhisperTranscriber,
+    llm: LLMClient | None = None,
+    docs: GoogleDocsProfileClient | None = None,
 ) -> None:
     started = time.perf_counter()
     try:
@@ -284,6 +387,7 @@ def process_recording_file(
             len(messages),
         )
         insert_result = repository.insert_transcription_segments(
+            session_id=session_id,
             discord_id=discord_id,
             username=username,
             display_name=display_name,
@@ -299,13 +403,18 @@ def process_recording_file(
             len(insert_result.affected_chunks),
             int((time.perf_counter() - started) * 1000),
         )
+        repository.mark_recording_completed(recording_id)
     except Exception:
+        repository.mark_recording_failed(recording_id, "transcription failed")
         logger.exception(
             "job transcricao erro file=%s discord_id=%s elapsed_ms=%d",
             recording_path,
             discord_id,
             int((time.perf_counter() - started) * 1000),
         )
+    finally:
+        if session_id is not None and llm is not None and docs is not None:
+            maybe_schedule_session_agent(session_id, repository, llm, docs)
 
 
 def messages_from_segments(recording_started_at: datetime, result: WhisperResult) -> list[MessageInsert]:
@@ -324,6 +433,73 @@ def normalize_datetime(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def maybe_schedule_session_agent(
+    session_id: int,
+    repository: DataRepository,
+    llm: LLMClient,
+    docs: GoogleDocsProfileClient,
+) -> None:
+    thread = threading.Thread(
+        target=process_session_agent,
+        kwargs={
+            "session_id": session_id,
+            "repository": repository,
+            "llm": llm,
+            "docs": docs,
+        },
+        daemon=True,
+    )
+    thread.start()
+
+
+def process_session_agent(
+    *,
+    session_id: int,
+    repository: DataRepository,
+    llm: LLMClient,
+    docs: GoogleDocsProfileClient,
+) -> None:
+    try:
+        if not repository.claim_session_agent_run(session_id):
+            return
+        agent = SessionAgent(repository=repository, llm=llm, docs=docs)
+        summary = agent.run_for_session(session_id)
+        logger.info("agent concluido session_id=%s summary=%s", session_id, summary)
+    except Exception as exc:
+        repository.mark_session_agent_failed(session_id, str(exc))
+        logger.exception("agent erro session_id=%s", session_id)
+
+
+def voice_session_response(session: VoiceSession) -> VoiceSessionResponse:
+    return VoiceSessionResponse(
+        id=session.id,
+        guild_id=session.guild_id,
+        voice_channel_id=session.voice_channel_id,
+        channel_name=session.channel_name,
+        summary_channel_id=session.summary_channel_id,
+        started_at=session.started_at,
+        ended_at=session.ended_at,
+        status=session.status,
+        summary=session.summary,
+        agent_error=session.agent_error,
+    )
+
+
+def user_profile_response(profile: UserProfile) -> UserProfileResponse:
+    return UserProfileResponse(
+        discord_id=profile.discord_id,
+        username=profile.username,
+        display_name=profile.display_name,
+        summary=profile.summary,
+        interests=profile.interests,
+        communication_style=profile.communication_style,
+        known_facts=profile.known_facts,
+        recent_updates=profile.recent_updates,
+        google_doc_url=profile.google_doc_url,
+        last_updated_at=profile.last_updated_at,
+    )
 
 
 app = create_app()

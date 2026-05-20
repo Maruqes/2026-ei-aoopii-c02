@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"log"
+	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -13,6 +16,8 @@ type voiceConnectionState struct {
 	ssrcUsers           *SSRCUserMap
 	recordingEvents     chan recordingControlEvent
 	transcriptionClient *TranscriptionClient
+	sessionID           int64
+	summaryChannelID    string
 
 	usersMu sync.RWMutex
 	users   map[string]voiceUserInfo
@@ -37,12 +42,21 @@ var (
 	voiceMu          sync.Mutex
 )
 
-func newVoiceConnectionState(vc *discordgo.VoiceConnection, ssrcUsers *SSRCUserMap, channelName string) *voiceConnectionState {
+func newVoiceConnectionState(
+	vc *discordgo.VoiceConnection,
+	ssrcUsers *SSRCUserMap,
+	channelName string,
+	transcriptionClient *TranscriptionClient,
+	sessionID int64,
+	summaryChannelID string,
+) *voiceConnectionState {
 	return &voiceConnectionState{
 		vc:                  vc,
 		ssrcUsers:           ssrcUsers,
 		recordingEvents:     make(chan recordingControlEvent, 128),
-		transcriptionClient: NewTranscriptionClientFromEnv(),
+		transcriptionClient: transcriptionClient,
+		sessionID:           sessionID,
+		summaryChannelID:    summaryChannelID,
 		users:               make(map[string]voiceUserInfo),
 		channelName:         channelName,
 	}
@@ -244,24 +258,26 @@ func disconnectIfBotIsAlone(s *discordgo.Session, guildID string, state *voiceCo
 	return true
 }
 
-func receiveAudio(guildID string, state *voiceConnectionState) {
+func receiveAudio(s *discordgo.Session, guildID string, state *voiceConnectionState) {
 	log.Printf("à espera de áudio no servidor=%s canal=%s", guildID, state.vc.ChannelID)
 	defer clearVoiceConnection(guildID, state.vc)
 
-	if err := ListenAndWriteOpusToWAV(
+	err := ListenAndWriteOpusToWAV(
 		state.vc,
 		"recordings",
+		state.sessionID,
 		state.ssrcUsers,
 		state.recordingEvents,
 		state.transcriptionClient,
 		state.userInfo,
 		state.currentChannelName,
-	); err != nil {
+	)
+	if err != nil {
 		log.Printf("erro ao gravar áudio no servidor=%s: %v", guildID, err)
-		return
 	}
 
 	log.Printf("captura finalizada no servidor=%s", guildID)
+	finishSessionAndPostSummary(s, state)
 }
 
 func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
@@ -323,7 +339,11 @@ func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 	}
 
 	ssrcUsers := NewSSRCUserMap()
-	state := newVoiceConnectionState(vc, ssrcUsers, resolveVoiceChannelName(s, channelID))
+	channelName := resolveVoiceChannelName(s, channelID)
+	transcriptionClient := NewTranscriptionClientFromEnv()
+	summaryChannelID := strings.TrimSpace(os.Getenv("DISCORD_SUMMARY_CHANNEL_ID"))
+	sessionID := createAPISession(transcriptionClient, guildID, channelID, channelName, summaryChannelID)
+	state := newVoiceConnectionState(vc, ssrcUsers, channelName, transcriptionClient, sessionID, summaryChannelID)
 	state.rememberUser(userInfo)
 
 	vc.AddHandler(func(vc *discordgo.VoiceConnection, vs *discordgo.VoiceSpeakingUpdate) {
@@ -340,7 +360,7 @@ func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 	setVoiceConnection(guildID, state)
 	log.Println("bot entrou na call")
 
-	go receiveAudio(guildID, state)
+	go receiveAudio(s, guildID, state)
 }
 
 func (state *voiceConnectionState) hasUserInfo(discordID string) bool {
@@ -454,4 +474,67 @@ func mergeVoiceUserInfo(primary voiceUserInfo, fallback voiceUserInfo) voiceUser
 	}
 
 	return primary.withFallbacks()
+}
+
+func createAPISession(
+	client *TranscriptionClient,
+	guildID string,
+	channelID string,
+	channelName string,
+	summaryChannelID string,
+) int64 {
+	if client == nil {
+		return 0
+	}
+
+	session, err := client.CreateSession(context.Background(), CreateSessionRequest{
+		GuildID:          guildID,
+		VoiceChannelID:   channelID,
+		ChannelName:      channelName,
+		SummaryChannelID: summaryChannelID,
+		StartedAt:        nowUTC(),
+	})
+	if err != nil {
+		log.Printf("erro ao criar sessao de voz na API: %v", err)
+		return 0
+	}
+	log.Printf("sessao de voz criada id=%d channel=%s", session.ID, channelName)
+	return session.ID
+}
+
+func finishSessionAndPostSummary(s *discordgo.Session, state *voiceConnectionState) {
+	if state == nil || state.transcriptionClient == nil || state.sessionID <= 0 {
+		return
+	}
+
+	summary, err := state.transcriptionClient.FinishSessionAndWait(context.Background(), state.sessionID)
+	if err != nil {
+		log.Printf("erro ao finalizar sessao id=%d: %v", state.sessionID, err)
+	}
+	if summary == nil {
+		return
+	}
+	summaryText := stringValue(summary.Summary)
+	if strings.TrimSpace(summaryText) == "" {
+		return
+	}
+	if strings.TrimSpace(state.summaryChannelID) == "" {
+		log.Printf("resumo pronto para sessao id=%d mas DISCORD_SUMMARY_CHANNEL_ID nao esta definido", state.sessionID)
+		return
+	}
+
+	if _, err := s.ChannelMessageSend(state.summaryChannelID, summaryText); err != nil {
+		log.Printf("erro ao publicar resumo da sessao id=%d no canal %s: %v", state.sessionID, state.summaryChannelID, err)
+	}
+}
+
+func nowUTC() time.Time {
+	return time.Now().UTC()
+}
+
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }

@@ -32,3 +32,48 @@ class TranscriptionAcceptedResponse(BaseModel):
     status: str
     recording_filename: str
     message: str
+
+
+class CreateSessionRequest(BaseModel):
+    guild_id: str
+    voice_channel_id: str
+    channel_name: str
+    summary_channel_id: str | None = None
+    started_at: datetime | None = None
+
+
+class VoiceSessionResponse(BaseModel):
+    id: int
+    guild_id: str
+    voice_channel_id: str
+    channel_name: str
+    summary_channel_id: str | None
+    started_at: datetime
+    ended_at: datetime | None
+    status: str
+    summary: str | None
+    agent_error: str | None
+
+
+class FinishSessionRequest(BaseModel):
+    ended_at: datetime | None = None
+
+
+class SessionSummaryResponse(BaseModel):
+    session_id: int
+    status: str
+    summary: str | None
+    agent_error: str | None
+
+
+class UserProfileResponse(BaseModel):
+    discord_id: str
+    username: str
+    display_name: str | None
+    summary: str
+    interests: str
+    communication_style: str
+    known_facts: str
+    recent_updates: str
+    google_doc_url: str | None
+    last_updated_at: datetime | None

@@ -17,12 +17,29 @@ from app.config import Settings  # noqa: E402
 import app.main as main_module  # noqa: E402
 from app.main import create_app, get_repository, get_settings, get_transcriber  # noqa: E402
 from app.transcriber import WhisperResult, WhisperSegment  # noqa: E402
-from data.repository import ChunkInfo, TranscriptionInsertResult  # noqa: E402
+from data.repository import ChunkInfo, TranscriptionInsertResult, VoiceSession  # noqa: E402
 
 
 class FakeRepository:
     def __init__(self):
         self.calls = []
+        self.recordings = []
+        self.completed_recordings = []
+        self.failed_recordings = []
+        self.sessions = {
+            42: VoiceSession(
+                id=42,
+                guild_id="guild-1",
+                voice_channel_id="voice-1",
+                channel_name="general",
+                summary_channel_id="text-1",
+                started_at=datetime(2026, 4, 28, 10, 0, tzinfo=timezone.utc),
+                ended_at=None,
+                status="open",
+                summary=None,
+                agent_error=None,
+            )
+        }
 
     def healthcheck(self) -> bool:
         return True
@@ -41,6 +58,61 @@ class FakeRepository:
                 )
             ],
         )
+
+    def start_recording(self, **kwargs):
+        self.recordings.append(kwargs)
+        return 99 if kwargs.get("session_id") else None
+
+    def mark_recording_completed(self, recording_id):
+        if recording_id is None:
+            return
+        self.completed_recordings.append(recording_id)
+
+    def mark_recording_failed(self, recording_id, error):
+        if recording_id is None:
+            return
+        self.failed_recordings.append((recording_id, error))
+
+    def create_voice_session(self, **kwargs):
+        session = VoiceSession(
+            id=43,
+            guild_id=kwargs["guild_id"],
+            voice_channel_id=kwargs["voice_channel_id"],
+            channel_name=kwargs["channel_name"],
+            summary_channel_id=kwargs["summary_channel_id"],
+            started_at=kwargs["started_at"],
+            ended_at=None,
+            status="open",
+            summary=None,
+            agent_error=None,
+        )
+        self.sessions[session.id] = session
+        return session
+
+    def finish_voice_session(self, session_id, ended_at):
+        session = self.sessions.get(session_id)
+        if not session:
+            return None
+        finished = VoiceSession(
+            id=session.id,
+            guild_id=session.guild_id,
+            voice_channel_id=session.voice_channel_id,
+            channel_name=session.channel_name,
+            summary_channel_id=session.summary_channel_id,
+            started_at=session.started_at,
+            ended_at=ended_at,
+            status="finished",
+            summary=session.summary,
+            agent_error=session.agent_error,
+        )
+        self.sessions[session_id] = finished
+        return finished
+
+    def get_voice_session(self, session_id):
+        return self.sessions.get(session_id)
+
+    def get_user_profile_by_discord_id(self, discord_id):
+        return None
 
 
 class FakeTranscriber:
@@ -102,6 +174,7 @@ def test_transcription_endpoint_schedules_background_job_and_returns_200(tmp_pat
             "display_name": "Ricardo F",
             "channel_name": "general",
             "recording_started_at": "2026-04-28T10:03:00Z",
+            "session_id": "42",
         },
     )
 
@@ -115,6 +188,8 @@ def test_transcription_endpoint_schedules_background_job_and_returns_200(tmp_pat
     }
     assert len(scheduled) == 1
     assert scheduled[0]["recording_path"] == recording_path.resolve()
+    assert scheduled[0]["session_id"] == 42
+    assert scheduled[0]["recording_id"] == 99
     assert scheduled[0]["discord_id"] == "123"
     assert scheduled[0]["channel_name"] == "general"
 
@@ -143,11 +218,43 @@ def test_process_recording_file_transcribes_and_inserts_segments(tmp_path):
     )
 
     inserted_messages = repository.calls[0]["messages"]
+    assert repository.completed_recordings == []
     assert repository.calls[0]["discord_id"] == "123"
     assert repository.calls[0]["channel_name"] == "general"
     assert inserted_messages[0].content == "hello"
     assert inserted_messages[0].tstamp == datetime(2026, 4, 28, 10, 3, 1, tzinfo=timezone.utc)
     assert inserted_messages[1].tstamp == datetime(2026, 4, 28, 10, 4, 2, tzinfo=timezone.utc)
+
+
+def test_create_session_returns_session_metadata(tmp_path):
+    client, _, _ = make_client(tmp_path)
+
+    response = client.post(
+        "/v1/sessions",
+        json={
+            "guild_id": "guild-1",
+            "voice_channel_id": "voice-1",
+            "channel_name": "general",
+            "summary_channel_id": "text-1",
+            "started_at": "2026-04-28T10:00:00Z",
+        },
+    )
+
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["id"] == 43
+    assert body["guild_id"] == "guild-1"
+    assert body["status"] == "open"
+
+
+def test_get_session_summary_returns_current_status(tmp_path):
+    client, _, _ = make_client(tmp_path)
+
+    response = client.get("/v1/sessions/42/summary")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "open"
 
 
 def test_transcription_rejects_unsupported_extension(tmp_path):

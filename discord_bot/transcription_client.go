@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -16,14 +17,17 @@ import (
 const (
 	defaultTranscriptionAPIURL     = "http://localhost:8000"
 	defaultTranscriptionAPITimeout = 10 * time.Minute
+	defaultSummaryPollTimeout      = 15 * time.Minute
 )
 
 type TranscriptionClient struct {
+	baseURL    string
 	endpoint   string
 	httpClient *http.Client
 }
 
 type TranscriptionRequest struct {
+	SessionID          int64
 	AudioPath          string
 	DiscordID          string
 	Username           string
@@ -32,18 +36,58 @@ type TranscriptionRequest struct {
 	RecordingStartedAt time.Time
 }
 
+type CreateSessionRequest struct {
+	GuildID          string    `json:"guild_id"`
+	VoiceChannelID   string    `json:"voice_channel_id"`
+	ChannelName      string    `json:"channel_name"`
+	SummaryChannelID string    `json:"summary_channel_id,omitempty"`
+	StartedAt        time.Time `json:"started_at"`
+}
+
+type VoiceSessionResponse struct {
+	ID               int64   `json:"id"`
+	GuildID          string  `json:"guild_id"`
+	VoiceChannelID   string  `json:"voice_channel_id"`
+	ChannelName      string  `json:"channel_name"`
+	SummaryChannelID *string `json:"summary_channel_id"`
+	Status           string  `json:"status"`
+	Summary          *string `json:"summary"`
+	AgentError       *string `json:"agent_error"`
+}
+
+type SessionSummaryResponse struct {
+	SessionID  int64   `json:"session_id"`
+	Status     string  `json:"status"`
+	Summary    *string `json:"summary"`
+	AgentError *string `json:"agent_error"`
+}
+
+type UserProfileResponse struct {
+	DiscordID          string  `json:"discord_id"`
+	Username           string  `json:"username"`
+	DisplayName        *string `json:"display_name"`
+	Summary            string  `json:"summary"`
+	Interests          string  `json:"interests"`
+	CommunicationStyle string  `json:"communication_style"`
+	KnownFacts         string  `json:"known_facts"`
+	RecentUpdates      string  `json:"recent_updates"`
+	GoogleDocURL       *string `json:"google_doc_url"`
+}
+
 func NewTranscriptionClientFromEnv() *TranscriptionClient {
+	baseURL := transcriptionBaseURLFromEnv(os.Getenv("TRANSCRIPTION_API_URL"))
 	client := &TranscriptionClient{
-		endpoint: transcriptionEndpointFromEnv(os.Getenv("TRANSCRIPTION_API_URL")),
+		baseURL:  baseURL,
+		endpoint: baseURL + "/v1/transcriptions",
 		httpClient: &http.Client{
 			Timeout: transcriptionTimeoutFromEnv(os.Getenv("TRANSCRIPTION_API_TIMEOUT")),
 		},
 	}
-	log.Printf("cliente API transcrição configurado endpoint=%s timeout=%s", client.endpoint, client.httpClient.Timeout)
+	log.Printf("cliente API transcricao configurado endpoint=%s timeout=%s", client.endpoint, client.httpClient.Timeout)
 	return client
 }
 
-func transcriptionEndpointFromEnv(raw string) string {
+func transcriptionBaseURLFromEnv(raw string) string {
 	endpoint := strings.TrimSpace(raw)
 	if endpoint == "" {
 		endpoint = defaultTranscriptionAPIURL
@@ -51,9 +95,9 @@ func transcriptionEndpointFromEnv(raw string) string {
 
 	endpoint = strings.TrimRight(endpoint, "/")
 	if strings.HasSuffix(endpoint, "/v1/transcriptions") {
-		return endpoint
+		return strings.TrimSuffix(endpoint, "/v1/transcriptions")
 	}
-	return endpoint + "/v1/transcriptions"
+	return endpoint
 }
 
 func transcriptionTimeoutFromEnv(raw string) time.Duration {
@@ -64,7 +108,7 @@ func transcriptionTimeoutFromEnv(raw string) time.Duration {
 
 	timeout, err := time.ParseDuration(value)
 	if err != nil {
-		log.Printf("TRANSCRIPTION_API_TIMEOUT inválido (%q), a usar %s", value, defaultTranscriptionAPITimeout)
+		log.Printf("TRANSCRIPTION_API_TIMEOUT invalido (%q), a usar %s", value, defaultTranscriptionAPITimeout)
 		return defaultTranscriptionAPITimeout
 	}
 	return timeout
@@ -72,13 +116,13 @@ func transcriptionTimeoutFromEnv(raw string) time.Duration {
 
 func (c *TranscriptionClient) QueueTranscription(request TranscriptionRequest) {
 	if c == nil {
-		log.Printf("cliente API transcrição nil; pedido ignorado user=%s file=%s", request.DiscordID, request.AudioPath)
+		log.Printf("cliente API transcricao nil; pedido ignorado user=%s file=%s", request.DiscordID, request.AudioPath)
 		return
 	}
 
 	request = request.withFallbacks()
 	log.Printf(
-		"chamada API transcrição enfileirada user=%s username=%s channel=%s file=%s started_at=%s",
+		"chamada API transcricao enfileirada user=%s username=%s channel=%s file=%s started_at=%s",
 		request.DiscordID,
 		request.Username,
 		request.ChannelName,
@@ -87,30 +131,30 @@ func (c *TranscriptionClient) QueueTranscription(request TranscriptionRequest) {
 	)
 
 	go func() {
-		if err := c.CreateTranscription(context.Background(), request); err != nil {
-			log.Printf("erro ao chamar API de transcrição para user=%s file=%s: %v", request.DiscordID, request.AudioPath, err)
+		if err := c.SubmitTranscription(context.Background(), request); err != nil {
+			log.Printf("erro ao chamar API de transcricao para user=%s file=%s: %v", request.DiscordID, request.AudioPath, err)
 			return
 		}
-		log.Printf("pedido de transcrição aceite pela API para user=%s file=%s", request.DiscordID, request.AudioPath)
+		log.Printf("pedido de transcricao aceite pela API para user=%s file=%s", request.DiscordID, request.AudioPath)
 	}()
 }
 
-func (c *TranscriptionClient) CreateTranscription(ctx context.Context, request TranscriptionRequest) error {
+func (c *TranscriptionClient) SubmitTranscription(ctx context.Context, request TranscriptionRequest) error {
 	if c == nil || c.httpClient == nil {
-		return fmt.Errorf("cliente de transcrição não configurado")
+		return fmt.Errorf("cliente de transcricao nao configurado")
 	}
 
 	request = request.withFallbacks()
 	started := time.Now()
 	audioSize := int64(-1)
 	if stat, err := os.Stat(request.AudioPath); err != nil {
-		log.Printf("não foi possível obter tamanho do áudio antes da API user=%s file=%s: %v", request.DiscordID, request.AudioPath, err)
+		log.Printf("nao foi possivel obter tamanho do audio antes da API user=%s file=%s: %v", request.DiscordID, request.AudioPath, err)
 	} else {
 		audioSize = stat.Size()
 	}
 
 	log.Printf(
-		"chamada API transcrição início endpoint=%s user=%s username=%s channel=%s file=%s recording_filename=%s bytes=%d",
+		"chamada API transcricao inicio endpoint=%s user=%s username=%s channel=%s file=%s recording_filename=%s bytes=%d",
 		c.endpoint,
 		request.DiscordID,
 		request.Username,
@@ -126,6 +170,9 @@ func (c *TranscriptionClient) CreateTranscription(ctx context.Context, request T
 	form.Set("username", request.Username)
 	form.Set("channel_name", request.ChannelName)
 	form.Set("recording_started_at", request.RecordingStartedAt.UTC().Format(time.RFC3339Nano))
+	if request.SessionID > 0 {
+		form.Set("session_id", fmt.Sprintf("%d", request.SessionID))
+	}
 	if request.DisplayName != "" {
 		form.Set("display_name", request.DisplayName)
 	}
@@ -138,14 +185,14 @@ func (c *TranscriptionClient) CreateTranscription(ctx context.Context, request T
 
 	response, err := c.httpClient.Do(httpRequest)
 	if err != nil {
-		log.Printf("chamada API transcrição erro user=%s file=%s elapsed=%s err=%v", request.DiscordID, request.AudioPath, time.Since(started).Round(time.Millisecond), err)
+		log.Printf("chamada API transcricao erro user=%s file=%s elapsed=%s err=%v", request.DiscordID, request.AudioPath, time.Since(started).Round(time.Millisecond), err)
 		return err
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
 		_, _ = io.Copy(io.Discard, response.Body)
-		log.Printf("chamada API transcrição sucesso user=%s file=%s status=%s elapsed=%s", request.DiscordID, request.AudioPath, response.Status, time.Since(started).Round(time.Millisecond))
+		log.Printf("chamada API transcricao sucesso user=%s file=%s status=%s elapsed=%s", request.DiscordID, request.AudioPath, response.Status, time.Since(started).Round(time.Millisecond))
 		return nil
 	}
 
@@ -154,8 +201,123 @@ func (c *TranscriptionClient) CreateTranscription(ctx context.Context, request T
 	if detail == "" {
 		detail = response.Status
 	}
-	log.Printf("chamada API transcrição falhou user=%s file=%s status=%s elapsed=%s body=%s", request.DiscordID, request.AudioPath, response.Status, time.Since(started).Round(time.Millisecond), detail)
+	log.Printf("chamada API transcricao falhou user=%s file=%s status=%s elapsed=%s body=%s", request.DiscordID, request.AudioPath, response.Status, time.Since(started).Round(time.Millisecond), detail)
 	return fmt.Errorf("API devolveu %s: %s", response.Status, detail)
+}
+
+func (c *TranscriptionClient) CreateSession(ctx context.Context, request CreateSessionRequest) (*VoiceSessionResponse, error) {
+	var session VoiceSessionResponse
+	if err := c.postJSON(ctx, "/v1/sessions", request, &session); err != nil {
+		return nil, err
+	}
+	return &session, nil
+}
+
+func (c *TranscriptionClient) FinishSession(ctx context.Context, sessionID int64) (*VoiceSessionResponse, error) {
+	var session VoiceSessionResponse
+	if err := c.postJSON(ctx, fmt.Sprintf("/v1/sessions/%d/finish", sessionID), map[string]string{
+		"ended_at": time.Now().UTC().Format(time.RFC3339Nano),
+	}, &session); err != nil {
+		return nil, err
+	}
+	return &session, nil
+}
+
+func (c *TranscriptionClient) GetSessionSummary(ctx context.Context, sessionID int64) (*SessionSummaryResponse, error) {
+	var summary SessionSummaryResponse
+	if err := c.getJSON(ctx, fmt.Sprintf("/v1/sessions/%d/summary", sessionID), &summary); err != nil {
+		return nil, err
+	}
+	return &summary, nil
+}
+
+func (c *TranscriptionClient) FinishSessionAndWait(ctx context.Context, sessionID int64) (*SessionSummaryResponse, error) {
+	if sessionID <= 0 {
+		return nil, nil
+	}
+	if _, err := c.FinishSession(ctx, sessionID); err != nil {
+		return nil, err
+	}
+
+	timeout := summaryPollTimeoutFromEnv(os.Getenv("SESSION_SUMMARY_TIMEOUT"))
+	deadline := time.Now().Add(timeout)
+	for {
+		summary, err := c.GetSessionSummary(ctx, sessionID)
+		if err != nil {
+			return nil, err
+		}
+		if summary.Status == "agent_done" || summary.Status == "agent_failed" {
+			return summary, nil
+		}
+		if time.Now().After(deadline) {
+			return summary, fmt.Errorf("timeout a espera do resumo da sessao %d; estado=%s", sessionID, summary.Status)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(5 * time.Second):
+		}
+	}
+}
+
+func (c *TranscriptionClient) GetUserProfile(ctx context.Context, discordID string) (*UserProfileResponse, error) {
+	var profile UserProfileResponse
+	if err := c.getJSON(ctx, "/v1/users/"+url.PathEscape(discordID)+"/profile", &profile); err != nil {
+		return nil, err
+	}
+	return &profile, nil
+}
+
+func (c *TranscriptionClient) postJSON(ctx context.Context, path string, body any, target any) error {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, strings.NewReader(string(payload)))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	return c.doJSON(request, target)
+}
+
+func (c *TranscriptionClient) getJSON(ctx context.Context, path string, target any) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return err
+	}
+	return c.doJSON(request, target)
+}
+
+func (c *TranscriptionClient) doJSON(request *http.Request, target any) error {
+	if c == nil || c.httpClient == nil {
+		return fmt.Errorf("cliente de transcricao nao configurado")
+	}
+
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return fmt.Errorf("API devolveu %s: %s", response.Status, strings.TrimSpace(string(body)))
+	}
+	return json.NewDecoder(response.Body).Decode(target)
+}
+
+func summaryPollTimeoutFromEnv(raw string) time.Duration {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return defaultSummaryPollTimeout
+	}
+	timeout, err := time.ParseDuration(value)
+	if err != nil {
+		log.Printf("SESSION_SUMMARY_TIMEOUT invalido (%q), a usar %s", value, defaultSummaryPollTimeout)
+		return defaultSummaryPollTimeout
+	}
+	return timeout
 }
 
 func (r TranscriptionRequest) withFallbacks() TranscriptionRequest {

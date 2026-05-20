@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"log"
 	"os"
@@ -40,6 +41,7 @@ type userAudioRecording struct {
 	startedAt time.Time
 	user      voiceUserInfo
 	channel   string
+	sessionID int64
 }
 
 func NewWAVWriter(path string, sampleRate uint32, channels uint16, bitDepth uint16) (*WAVWriter, error) {
@@ -215,14 +217,18 @@ func closeAndTranscribeRecording(recording *userAudioRecording, info voiceUserIn
 		recording.wav.dataSize,
 		time.Since(recording.startedAt).Round(time.Second),
 	)
-	transcriptions.QueueTranscription(TranscriptionRequest{
+	if err := transcriptions.SubmitTranscription(context.Background(), TranscriptionRequest{
+		SessionID:          recording.sessionID,
 		AudioPath:          recording.path,
 		DiscordID:          user.DiscordID,
 		Username:           user.Username,
 		DisplayName:        user.DisplayName,
 		ChannelName:        recording.channel,
 		RecordingStartedAt: recording.startedAt,
-	})
+	}); err != nil {
+		log.Printf("erro ao submeter transcriÃ§Ã£o user=%s file=%s: %v", user.DiscordID, recording.path, err)
+		return err
+	}
 
 	return nil
 }
@@ -230,6 +236,7 @@ func closeAndTranscribeRecording(recording *userAudioRecording, info voiceUserIn
 func ListenAndWriteOpusToWAV(
 	vc *discordgo.VoiceConnection,
 	outDir string,
+	sessionID int64,
 	ssrcUsers *SSRCUserMap,
 	recordingEvents <-chan recordingControlEvent,
 	transcriptions *TranscriptionClient,
@@ -265,7 +272,7 @@ func ListenAndWriteOpusToWAV(
 				if err := closeUserRecordings(userRecordings, transcriptions); err != nil {
 					return err
 				}
-				continue
+				return nil
 			}
 			log.Printf("evento recebido: finalizar gravação user=%s", event.user.DiscordID)
 			if err := finishUserRecording(userRecordings, event.user, transcriptions); err != nil {
@@ -340,6 +347,7 @@ func ListenAndWriteOpusToWAV(
 					startedAt: time.Now().UTC(),
 					user:      getRecordingUserInfo(discordID, lookupUserInfo),
 					channel:   getCurrentChannelName(currentChannelName, vc.ChannelID),
+					sessionID: sessionID,
 				}
 				userRecordings[discordID] = recording
 				log.Printf("a gravar user=%s para %s", discordID, outPath)

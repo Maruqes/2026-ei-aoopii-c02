@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -13,21 +14,32 @@ import (
 )
 
 var APP_ID string
+var botAPIClient *TranscriptionClient
 
-func registerCommand(dg *discordgo.Session, appID, command, desc string, hook func(s *discordgo.Session, i *discordgo.InteractionCreate)) error {
-
+func registerCommands(dg *discordgo.Session, appID string) error {
 	dg.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		if i.Type != discordgo.InteractionApplicationCommand {
 			return
 		}
-
-		hook(s, i)
+		handleCommand(s, i)
 	})
 
 	_, err := dg.ApplicationCommandBulkOverwrite(appID, "", []*discordgo.ApplicationCommand{
 		{
-			Name:        command,
-			Description: desc,
+			Name:        "ping",
+			Description: "Responde com PONG!",
+		},
+		{
+			Name:        "profile",
+			Description: "Mostra o perfil gerado de um utilizador.",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionUser,
+					Name:        "user",
+					Description: "Utilizador a consultar. Se vazio, usa quem chamou o comando.",
+					Required:    false,
+				},
+			},
 		},
 	})
 	if err != nil {
@@ -36,20 +48,127 @@ func registerCommand(dg *discordgo.Session, appID, command, desc string, hook fu
 	return nil
 }
 
-func pingHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if i.Type != discordgo.InteractionApplicationCommand {
-		return
-	}
-
+func handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	data := i.ApplicationCommandData()
-	if strings.ToLower(data.Name) != "ping" {
-		return
+	switch strings.ToLower(data.Name) {
+	case "ping":
+		pingHook(s, i)
+	case "profile":
+		profileHook(s, i)
 	}
+}
 
+func pingHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{Content: "PONGGG!"},
 	})
+}
+
+func profileHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	targetID, targetName := profileTarget(s, i)
+	if targetID == "" {
+		respondText(s, i, "Nao consegui identificar o utilizador.")
+		return
+	}
+
+	client := botAPIClient
+	if client == nil {
+		client = NewTranscriptionClientFromEnv()
+	}
+	profile, err := client.GetUserProfile(context.Background(), targetID)
+	if err != nil {
+		respondText(s, i, fmt.Sprintf("Ainda nao ha perfil para %s.", targetName))
+		return
+	}
+	if strings.TrimSpace(profile.Summary+profile.Interests+profile.CommunicationStyle+profile.KnownFacts+profile.RecentUpdates) == "" {
+		respondText(s, i, fmt.Sprintf("Ainda nao ha perfil gerado para %s.", displayProfileName(profile, targetName)))
+		return
+	}
+
+	embed := profileEmbed(profile, targetName)
+	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{Embeds: []*discordgo.MessageEmbed{embed}},
+	})
+}
+
+func profileTarget(s *discordgo.Session, i *discordgo.InteractionCreate) (string, string) {
+	data := i.ApplicationCommandData()
+	for _, option := range data.Options {
+		if option.Name == "user" {
+			user := option.UserValue(s)
+			return user.ID, firstNonEmpty(user.GlobalName, user.Username, user.ID)
+		}
+	}
+	if i.Member != nil && i.Member.User != nil {
+		return i.Member.User.ID, firstNonEmpty(i.Member.Nick, i.Member.User.GlobalName, i.Member.User.Username, i.Member.User.ID)
+	}
+	if i.User != nil {
+		return i.User.ID, firstNonEmpty(i.User.GlobalName, i.User.Username, i.User.ID)
+	}
+	return "", ""
+}
+
+func profileEmbed(profile *UserProfileResponse, fallbackName string) *discordgo.MessageEmbed {
+	name := displayProfileName(profile, fallbackName)
+	fields := []*discordgo.MessageEmbedField{
+		profileField("Summary", profile.Summary),
+		profileField("Interests", profile.Interests),
+		profileField("Communication Style", profile.CommunicationStyle),
+		profileField("Known Facts", profile.KnownFacts),
+		profileField("Recent Updates", profile.RecentUpdates),
+	}
+	if strings.TrimSpace(stringValue(profile.GoogleDocURL)) != "" {
+		fields = append(fields, profileField("Google Doc", stringValue(profile.GoogleDocURL)))
+	}
+	return &discordgo.MessageEmbed{
+		Title:  "Profile: " + name,
+		Color:  0x2F80ED,
+		Fields: fields,
+	}
+}
+
+func profileField(name string, value string) *discordgo.MessageEmbedField {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		value = "No observations yet."
+	}
+	return &discordgo.MessageEmbedField{
+		Name:   name,
+		Value:  truncateDiscordField(value),
+		Inline: false,
+	}
+}
+
+func displayProfileName(profile *UserProfileResponse, fallback string) string {
+	if profile == nil {
+		return fallback
+	}
+	return firstNonEmpty(stringValue(profile.DisplayName), profile.Username, fallback, profile.DiscordID)
+}
+
+func respondText(s *discordgo.Session, i *discordgo.InteractionCreate, content string) {
+	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{Content: content},
+	})
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func truncateDiscordField(value string) string {
+	if len(value) <= 1000 {
+		return value
+	}
+	return value[:997] + "..."
 }
 
 func main() {
@@ -69,7 +188,9 @@ func main() {
 		log.Fatalf("erro ao criar sessao do bot: %v", err)
 	}
 
-	err = registerCommand(dg, appID, "ping", "Responde com PONG!", pingHook)
+	botAPIClient = NewTranscriptionClientFromEnv()
+
+	err = registerCommands(dg, appID)
 	if err != nil {
 		log.Fatalf("erro ao registar comandos: %v", err)
 	}

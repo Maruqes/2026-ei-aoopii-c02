@@ -23,6 +23,14 @@ class Settings:
     upload_tmp_dir: Path = Path(".tmp/uploads")
     recordings_dir: Path = Path("discord_bot/recordings")
     keep_uploads: bool = False
+    llm_provider: str = "xai"
+    xai_api_key: str | None = None
+    xai_base_url: str = "https://api.x.ai/v1"
+    xai_model: str = "grok-4.3"
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "qwen3.5:2b"
+    google_service_account_file: Path | None = None
+    google_drive_folder_id: str | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -30,6 +38,7 @@ class Settings:
         if not database_url:
             database_url = "postgresql://discord:discord@127.0.0.1:5432/discord_anthropologist"
 
+        service_account = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
         return cls(
             database_url=database_url,
             whisper_model=os.getenv("WHISPER_MODEL", "base"),
@@ -37,4 +46,12 @@ class Settings:
             upload_tmp_dir=Path(os.getenv("UPLOAD_TMP_DIR", ".tmp/uploads")),
             recordings_dir=Path(os.getenv("RECORDINGS_DIR", "discord_bot/recordings")),
             keep_uploads=env_bool("KEEP_UPLOADS", False),
+            llm_provider=os.getenv("LLM_PROVIDER", "xai").strip().lower(),
+            xai_api_key=os.getenv("XAI_API_KEY"),
+            xai_base_url=os.getenv("XAI_BASE_URL", "https://api.x.ai/v1"),
+            xai_model=os.getenv("XAI_MODEL", "grok-4.3"),
+            ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            ollama_model=os.getenv("OLLAMA_MODEL", "qwen3.5:2b"),
+            google_service_account_file=Path(service_account) if service_account else None,
+            google_drive_folder_id=os.getenv("GOOGLE_DRIVE_FOLDER_ID"),
         )

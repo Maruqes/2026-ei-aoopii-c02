@@ -20,9 +20,20 @@
 
 ## Real implementation
 
-The production code starts under `src/` while `discord_bot/` remains untouched.
+The production code is split between `src/` and the Go bot in `discord_bot/`.
 
 - `src/data`: Postgres migrations and DB/chunk rebuilding helpers.
 - `src/transcription-api`: local FastAPI wrapper around Whisper.
-- `docker-compose.yml`: local Postgres only.
+- `docker-compose.yml`: local Postgres and transcription API.
 - `BrunoAPI`: Bruno collection for local API requests.
+
+## Voice sessions, summaries, and profiles
+
+The bot now creates a voice session when it joins a voice channel. Finished recordings are attached to that session, and when the session ends the API waits for transcription jobs to finish before running the agent.
+
+- The agent generates one sentence for the session summary and the bot posts it to `DISCORD_SUMMARY_CHANNEL_ID`.
+- User profiles are cached in Postgres and can be shown with `/profile user:@name`.
+- If Google Docs credentials are configured, the API creates/updates one structured profile doc per user and includes the doc link in `/profile`.
+- LLM provider is selected with `LLM_PROVIDER`. Use `xai` for Grok or `ollama` for local free testing.
+- For Ollama with Docker, use `OLLAMA_BASE_URL=http://host.docker.internal:11434`. For a direct local API run, use `http://localhost:11434`.
+- Recommended local test model: `ollama pull qwen2.5:7b`, then set `OLLAMA_MODEL=qwen2.5:7b`.
