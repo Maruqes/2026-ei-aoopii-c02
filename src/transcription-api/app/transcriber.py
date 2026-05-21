@@ -29,7 +29,7 @@ class WhisperTranscriber:
 
     def transcribe(self, audio_path: Path) -> WhisperResult:
         model = self._load_model()
-         result = model.transcribe(
+        result = model.transcribe(
             str(audio_path),
             fp16=False,
             language="pt"
