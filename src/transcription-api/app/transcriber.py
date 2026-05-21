@@ -29,7 +29,11 @@ class WhisperTranscriber:
 
     def transcribe(self, audio_path: Path) -> WhisperResult:
         model = self._load_model()
-        result = model.transcribe(str(audio_path))
+         result = model.transcribe(
+            str(audio_path),
+            fp16=False,
+            language="pt"
+        )
         segments = [
             WhisperSegment(
                 start=float(segment.get("start", 0)),
