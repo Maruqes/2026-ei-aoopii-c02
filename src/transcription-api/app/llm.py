@@ -32,11 +32,21 @@ class LLMClient(Protocol):
         ...
 
 
-class GroqClient:
-    def __init__(self, *, api_key: str | None, base_url: str, model: str):
+class OpenAICompatibleClient:
+    def __init__(
+        self,
+        *,
+        api_key: str | None,
+        base_url: str,
+        model: str,
+        api_key_env: str = "OPENAI_API_KEY",
+        provider_name: str = "openai",
+    ):
         self.api_key = api_key
         self.base_url = base_url
         self.model = model
+        self.api_key_env = api_key_env
+        self.provider_name = provider_name
         self._client = None
 
     def summarize_session(self, transcript: str) -> str:
@@ -77,7 +87,7 @@ class GroqClient:
 
     def _chat(self, *, system: str, user: str, json_format: bool = False) -> str:
         if not self.api_key:
-            raise RuntimeError("GROQ_API_KEY is required when LLM_PROVIDER=groq")
+            raise RuntimeError(f"{self.api_key_env} is required when LLM_PROVIDER={self.provider_name}")
 
         client = self._load_client()
         kwargs = {}
@@ -96,7 +106,7 @@ class GroqClient:
         content = getattr(getattr(choice, "message", None), "content", None)
         if content:
             return str(content).strip()
-        raise RuntimeError("Groq response did not include choices[0].message.content")
+        raise RuntimeError("OpenAI-compatible response did not include choices[0].message.content")
 
     def _load_client(self):
         if self._client is None:
@@ -104,6 +114,9 @@ class GroqClient:
 
             self._client = OpenAI(api_key=self.api_key, base_url=self.base_url)
         return self._client
+
+
+GroqClient = OpenAICompatibleClient
 
 
 class OllamaClient:

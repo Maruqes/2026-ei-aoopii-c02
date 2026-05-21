@@ -18,7 +18,7 @@ from data.repository import DataRepository, MessageInsert, UserProfile, VoiceSes
 from .agent import SessionAgent
 from .config import Settings
 from .docs_client import LocalMarkdownProfileClient
-from .llm import GroqClient, LLMClient, OllamaClient
+from .llm import LLMClient, OllamaClient, OpenAICompatibleClient
 from .schemas import (
     CreateSessionRequest,
     FinishSessionRequest,
@@ -217,9 +217,21 @@ def get_transcriber(settings: Settings = Depends(get_settings)) -> WhisperTransc
 def get_llm_client(settings: Settings = Depends(get_settings)) -> LLMClient:
     if settings.llm_provider == "ollama":
         return OllamaClient(base_url=settings.ollama_base_url, model=settings.ollama_model)
+    if settings.llm_provider == "openai":
+        return OpenAICompatibleClient(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            model=settings.openai_model,
+        )
     if settings.llm_provider == "groq":
-        return GroqClient(api_key=settings.groq_api_key, base_url=settings.groq_base_url, model=settings.groq_model)
-    raise RuntimeError(f"Unsupported LLM_PROVIDER: {settings.llm_provider}. Use 'groq' or 'ollama'.")
+        return OpenAICompatibleClient(
+            api_key=settings.groq_api_key,
+            base_url=settings.groq_base_url,
+            model=settings.groq_model,
+            api_key_env="GROQ_API_KEY",
+            provider_name="groq",
+        )
+    raise RuntimeError(f"Unsupported LLM_PROVIDER: {settings.llm_provider}. Use 'openai', 'groq', or 'ollama'.")
 
 
 def get_docs_client(settings: Settings = Depends(get_settings)):

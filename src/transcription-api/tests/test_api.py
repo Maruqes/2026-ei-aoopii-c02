@@ -15,7 +15,7 @@ if str(API_ROOT) not in sys.path:
 
 from app.config import Settings  # noqa: E402
 import app.main as main_module  # noqa: E402
-from app.llm import GroqClient, OllamaClient  # noqa: E402
+from app.llm import OllamaClient, OpenAICompatibleClient  # noqa: E402
 from app.main import create_app, get_llm_client, get_repository, get_settings, get_transcriber  # noqa: E402
 from app.transcriber import WhisperResult, WhisperSegment  # noqa: E402
 from data.repository import ChunkInfo, TranscriptionInsertResult, VoiceSession  # noqa: E402
@@ -146,7 +146,53 @@ def make_client(tmp_path, repository=None, max_upload_bytes=1024 * 1024):
     return TestClient(app), fake_repo, recordings_dir
 
 
-def test_get_llm_client_uses_groq_provider():
+def test_settings_from_env_accepts_openai_compatible_values(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.example.com/v1")
+    monkeypatch.setenv("OPENAI_MODEL", "custom-model")
+
+    settings = Settings.from_env()
+
+    assert settings.llm_provider == "openai"
+    assert settings.openai_api_key == "test-key"
+    assert settings.openai_base_url == "https://api.example.com/v1"
+    assert settings.openai_model == "custom-model"
+
+
+def test_settings_from_env_falls_back_to_legacy_groq_values(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("OPENAI_BASE_URL", "")
+    monkeypatch.setenv("OPENAI_MODEL", "")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-key")
+    monkeypatch.setenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+    monkeypatch.setenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+    settings = Settings.from_env()
+
+    assert settings.openai_api_key == "groq-key"
+    assert settings.openai_base_url == "https://api.groq.com/openai/v1"
+    assert settings.openai_model == "llama-3.3-70b-versatile"
+
+
+def test_get_llm_client_uses_openai_compatible_provider():
+    client = get_llm_client(
+        Settings(
+            database_url="postgresql://test:test@localhost:5432/test",
+            llm_provider="openai",
+            openai_api_key="test-key",
+            openai_base_url="https://api.example.com/v1",
+            openai_model="custom-model",
+        )
+    )
+
+    assert isinstance(client, OpenAICompatibleClient)
+    assert client.api_key == "test-key"
+    assert client.base_url == "https://api.example.com/v1"
+    assert client.model == "custom-model"
+
+
+def test_get_llm_client_accepts_legacy_groq_provider():
     client = get_llm_client(
         Settings(
             database_url="postgresql://test:test@localhost:5432/test",
@@ -157,7 +203,7 @@ def test_get_llm_client_uses_groq_provider():
         )
     )
 
-    assert isinstance(client, GroqClient)
+    assert isinstance(client, OpenAICompatibleClient)
     assert client.api_key == "test-key"
     assert client.base_url == "https://api.groq.com/openai/v1"
     assert client.model == "llama-3.3-70b-versatile"

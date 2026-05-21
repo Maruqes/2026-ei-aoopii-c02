@@ -15,6 +15,14 @@ def env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def env_str(name: str, default: str = "") -> str:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    value = value.strip()
+    return value or default
+
+
 @dataclass(frozen=True)
 class Settings:
     database_url: str
@@ -24,7 +32,10 @@ class Settings:
     upload_tmp_dir: Path = Path(".tmp/uploads")
     recordings_dir: Path = Path("discord_bot/recordings")
     keep_uploads: bool = False
-    llm_provider: str = "groq"
+    llm_provider: str = "openai"
+    openai_api_key: str | None = None
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_model: str = "gpt-4o-mini"
     groq_api_key: str | None = None
     groq_base_url: str = "https://api.groq.com/openai/v1"
     groq_model: str = "llama-3.3-70b-versatile"
@@ -47,12 +58,18 @@ class Settings:
             upload_tmp_dir=Path(os.getenv("UPLOAD_TMP_DIR", ".tmp/uploads")),
             recordings_dir=Path(os.getenv("RECORDINGS_DIR", "discord_bot/recordings")),
             keep_uploads=env_bool("KEEP_UPLOADS", False),
-            llm_provider=os.getenv("LLM_PROVIDER", "groq").strip().lower(),
-            groq_api_key=os.getenv("GROQ_API_KEY"),
-            groq_base_url=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
-            groq_model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
-            ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-            ollama_model=os.getenv("OLLAMA_MODEL", "qwen3.5:2b"),
-            profile_docs_provider=os.getenv("PROFILE_DOCS_PROVIDER", "local").strip().lower(),
-            local_profile_dir=Path(os.getenv("LOCAL_PROFILE_DIR", "profiles")),
+            llm_provider=env_str("LLM_PROVIDER", "openai").lower(),
+            openai_api_key=env_str("OPENAI_API_KEY", env_str("GROQ_API_KEY")),
+            openai_base_url=env_str(
+                "OPENAI_BASE_URL",
+                env_str("GROQ_BASE_URL", "https://api.openai.com/v1"),
+            ),
+            openai_model=env_str("OPENAI_MODEL", env_str("GROQ_MODEL", "gpt-4o-mini")),
+            groq_api_key=env_str("GROQ_API_KEY"),
+            groq_base_url=env_str("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
+            groq_model=env_str("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            ollama_base_url=env_str("OLLAMA_BASE_URL", "http://localhost:11434"),
+            ollama_model=env_str("OLLAMA_MODEL", "qwen3.5:2b"),
+            profile_docs_provider=env_str("PROFILE_DOCS_PROVIDER", "local").lower(),
+            local_profile_dir=Path(env_str("LOCAL_PROFILE_DIR", "profiles")),
         )

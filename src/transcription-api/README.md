@@ -53,14 +53,18 @@ curl http://localhost:8000/v1/sessions/1/summary
 curl http://localhost:8000/v1/users/123/profile
 ```
 
-Use Groq with an API key:
+Use any OpenAI-compatible chat completions API:
 
 ```text
-LLM_PROVIDER=groq
-GROQ_API_KEY=your_groq_api_key
-GROQ_BASE_URL=https://api.groq.com/openai/v1
-GROQ_MODEL=llama-3.3-70b-versatile
+LLM_PROVIDER=openai
+OPENAI_API_KEY=your_api_key
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4o-mini
 ```
+
+For Groq, set `OPENAI_BASE_URL=https://api.groq.com/openai/v1` and choose a Groq model such as
+`llama-3.3-70b-versatile`. The legacy `LLM_PROVIDER=groq` and `GROQ_*` environment variables are
+still accepted for existing local setups.
 
 Use Ollama for free local testing:
 
