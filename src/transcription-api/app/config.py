@@ -19,14 +19,15 @@ def env_bool(name: str, default: bool = False) -> bool:
 class Settings:
     database_url: str
     whisper_model: str = "base"
+    whisper_device: str = "auto"
     max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES
     upload_tmp_dir: Path = Path(".tmp/uploads")
     recordings_dir: Path = Path("discord_bot/recordings")
     keep_uploads: bool = False
-    llm_provider: str = "xai"
-    xai_api_key: str | None = None
-    xai_base_url: str = "https://api.x.ai/v1"
-    xai_model: str = "grok-4.3"
+    llm_provider: str = "groq"
+    groq_api_key: str | None = None
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    groq_model: str = "llama-3.3-70b-versatile"
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3.5:2b"
     profile_docs_provider: str = "local"
@@ -41,14 +42,15 @@ class Settings:
         return cls(
             database_url=database_url,
             whisper_model=os.getenv("WHISPER_MODEL", "base"),
+            whisper_device=os.getenv("WHISPER_DEVICE", "auto").strip().lower(),
             max_upload_bytes=int(os.getenv("MAX_UPLOAD_BYTES", str(DEFAULT_MAX_UPLOAD_BYTES))),
             upload_tmp_dir=Path(os.getenv("UPLOAD_TMP_DIR", ".tmp/uploads")),
             recordings_dir=Path(os.getenv("RECORDINGS_DIR", "discord_bot/recordings")),
             keep_uploads=env_bool("KEEP_UPLOADS", False),
-            llm_provider=os.getenv("LLM_PROVIDER", "xai").strip().lower(),
-            xai_api_key=os.getenv("XAI_API_KEY"),
-            xai_base_url=os.getenv("XAI_BASE_URL", "https://api.x.ai/v1"),
-            xai_model=os.getenv("XAI_MODEL", "grok-4.3"),
+            llm_provider=os.getenv("LLM_PROVIDER", "groq").strip().lower(),
+            groq_api_key=os.getenv("GROQ_API_KEY"),
+            groq_base_url=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
+            groq_model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
             ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             ollama_model=os.getenv("OLLAMA_MODEL", "qwen3.5:2b"),
             profile_docs_provider=os.getenv("PROFILE_DOCS_PROVIDER", "local").strip().lower(),

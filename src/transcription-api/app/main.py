@@ -18,7 +18,7 @@ from data.repository import DataRepository, MessageInsert, UserProfile, VoiceSes
 from .agent import SessionAgent
 from .config import Settings
 from .docs_client import LocalMarkdownProfileClient
-from .llm import GrokClient, LLMClient, OllamaClient
+from .llm import GroqClient, LLMClient, OllamaClient
 from .schemas import (
     CreateSessionRequest,
     FinishSessionRequest,
@@ -211,15 +211,15 @@ def get_repository(settings: Settings = Depends(get_settings)) -> DataRepository
 
 
 def get_transcriber(settings: Settings = Depends(get_settings)) -> WhisperTranscriber:
-    return WhisperTranscriber(settings.whisper_model)
+    return WhisperTranscriber(settings.whisper_model, settings.whisper_device)
 
 
 def get_llm_client(settings: Settings = Depends(get_settings)) -> LLMClient:
     if settings.llm_provider == "ollama":
         return OllamaClient(base_url=settings.ollama_base_url, model=settings.ollama_model)
-    if settings.llm_provider != "xai":
-        raise RuntimeError(f"Unsupported LLM_PROVIDER: {settings.llm_provider}")
-    return GrokClient(api_key=settings.xai_api_key, base_url=settings.xai_base_url, model=settings.xai_model)
+    if settings.llm_provider == "groq":
+        return GroqClient(api_key=settings.groq_api_key, base_url=settings.groq_base_url, model=settings.groq_model)
+    raise RuntimeError(f"Unsupported LLM_PROVIDER: {settings.llm_provider}. Use 'groq' or 'ollama'.")
 
 
 def get_docs_client(settings: Settings = Depends(get_settings)):

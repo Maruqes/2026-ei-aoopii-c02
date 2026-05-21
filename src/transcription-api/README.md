@@ -53,7 +53,16 @@ curl http://localhost:8000/v1/sessions/1/summary
 curl http://localhost:8000/v1/users/123/profile
 ```
 
-Use Ollama instead of Grok for free local testing:
+Use Groq with an API key:
+
+```text
+LLM_PROVIDER=groq
+GROQ_API_KEY=your_groq_api_key
+GROQ_BASE_URL=https://api.groq.com/openai/v1
+GROQ_MODEL=llama-3.3-70b-versatile
+```
+
+Use Ollama for free local testing:
 
 ```powershell
 ollama pull qwen2.5:7b
@@ -68,13 +77,3 @@ OLLAMA_BASE_URL=http://host.docker.internal:11434
 ```
 
 Use `http://localhost:11434` for `OLLAMA_BASE_URL` only when the API is running directly on the host instead of inside Docker.
-
-Profiles are written to local Markdown files by default:
-
-```text
-PROFILE_DOCS_PROVIDER=local
-LOCAL_PROFILE_DIR=/app/profiles
-```
-
-Docker maps `/app/profiles` to `./profiles` in the repo.
-Generated profile files use these sections: Summary, Interests, Communication Style, Persona Notes, and Recent Updates.

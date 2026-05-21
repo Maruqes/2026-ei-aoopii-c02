@@ -10,6 +10,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY src/transcription-api/requirements.txt /app/src/transcription-api/requirements.txt
+ARG PYTORCH_CUDA_INDEX_URL=https://download.pytorch.org/whl/cu126
+RUN pip install --no-cache-dir torch torchvision torchaudio --index-url ${PYTORCH_CUDA_INDEX_URL}
 RUN pip install --no-cache-dir -r /app/src/transcription-api/requirements.txt
 
 COPY src /app/src

@@ -20,18 +20,24 @@ services:
     build:
       context: .
       dockerfile: src/transcription-api/Dockerfile
+      args:
+        PYTORCH_CUDA_INDEX_URL: ${PYTORCH_CUDA_INDEX_URL:-https://download.pytorch.org/whl/cu126}
     container_name: discord-anthropologist-api
+    gpus: all
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-discord}:${POSTGRES_PASSWORD:-discord}@postgres:5432/${POSTGRES_DB:-discord_anthropologist}
       WHISPER_MODEL: ${WHISPER_MODEL:-base}
+      WHISPER_DEVICE: ${WHISPER_DEVICE:-auto}
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-262144000}
       UPLOAD_TMP_DIR: ${UPLOAD_TMP_DIR:-.tmp/uploads}
       RECORDINGS_DIR: /app/recordings
       KEEP_UPLOADS: ${KEEP_UPLOADS:-false}
-      LLM_PROVIDER: ${LLM_PROVIDER:-xai}
-      XAI_API_KEY: ${XAI_API_KEY:-}
-      XAI_BASE_URL: ${XAI_BASE_URL:-https://api.x.ai/v1}
-      XAI_MODEL: ${XAI_MODEL:-grok-4.3}
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+      LLM_PROVIDER: ${LLM_PROVIDER:-groq}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_BASE_URL: ${GROQ_BASE_URL:-https://api.groq.com/openai/v1}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
       PROFILE_DOCS_PROVIDER: ${PROFILE_DOCS_PROVIDER:-local}

@@ -15,7 +15,8 @@ if str(API_ROOT) not in sys.path:
 
 from app.config import Settings  # noqa: E402
 import app.main as main_module  # noqa: E402
-from app.main import create_app, get_repository, get_settings, get_transcriber  # noqa: E402
+from app.llm import GroqClient, OllamaClient  # noqa: E402
+from app.main import create_app, get_llm_client, get_repository, get_settings, get_transcriber  # noqa: E402
 from app.transcriber import WhisperResult, WhisperSegment  # noqa: E402
 from data.repository import ChunkInfo, TranscriptionInsertResult, VoiceSession  # noqa: E402
 
@@ -143,6 +144,38 @@ def make_client(tmp_path, repository=None, max_upload_bytes=1024 * 1024):
     app.dependency_overrides[get_repository] = lambda: fake_repo
     app.dependency_overrides[get_transcriber] = lambda: FakeTranscriber()
     return TestClient(app), fake_repo, recordings_dir
+
+
+def test_get_llm_client_uses_groq_provider():
+    client = get_llm_client(
+        Settings(
+            database_url="postgresql://test:test@localhost:5432/test",
+            llm_provider="groq",
+            groq_api_key="test-key",
+            groq_base_url="https://api.groq.com/openai/v1",
+            groq_model="llama-3.3-70b-versatile",
+        )
+    )
+
+    assert isinstance(client, GroqClient)
+    assert client.api_key == "test-key"
+    assert client.base_url == "https://api.groq.com/openai/v1"
+    assert client.model == "llama-3.3-70b-versatile"
+
+
+def test_get_llm_client_uses_ollama_provider():
+    client = get_llm_client(
+        Settings(
+            database_url="postgresql://test:test@localhost:5432/test",
+            llm_provider="ollama",
+            ollama_base_url="http://localhost:11434",
+            ollama_model="qwen2.5:7b",
+        )
+    )
+
+    assert isinstance(client, OllamaClient)
+    assert client.base_url == "http://localhost:11434"
+    assert client.model == "qwen2.5:7b"
 
 
 def test_health_uses_repository(tmp_path):

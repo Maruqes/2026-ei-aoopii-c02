@@ -32,7 +32,7 @@ class LLMClient(Protocol):
         ...
 
 
-class GrokClient:
+class GroqClient:
     def __init__(self, *, api_key: str | None, base_url: str, model: str):
         self.api_key = api_key
         self.base_url = base_url
@@ -40,7 +40,7 @@ class GrokClient:
         self._client = None
 
     def summarize_session(self, transcript: str) -> str:
-        content = self._complete(
+        content = self._chat(
             system=(
                 "You summarize Discord voice-call transcripts. Return exactly one concise sentence. "
                 "Do not mention that this came from a transcript."
@@ -58,12 +58,12 @@ class GrokClient:
         transcript: str,
     ) -> GeneratedProfile:
         existing = asdict(existing_profile) if existing_profile else {}
-        content = self._complete(
+        content = self._chat(
             system=(
                 "You write lively, creative Discord user profiles from voice-call transcripts. "
                 "Make the profile feel specific, colorful, and useful for understanding the person's vibe, while staying grounded in what they actually said. "
                 "Do not list identifiers, usernames, Discord IDs, or generic account facts. "
-                "Return strict JSON with keys: summary, interests, communication_style, persona_notes, recent_updates."
+                "Return only valid JSON with keys: summary, interests, communication_style, persona_notes, recent_updates."
             ),
             user=(
                 f"User: {username}\n\n"
@@ -71,25 +71,32 @@ class GrokClient:
                 f"Existing profile document text:\n{existing_doc_text or '<empty>'}\n\n"
                 f"Latest session transcript:\n{transcript}"
             ),
+            json_format=True,
         )
         return generated_profile_from_json(content)
 
-    def _complete(self, *, system: str, user: str) -> str:
+    def _chat(self, *, system: str, user: str, json_format: bool = False) -> str:
         if not self.api_key:
-            raise RuntimeError("XAI_API_KEY is required for Grok profile generation")
+            raise RuntimeError("GROQ_API_KEY is required when LLM_PROVIDER=groq")
 
         client = self._load_client()
-        response = client.responses.create(
+        kwargs = {}
+        if json_format:
+            kwargs["response_format"] = {"type": "json_object"}
+
+        response = client.chat.completions.create(
             model=self.model,
-            input=[
+            messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
+            **kwargs,
         )
-        output_text = getattr(response, "output_text", None)
-        if output_text:
-            return str(output_text).strip()
-        raise RuntimeError("Grok response did not include output_text")
+        choice = response.choices[0] if response.choices else None
+        content = getattr(getattr(choice, "message", None), "content", None)
+        if content:
+            return str(content).strip()
+        raise RuntimeError("Groq response did not include choices[0].message.content")
 
     def _load_client(self):
         if self._client is None:
@@ -136,6 +143,7 @@ class OllamaClient:
                 f"Existing profile document text:\n{existing_doc_text or '<empty>'}\n\n"
                 f"Latest session transcript:\n{transcript}"
             ),
+            json_format=True,
         )
         return generated_profile_from_json(content)
 
