@@ -24,7 +24,7 @@ const (
 	channels       = 2
 	bitsPerSample  = 16
 	maxFrameMs     = 120
-	minRTPGapPadMs = 200
+	minRTPGapPadMs = 20
 )
 
 type WAVWriter struct {
