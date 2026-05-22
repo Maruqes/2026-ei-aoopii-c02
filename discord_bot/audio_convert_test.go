@@ -6,19 +6,60 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"gopkg.in/hraban/opus.v2"
 )
 
 func TestConfiguredDecoderAcceptsDiscordSilenceFrame(t *testing.T) {
-	decoder, err := opus.NewDecoder(sampleRate, channels)
+	decoder, err := newDiscordOpusDecoder()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	pcm := make([]int16, maxFrameMs*sampleRate/1000*channels)
-	if _, err := decoder.Decode([]byte{0xf8, 0xff, 0xfe}, pcm); err != nil {
+	pcm, frames, err := decoder.Decode([]byte{0xf8, 0xff, 0xfe})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if len(pcm) != frames*channels {
+		t.Fatalf("decoded PCM has %d samples, want %d", len(pcm), frames*channels)
+	}
+}
+
+func TestWAVHeaderDescribesDiscordPCM(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "recording.wav")
+	wav, err := NewWAVWriter(path, sampleRate, channels, bitsPerSample)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := wav.WritePCM([]int16{1, 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := wav.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) < 44 {
+		t.Fatalf("WAV is %d bytes, want header", len(data))
+	}
+	if got := string(data[:4]); got != "RIFF" {
+		t.Fatalf("WAV chunk ID = %q, want RIFF", got)
+	}
+	if got := string(data[8:12]); got != "WAVE" {
+		t.Fatalf("WAV format = %q, want WAVE", got)
+	}
+	if got := binary.LittleEndian.Uint16(data[20:22]); got != 1 {
+		t.Fatalf("WAV audio format = %d, want PCM", got)
+	}
+	if got := binary.LittleEndian.Uint16(data[22:24]); got != channels {
+		t.Fatalf("WAV channels = %d, want %d", got, channels)
+	}
+	if got := binary.LittleEndian.Uint32(data[24:28]); got != sampleRate {
+		t.Fatalf("WAV sample rate = %d, want %d", got, sampleRate)
+	}
+	if got := binary.LittleEndian.Uint16(data[34:36]); got != bitsPerSample {
+		t.Fatalf("WAV bit depth = %d, want %d", got, bitsPerSample)
 	}
 }
 
@@ -30,10 +71,10 @@ func TestTimedRecordingPreservesRTPGapsInWAV(t *testing.T) {
 	}
 
 	recording := &userAudioRecording{wav: wav, startedAt: time.Now()}
-	if err := recording.writeTimedPCM(7, 100, []int16{1, 2}, 2); err != nil {
+	if err := recording.writeTimedPCM(7, 100, []int16{1, 2, 3, 4}, 2); err != nil {
 		t.Fatal(err)
 	}
-	if err := recording.writeTimedPCM(7, 107, []int16{5}, 1); err != nil {
+	if err := recording.writeTimedPCM(7, 107, []int16{5, 6}, 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := wav.Close(); err != nil {
@@ -41,7 +82,7 @@ func TestTimedRecordingPreservesRTPGapsInWAV(t *testing.T) {
 	}
 
 	samples := readWAVSamples(t, path)
-	want := []int16{1, 2, 0, 0, 0, 0, 0, 5}
+	want := []int16{1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 6}
 	if len(samples) != len(want) {
 		t.Fatalf("got %d samples, want %d: %v", len(samples), len(want), samples)
 	}
@@ -76,6 +117,20 @@ func TestRecordingDropsOlderRTPTimestamps(t *testing.T) {
 	samples := readWAVSamples(t, path)
 	if len(samples) != 2 || samples[0] != 1 || samples[1] != 2 {
 		t.Fatalf("stale packet changed WAV samples: %v", samples)
+	}
+}
+
+func TestTimedRecordingRejectsIncompleteStereoPCM(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "recording.wav")
+	wav, err := NewWAVWriter(path, sampleRate, channels, bitsPerSample)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = wav.Close() })
+
+	recording := &userAudioRecording{wav: wav, startedAt: time.Now()}
+	if err := recording.writeTimedPCM(7, 100, []int16{1}, 1); err == nil {
+		t.Fatal("incomplete PCM was accepted")
 	}
 }
 

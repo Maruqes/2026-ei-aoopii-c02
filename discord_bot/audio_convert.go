@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -13,8 +14,6 @@ import (
 	"gopkg.in/hraban/opus.v2"
 )
 
-//converts opus slop into OCM into file
-
 /*
 sudo dnf install opus opus-devel
 sudo dnf install opus opus-devel opusfile opusfile-devel pkgconf-pkg-config
@@ -22,7 +21,7 @@ sudo dnf install opus opus-devel opusfile opusfile-devel pkgconf-pkg-config
 
 const (
 	sampleRate    = 48000
-	channels      = 1
+	channels      = 2
 	bitsPerSample = 16
 	maxFrameMs    = 120
 )
@@ -45,6 +44,36 @@ type userAudioRecording struct {
 	ssrc             uint32
 	nextRTPTimestamp uint32
 	hasRTPTimestamp  bool
+}
+
+type discordOpusDecoder struct {
+	decoder *opus.Decoder
+	pcm     []int16
+}
+
+func newDiscordOpusDecoder() (*discordOpusDecoder, error) {
+	decoder, err := opus.NewDecoder(sampleRate, channels)
+	if err != nil {
+		return nil, err
+	}
+
+	maxSamplesPerChannel := maxFrameMs * sampleRate / 1000
+	return &discordOpusDecoder{
+		decoder: decoder,
+		pcm:     make([]int16, maxSamplesPerChannel*channels),
+	}, nil
+}
+
+func (d *discordOpusDecoder) Decode(opusPacket []byte) ([]int16, int, error) {
+	if d == nil || d.decoder == nil {
+		return nil, 0, fmt.Errorf("decoder Opus do Discord nao configurado")
+	}
+
+	frames, err := d.decoder.Decode(opusPacket, d.pcm)
+	if err != nil {
+		return nil, 0, err
+	}
+	return d.pcm[:frames*channels], frames, nil
 }
 
 func NewWAVWriter(path string, sampleRate uint32, channels uint16, bitDepth uint16) (*WAVWriter, error) {
@@ -287,9 +316,7 @@ func ListenAndWriteOpusToWAV(
 
 	log.Printf("a gravar áudio para a pasta %s", outDir)
 
-	maxSamplesPerChannel := maxFrameMs * sampleRate / 1000
-	pcm := make([]int16, maxSamplesPerChannel*channels)
-	decoders := make(map[uint32]*opus.Decoder)
+	decoders := make(map[uint32]*discordOpusDecoder)
 	userRecordings := make(map[string]*userAudioRecording)
 	identifiedUsers := make(map[uint32]string)
 	unknownSSRCs := make(map[uint32]bool)
@@ -349,18 +376,18 @@ func ListenAndWriteOpusToWAV(
 				}
 			}
 
+			if discordID == "" {
+				continue
+			}
+
 			dec := decoders[packet.SSRC]
 			if dec == nil {
-				newDecoder, err := opus.NewDecoder(sampleRate, channels)
+				newDecoder, err := newDiscordOpusDecoder()
 				if err != nil {
 					return err
 				}
 				dec = newDecoder
 				decoders[packet.SSRC] = dec
-			}
-
-			if discordID == "" {
-				continue
 			}
 
 			packetAt := time.Now().UTC()
@@ -376,7 +403,7 @@ func ListenAndWriteOpusToWAV(
 				}
 			}
 
-			n, err := dec.Decode(packet.Opus, pcm)
+			pcm, frames, err := dec.Decode(packet.Opus)
 			if err != nil {
 				log.Printf("erro a descodificar opus (ssrc=%d): %v", packet.SSRC, err)
 				continue
@@ -400,7 +427,7 @@ func ListenAndWriteOpusToWAV(
 				log.Printf("a gravar user=%s para %s", discordID, outPath)
 			}
 
-			if err := recording.writeTimedPCM(packet.SSRC, packet.Timestamp, pcm[:n*channels], n); err != nil {
+			if err := recording.writeTimedPCM(packet.SSRC, packet.Timestamp, pcm, frames); err != nil {
 				return err
 			}
 		}
@@ -423,6 +450,10 @@ func (recording *userAudioRecording) writeTimedPCM(ssrc uint32, timestamp uint32
 	if recording == nil || recording.wav == nil || frames <= 0 {
 		return nil
 	}
+	samples := frames * int(recording.wav.channels)
+	if samples > len(pcm) {
+		return fmt.Errorf("WAV PCM incompleto: frames=%d channels=%d samples=%d", frames, recording.wav.channels, len(pcm))
+	}
 
 	gapFrames, ok := recording.rtpGapFrames(ssrc, timestamp)
 	if !ok {
@@ -431,7 +462,7 @@ func (recording *userAudioRecording) writeTimedPCM(ssrc uint32, timestamp uint32
 	if err := recording.wav.WriteSilence(gapFrames); err != nil {
 		return err
 	}
-	if err := recording.wav.WritePCM(pcm); err != nil {
+	if err := recording.wav.WritePCM(pcm[:samples]); err != nil {
 		return err
 	}
 
