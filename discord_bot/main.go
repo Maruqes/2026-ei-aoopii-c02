@@ -30,6 +30,14 @@ func registerCommands(dg *discordgo.Session, appID string) error {
 			Description: "Responde com PONG!",
 		},
 		{
+			Name:        "start",
+			Description: "Reativa o comportamento normal do bot.",
+		},
+		{
+			Name:        "stop",
+			Description: "Pausa o bot, derruba as calls e bloqueia novas entradas.",
+		},
+		{
 			Name:        "profile",
 			Description: "Mostra o perfil gerado de um utilizador.",
 			Options: []*discordgo.ApplicationCommandOption{
@@ -53,6 +61,10 @@ func handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	switch strings.ToLower(data.Name) {
 	case "ping":
 		pingHook(s, i)
+	case "start":
+		startHook(s, i)
+	case "stop":
+		stopHook(s, i)
 	case "profile":
 		profileHook(s, i)
 	}
@@ -63,6 +75,17 @@ func pingHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{Content: "PONGGG!"},
 	})
+}
+
+func startHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	setBotEnabled(true)
+	respondText(s, i, "Bot reativado. Vou voltar a entrar nas calls normalmente.")
+}
+
+func stopHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	setBotEnabled(false)
+	stopAllVoiceConnections()
+	respondText(s, i, "Bot pausado. Sai de todas as calls e nao vai entrar em novas calls até /start.")
 }
 
 func profileHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -203,7 +226,7 @@ func main() {
 	}
 	defer dg.Close()
 
-	fmt.Println("Bot online. Comando: /ping")
+	fmt.Println("Bot online. Comandos: /ping /start /stop /profile")
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop

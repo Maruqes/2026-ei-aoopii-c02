@@ -1,3 +1,0 @@
-openai-whisper
-
-// winget install Gyan.FFmpeg 

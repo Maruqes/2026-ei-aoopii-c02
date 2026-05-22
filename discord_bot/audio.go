@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -40,7 +41,12 @@ type recordingControlEvent struct {
 var (
 	voiceConnections = make(map[string]*voiceConnectionState)
 	voiceMu          sync.Mutex
+	botEnabled       atomic.Bool
 )
+
+func init() {
+	botEnabled.Store(true)
+}
 
 func newVoiceConnectionState(
 	vc *discordgo.VoiceConnection,
@@ -108,6 +114,33 @@ func clearVoiceConnection(guildID string, vc *discordgo.VoiceConnection) {
 	}
 	if current.vc == vc {
 		delete(voiceConnections, guildID)
+	}
+}
+
+func setBotEnabled(enabled bool) {
+	botEnabled.Store(enabled)
+}
+
+func isBotEnabled() bool {
+	return botEnabled.Load()
+}
+
+func stopAllVoiceConnections() {
+	voiceMu.Lock()
+	connections := voiceConnections
+	voiceConnections = make(map[string]*voiceConnectionState)
+	voiceMu.Unlock()
+
+	for guildID, state := range connections {
+		if state == nil || state.vc == nil {
+			continue
+		}
+
+		state.queueAllRecordingsFinish()
+		state.ssrcUsers.Reset()
+		if err := state.vc.Disconnect(); err != nil {
+			log.Printf("erro ao desligar bot do servidor %s: %v", guildID, err)
+		}
 	}
 }
 
@@ -283,6 +316,9 @@ func receiveAudio(s *discordgo.Session, guildID string, state *voiceConnectionSt
 func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 	// Ignora o próprio bot
 	if s.State != nil && s.State.User != nil && vs.UserID == s.State.User.ID {
+		return
+	}
+	if !isBotEnabled() {
 		return
 	}
 
