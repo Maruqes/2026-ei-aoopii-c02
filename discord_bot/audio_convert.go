@@ -22,7 +22,7 @@ sudo dnf install opus opus-devel opusfile opusfile-devel pkgconf-pkg-config
 
 const (
 	sampleRate    = 48000
-	channels      = 1
+	channels      = 2
 	bitsPerSample = 16
 	maxFrameMs    = 120
 )
@@ -36,12 +36,15 @@ type WAVWriter struct {
 }
 
 type userAudioRecording struct {
-	wav       *WAVWriter
-	path      string
-	startedAt time.Time
-	user      voiceUserInfo
-	channel   string
-	sessionID int64
+	wav              *WAVWriter
+	path             string
+	startedAt        time.Time
+	user             voiceUserInfo
+	channel          string
+	sessionID        int64
+	ssrc             uint32
+	nextRTPTimestamp uint32
+	hasRTPTimestamp  bool
 }
 
 func NewWAVWriter(path string, sampleRate uint32, channels uint16, bitDepth uint16) (*WAVWriter, error) {
@@ -124,13 +127,40 @@ func (w *WAVWriter) writeHeader(dataSize uint32) error {
 }
 
 func (w *WAVWriter) WritePCM(pcm []int16) error {
-	for _, s := range pcm {
-		if err := binary.Write(w.f, binary.LittleEndian, s); err != nil {
+	if len(pcm) == 0 {
+		return nil
+	}
+	if err := binary.Write(w.f, binary.LittleEndian, pcm); err != nil {
+		return err
+	}
+
+	w.dataSize += uint32(len(pcm) * 2)
+	return nil
+}
+
+func (w *WAVWriter) WriteSilence(frames int) error {
+	if frames <= 0 {
+		return nil
+	}
+
+	const maxSilenceChunkFrames = sampleRate
+	zeros := make([]int16, maxSilenceChunkFrames*int(w.channels))
+	for frames > 0 {
+		chunkFrames := min(frames, maxSilenceChunkFrames)
+		if err := w.WritePCM(zeros[:chunkFrames*int(w.channels)]); err != nil {
 			return err
 		}
-		w.dataSize += 2
+		frames -= chunkFrames
 	}
 	return nil
+}
+
+func (w *WAVWriter) FramesWritten() int64 {
+	bytesPerFrame := int64(w.channels) * int64(w.bitDepth) / 8
+	if bytesPerFrame == 0 {
+		return 0
+	}
+	return int64(w.dataSize) / bytesPerFrame
 }
 
 func (w *WAVWriter) Close() error {
@@ -186,6 +216,11 @@ func closeAndTranscribeRecording(recording *userAudioRecording, info voiceUserIn
 	user := mergeVoiceUserInfo(info, recording.user)
 	if user.DiscordID == "" {
 		user = recording.user.withFallbacks()
+	}
+
+	if err := recording.padToElapsed(time.Now().UTC()); err != nil {
+		log.Printf("erro ao preencher silêncio final do WAV de user=%s: %v", user.DiscordID, err)
+		return err
 	}
 
 	log.Printf(
@@ -328,13 +363,25 @@ func ListenAndWriteOpusToWAV(
 				continue
 			}
 
+			packetAt := time.Now().UTC()
+			recording := userRecordings[discordID]
+			if recording != nil && recording.hasRTPTimestamp && recording.ssrc != packet.SSRC {
+				if err := recording.padToElapsed(packetAt); err != nil {
+					return err
+				}
+			}
+			if recording != nil {
+				if _, ok := recording.rtpGapFrames(packet.SSRC, packet.Timestamp); !ok {
+					continue
+				}
+			}
+
 			n, err := dec.Decode(packet.Opus, pcm)
 			if err != nil {
 				log.Printf("erro a descodificar opus (ssrc=%d): %v", packet.SSRC, err)
 				continue
 			}
 
-			recording := userRecordings[discordID]
 			if recording == nil {
 				outPath := newUserAudioPath(outDir, discordID)
 				newWriter, err := NewWAVWriter(outPath, sampleRate, channels, bitsPerSample)
@@ -344,7 +391,7 @@ func ListenAndWriteOpusToWAV(
 				recording = &userAudioRecording{
 					wav:       newWriter,
 					path:      outPath,
-					startedAt: time.Now().UTC(),
+					startedAt: packetAt,
 					user:      getRecordingUserInfo(discordID, lookupUserInfo),
 					channel:   getCurrentChannelName(currentChannelName, vc.ChannelID),
 					sessionID: sessionID,
@@ -353,11 +400,58 @@ func ListenAndWriteOpusToWAV(
 				log.Printf("a gravar user=%s para %s", discordID, outPath)
 			}
 
-			if err := recording.wav.WritePCM(pcm[:n*channels]); err != nil {
+			if err := recording.writeTimedPCM(packet.SSRC, packet.Timestamp, pcm[:n*channels], n); err != nil {
 				return err
 			}
 		}
 	}
+}
+
+func (recording *userAudioRecording) rtpGapFrames(ssrc uint32, timestamp uint32) (int, bool) {
+	if recording == nil || !recording.hasRTPTimestamp || recording.ssrc != ssrc {
+		return 0, true
+	}
+
+	gap := int32(timestamp - recording.nextRTPTimestamp)
+	if gap < 0 {
+		return 0, false
+	}
+	return int(gap), true
+}
+
+func (recording *userAudioRecording) writeTimedPCM(ssrc uint32, timestamp uint32, pcm []int16, frames int) error {
+	if recording == nil || recording.wav == nil || frames <= 0 {
+		return nil
+	}
+
+	gapFrames, ok := recording.rtpGapFrames(ssrc, timestamp)
+	if !ok {
+		return nil
+	}
+	if err := recording.wav.WriteSilence(gapFrames); err != nil {
+		return err
+	}
+	if err := recording.wav.WritePCM(pcm); err != nil {
+		return err
+	}
+
+	recording.ssrc = ssrc
+	recording.nextRTPTimestamp = timestamp + uint32(frames)
+	recording.hasRTPTimestamp = true
+	return nil
+}
+
+func (recording *userAudioRecording) padToElapsed(endAt time.Time) error {
+	if recording == nil || recording.wav == nil || recording.startedAt.IsZero() || !endAt.After(recording.startedAt) {
+		return nil
+	}
+
+	elapsedFrames := endAt.Sub(recording.startedAt).Nanoseconds() * sampleRate / int64(time.Second)
+	missingFrames := elapsedFrames - recording.wav.FramesWritten()
+	if missingFrames <= 0 {
+		return nil
+	}
+	return recording.wav.WriteSilence(int(missingFrames))
 }
 
 func getRecordingUserInfo(discordID string, lookupUserInfo func(string) voiceUserInfo) voiceUserInfo {
