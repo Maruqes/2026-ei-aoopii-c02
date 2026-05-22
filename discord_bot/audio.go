@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"log"
-	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -341,9 +341,9 @@ func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 	ssrcUsers := NewSSRCUserMap()
 	channelName := resolveVoiceChannelName(s, channelID)
 	transcriptionClient := NewTranscriptionClientFromEnv()
-	summaryChannelID := strings.TrimSpace(os.Getenv("DISCORD_SUMMARY_CHANNEL_ID"))
+	summaryChannelID := resolveSummaryTextChannelID(s, guildID)
 	if summaryChannelID == "" {
-		log.Printf("DISCORD_SUMMARY_CHANNEL_ID nao definido; resumos nao serao publicados no Discord")
+		log.Printf("nao foi possivel resolver canal de texto para resumo no servidor %s", guildID)
 	}
 	sessionID := createAPISession(transcriptionClient, guildID, channelID, channelName, summaryChannelID)
 	state := newVoiceConnectionState(vc, ssrcUsers, channelName, transcriptionClient, sessionID, summaryChannelID)
@@ -451,6 +451,126 @@ func resolveVoiceChannelName(s *discordgo.Session, channelID string) string {
 	return channelID
 }
 
+func resolveSummaryTextChannelID(s *discordgo.Session, guildID string) string {
+	guild, err := summaryGuild(s, guildID)
+	if err != nil {
+		log.Printf("erro ao obter servidor %s para resolver canal de resumo: %v", guildID, err)
+		return ""
+	}
+
+	channels, err := summaryGuildChannels(s, guild)
+	if err != nil {
+		log.Printf("erro ao obter canais do servidor %s para resolver canal de resumo: %v", guildID, err)
+		return ""
+	}
+
+	systemChannelID := strings.TrimSpace(guild.SystemChannelID)
+	if systemChannelID != "" && summaryTextChannelByID(channels, systemChannelID) == nil {
+		channel, err := s.Channel(systemChannelID)
+		if err != nil {
+			log.Printf("erro ao obter canal de sistema %s do servidor %s: %v", systemChannelID, guildID, err)
+		} else {
+			channels = append(channels, channel)
+		}
+	}
+
+	channel := selectSummaryTextChannel(channels, systemChannelID, func(channel *discordgo.Channel) bool {
+		return canSendSummaryToChannel(s, channel)
+	})
+	if channel == nil {
+		return ""
+	}
+
+	if channel.ID == systemChannelID {
+		log.Printf("canal de resumo resolvido pelo canal de sistema servidor=%s canal=%s", guildID, channel.ID)
+	} else {
+		log.Printf("canal de resumo resolvido pelo primeiro canal de texto servidor=%s canal=%s", guildID, channel.ID)
+	}
+	return channel.ID
+}
+
+func summaryGuild(s *discordgo.Session, guildID string) (*discordgo.Guild, error) {
+	if s != nil && s.State != nil {
+		if guild, err := s.State.Guild(guildID); err == nil {
+			return guild, nil
+		}
+	}
+	return s.Guild(guildID)
+}
+
+func summaryGuildChannels(s *discordgo.Session, guild *discordgo.Guild) ([]*discordgo.Channel, error) {
+	if guild != nil && len(guild.Channels) > 0 {
+		return guild.Channels, nil
+	}
+	return s.GuildChannels(guild.ID)
+}
+
+func selectSummaryTextChannel(
+	channels []*discordgo.Channel,
+	systemChannelID string,
+	canSend func(*discordgo.Channel) bool,
+) *discordgo.Channel {
+	if channel := summaryTextChannelByID(channels, systemChannelID); channel != nil && summaryChannelAllowed(channel, canSend) {
+		return channel
+	}
+
+	candidates := make([]*discordgo.Channel, 0, len(channels))
+	for _, channel := range channels {
+		if isSummaryTextChannel(channel) && summaryChannelAllowed(channel, canSend) {
+			candidates = append(candidates, channel)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].Position == candidates[j].Position {
+			return candidates[i].ID < candidates[j].ID
+		}
+		return candidates[i].Position < candidates[j].Position
+	})
+	return candidates[0]
+}
+
+func summaryTextChannelByID(channels []*discordgo.Channel, channelID string) *discordgo.Channel {
+	channelID = strings.TrimSpace(channelID)
+	if channelID == "" {
+		return nil
+	}
+	for _, channel := range channels {
+		if channel != nil && channel.ID == channelID && isSummaryTextChannel(channel) {
+			return channel
+		}
+	}
+	return nil
+}
+
+func isSummaryTextChannel(channel *discordgo.Channel) bool {
+	return channel != nil && channel.Type == discordgo.ChannelTypeGuildText
+}
+
+func summaryChannelAllowed(channel *discordgo.Channel, canSend func(*discordgo.Channel) bool) bool {
+	return canSend == nil || canSend(channel)
+}
+
+func canSendSummaryToChannel(s *discordgo.Session, channel *discordgo.Channel) bool {
+	if s == nil || channel == nil {
+		return false
+	}
+
+	if s.State == nil || s.State.User == nil || strings.TrimSpace(s.State.User.ID) == "" {
+		return true
+	}
+
+	permissions, err := s.UserChannelPermissions(s.State.User.ID, channel.ID)
+	if err != nil {
+		log.Printf("erro ao verificar permissao de envio no canal de resumo %s: %v", channel.ID, err)
+		return true
+	}
+	return permissions&discordgo.PermissionSendMessages != 0
+}
+
 func (info voiceUserInfo) withFallbacks() voiceUserInfo {
 	info.DiscordID = strings.TrimSpace(info.DiscordID)
 	info.Username = strings.TrimSpace(info.Username)
@@ -522,7 +642,7 @@ func finishSessionAndPostSummary(s *discordgo.Session, state *voiceConnectionSta
 		return
 	}
 	if strings.TrimSpace(state.summaryChannelID) == "" {
-		log.Printf("resumo pronto para sessao id=%d mas DISCORD_SUMMARY_CHANNEL_ID nao esta definido", state.sessionID)
+		log.Printf("resumo pronto para sessao id=%d mas nao ha canal de texto resolvido", state.sessionID)
 		return
 	}
 
