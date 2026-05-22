@@ -24,7 +24,7 @@ const (
 	channels       = 2
 	bitsPerSample  = 16
 	maxFrameMs     = 120
-	minRTPGapPadMs = 200
+	minRTPGapPadMs = 150
 )
 
 type WAVWriter struct {
@@ -423,7 +423,7 @@ func ListenAndWriteOpusToWAV(
 				log.Printf("a gravar user=%s para %s", discordID, outPath)
 			}
 
-			if err := recording.writeTimedPCMWithDecoder(packet.SSRC, packet.Timestamp, pcm, frames, dec); err != nil {
+			if err := recording.writeTimedPCM(packet.SSRC, packet.Timestamp, pcm, frames); err != nil {
 				return err
 			}
 		}
@@ -439,14 +439,13 @@ func (recording *userAudioRecording) rtpGapFrames(ssrc uint32, timestamp uint32)
 	if gap < 0 {
 		return 0, false
 	}
+	if gap < int32(sampleRate*minRTPGapPadMs/1000) {
+		return 0, true
+	}
 	return int(gap), true
 }
 
 func (recording *userAudioRecording) writeTimedPCM(ssrc uint32, timestamp uint32, pcm []int16, frames int) error {
-	return recording.writeTimedPCMWithDecoder(ssrc, timestamp, pcm, frames, nil)
-}
-
-func (recording *userAudioRecording) writeTimedPCMWithDecoder(ssrc uint32, timestamp uint32, pcm []int16, frames int, dec *discordOpusDecoder) error {
 	if recording == nil || recording.wav == nil || frames <= 0 {
 		return nil
 	}
@@ -459,40 +458,8 @@ func (recording *userAudioRecording) writeTimedPCMWithDecoder(ssrc uint32, times
 	if !ok {
 		return nil
 	}
-	if gapFrames > 0 {
-		thresholdFrames := int(sampleRate * minRTPGapPadMs / 1000)
-		if gapFrames < thresholdFrames {
-			if dec != nil {
-				// Use Opus PLC by asking decoder to produce missing frames
-				remaining := gapFrames
-				for remaining > 0 {
-					f, err := dec.decoder.Decode(nil, dec.pcm)
-					if err != nil {
-						// fall back to silence if PLC fails
-						if err := recording.wav.WriteSilence(remaining); err != nil {
-							return err
-						}
-						break
-					}
-					outSamples := f * int(recording.wav.channels)
-					if outSamples > len(dec.pcm) {
-						outSamples = len(dec.pcm)
-					}
-					if err := recording.wav.WritePCM(dec.pcm[:outSamples]); err != nil {
-						return err
-					}
-					remaining -= f
-				}
-			} else {
-				// collapse tiny gaps when no decoder available (preserve existing test behavior)
-				gapFrames = 0
-			}
-		}
-		if gapFrames > 0 {
-			if err := recording.wav.WriteSilence(gapFrames); err != nil {
-				return err
-			}
-		}
+	if err := recording.wav.WriteSilence(gapFrames); err != nil {
+		return err
 	}
 	if err := recording.wav.WritePCM(pcm[:samples]); err != nil {
 		return err
