@@ -104,7 +104,8 @@ func TestTimedRecordingPreservesLargeRTPGapsInWAV(t *testing.T) {
 	if err := recording.writeTimedPCM(7, 100, []int16{1, 2}, 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := recording.writeTimedPCM(7, 100+sampleRate/1000*300, []int16{3, 4}, 1); err != nil {
+	gapFrames := sampleRate / 1000 * 300
+	if err := recording.writeTimedPCM(7, uint32(100+1+gapFrames), []int16{3, 4}, 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := wav.Close(); err != nil {
@@ -114,7 +115,6 @@ func TestTimedRecordingPreservesLargeRTPGapsInWAV(t *testing.T) {
 	samples := readWAVSamples(t, path)
 	wantPrefix := []int16{1, 2}
 	wantSuffix := []int16{3, 4}
-	gapFrames := sampleRate / 1000 * 300
 	wantLen := len(wantPrefix) + gapFrames*channels + len(wantSuffix)
 	if len(samples) != wantLen {
 		t.Fatalf("got %d samples, want %d", len(samples), wantLen)
