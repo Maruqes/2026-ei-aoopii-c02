@@ -392,11 +392,6 @@ func ListenAndWriteOpusToWAV(
 
 			packetAt := time.Now().UTC()
 			recording := userRecordings[discordID]
-			if recording != nil && recording.hasRTPTimestamp && recording.ssrc != packet.SSRC {
-				if err := recording.padToElapsed(packetAt); err != nil {
-					return err
-				}
-			}
 			if recording != nil {
 				if _, ok := recording.rtpGapFrames(packet.SSRC, packet.Timestamp); !ok {
 					continue
