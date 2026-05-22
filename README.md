@@ -22,5 +22,5 @@ The production code is split between `src/` and the Go bot in `discord_bot/`.
 
 - `src/data`: Postgres migrations and DB/chunk rebuilding helpers.
 - `src/transcription-api`: local FastAPI wrapper around Whisper.
-- `docker-compose.yml`: local Postgres and transcription API.
+- `docker-compose.yml`: local Postgres, transcription API, and Discord bot.
 - `BrunoAPI`: Bruno collection for local API requests.

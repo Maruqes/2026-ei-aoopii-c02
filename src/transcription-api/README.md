@@ -22,6 +22,27 @@ Or:
 make api
 ```
 
+Docker Compose installs CPU-only PyTorch wheels and runs Whisper with
+`WHISPER_DEVICE=cpu` by default. To select the runtime when using the
+`Makefile`, set it in `.env`:
+
+```text
+# CPU, does not require an NVIDIA driver
+WHISPER_DEVICE=cpu
+PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+```
+
+```text
+# NVIDIA GPU, requires a working NVIDIA driver/container runtime
+WHISPER_DEVICE=cuda
+PYTORCH_CUDA_INDEX_URL=https://download.pytorch.org/whl/cu126
+```
+
+With `WHISPER_DEVICE=cuda`, `make compose`, `make api`, `make test`, and
+`make migrate` add `docker-compose.gpu.yml` automatically. When running
+`docker compose` directly instead of `make`, include the GPU override file
+explicitly.
+
 Transcribe an audio file:
 
 ```powershell

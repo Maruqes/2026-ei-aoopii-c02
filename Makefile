@@ -3,6 +3,13 @@ COMPOSE ?= docker compose
 
 -include .env
 
+WHISPER_DEVICE ?= cpu
+COMPOSE_FILES := -f docker-compose.yml
+ifneq ($(filter cuda,$(WHISPER_DEVICE)),)
+COMPOSE_FILES += -f docker-compose.gpu.yml
+endif
+COMPOSE_CMD = $(COMPOSE) $(COMPOSE_FILES)
+
 POSTGRES_DB ?= discord_anthropologist
 POSTGRES_USER ?= discord
 POSTGRES_PASSWORD ?= discord
@@ -24,25 +31,25 @@ help:
 	@echo "make test      Run tests in Docker"
 
 compose:
-	$(COMPOSE) up -d --build
+	$(COMPOSE_CMD) up -d --build
 
 up: compose
 
 down:
-	$(COMPOSE) down
+	$(COMPOSE_CMD) down
 
 logs:
-	$(COMPOSE) logs -f
+	$(COMPOSE_CMD) logs -f
 
 db-reset:
-	$(COMPOSE) down -v
-	$(COMPOSE) up -d --build postgres
+	$(COMPOSE_CMD) down -v
+	$(COMPOSE_CMD) up -d --build postgres
 
 migrate:
-	$(COMPOSE) run --rm api python src/data/apply_migrations.py --database-url "$(DOCKER_DATABASE_URL)"
+	$(COMPOSE_CMD) run --rm api python src/data/apply_migrations.py --database-url "$(DOCKER_DATABASE_URL)"
 
 api:
-	$(COMPOSE) up --build api
+	$(COMPOSE_CMD) up --build api
 
 test:
-	$(COMPOSE) run --rm api python -m pytest src/transcription-api/tests
+	$(COMPOSE_CMD) run --rm api python -m pytest src/transcription-api/tests

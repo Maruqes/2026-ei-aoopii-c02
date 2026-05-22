@@ -3,6 +3,7 @@
 __pycache__
 .pytest_cache
 .tmp
+.env
 discord_bot/.env
 discord_bot/recordings
 recordings
