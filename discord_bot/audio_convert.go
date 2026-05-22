@@ -20,11 +20,11 @@ sudo dnf install opus opus-devel opusfile opusfile-devel pkgconf-pkg-config
 */
 
 const (
-	sampleRate    = 48000
-	channels      = 2
-	bitsPerSample = 16
-	maxFrameMs    = 120
-	minRTPGapPadMs = 60
+	sampleRate     = 48000
+	channels       = 2
+	bitsPerSample  = 16
+	maxFrameMs     = 120
+	minRTPGapPadMs = 200
 )
 
 type WAVWriter struct {
