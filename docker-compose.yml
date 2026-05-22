@@ -2,6 +2,7 @@ services:
   postgres:
     image: postgres:16
     container_name: discord-anthropologist-postgres
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-discord_anthropologist}
       POSTGRES_USER: ${POSTGRES_USER:-discord}
@@ -23,6 +24,7 @@ services:
       args:
         PYTORCH_INDEX_URL: ${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
     container_name: discord-anthropologist-api
+    restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-discord}:${POSTGRES_PASSWORD:-discord}@postgres:5432/${POSTGRES_DB:-discord_anthropologist}
       WHISPER_MODEL: ${WHISPER_MODEL:-base}
@@ -59,6 +61,7 @@ services:
       context: .
       dockerfile: discord_bot/Dockerfile
     container_name: discord-anthropologist-bot
+    restart: unless-stopped
     environment:
       DISCORD_TOKEN: ${DISCORD_TOKEN:?DISCORD_TOKEN is required}
       DISCORD_APP_ID: ${DISCORD_APP_ID:?DISCORD_APP_ID is required}
