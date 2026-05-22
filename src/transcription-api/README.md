@@ -43,6 +43,24 @@ With `WHISPER_DEVICE=cuda`, `make compose`, `make api`, `make test`, and
 `docker compose` directly instead of `make`, include the GPU override file
 explicitly.
 
+Whisper quality settings:
+
+```text
+# `turbo` is fast; compare `large-v3` when quality matters and the runtime can handle it.
+WHISPER_MODEL=large-v3
+WHISPER_LANGUAGE=pt
+# Beam search is slower than greedy decoding but usually gives a better first decode.
+WHISPER_BEAM_SIZE=5
+# Optional vocabulary hint for names, acronyms, and project-specific words.
+WHISPER_INITIAL_PROMPT=Transcricao de uma conversa em portugues de Portugal sobre Discord, FastAPI e Whisper.
+WHISPER_CARRY_INITIAL_PROMPT=true
+```
+
+Set `WHISPER_LANGUAGE=auto` only when recordings are genuinely multilingual or the
+fixed language is wrong. If long recordings start repeating an incorrect phrase,
+try `WHISPER_CONDITION_ON_PREVIOUS_TEXT=false`; this reduces the context carried
+between Whisper windows and can make phrasing less consistent.
+
 Transcribe an audio file:
 
 ```powershell

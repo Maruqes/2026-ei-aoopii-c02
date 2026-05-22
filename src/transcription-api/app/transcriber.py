@@ -22,17 +22,41 @@ class WhisperResult:
 
 
 class WhisperTranscriber:
-    def __init__(self, model_name: str, device: str = "auto"):
+    def __init__(
+        self,
+        model_name: str,
+        device: str = "auto",
+        *,
+        language: str = "pt",
+        beam_size: int = 5,
+        initial_prompt: str = "",
+        carry_initial_prompt: bool = False,
+        condition_on_previous_text: bool = True,
+    ):
         self.model_name = model_name
         self.device = device
+        self.language = language
+        self.beam_size = beam_size
+        self.initial_prompt = initial_prompt
+        self.carry_initial_prompt = carry_initial_prompt
+        self.condition_on_previous_text = condition_on_previous_text
         self._model: Any | None = None
 
     def transcribe(self, audio_path: Path) -> WhisperResult:
         model = self._load_model()
+        options: dict[str, Any] = {
+            "beam_size": self.beam_size if self.beam_size > 0 else None,
+            "condition_on_previous_text": self.condition_on_previous_text,
+            "fp16": False,
+            "language": self._language_option(),
+        }
+        if self.initial_prompt.strip():
+            options["initial_prompt"] = self.initial_prompt.strip()
+            options["carry_initial_prompt"] = self.carry_initial_prompt
+
         result = model.transcribe(
             str(audio_path),
-            fp16=False,
-            language="pt"
+            **options,
         )
         segments = [
             WhisperSegment(
@@ -66,3 +90,9 @@ class WhisperTranscriber:
         if self.device == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("WHISPER_DEVICE=cuda was requested, but CUDA is not available in this container.")
         return self.device
+
+    def _language_option(self) -> str | None:
+        language = self.language.strip()
+        if language.lower() in {"", "auto", "detect"}:
+            return None
+        return language

@@ -211,7 +211,15 @@ def get_repository(settings: Settings = Depends(get_settings)) -> DataRepository
 
 
 def get_transcriber(settings: Settings = Depends(get_settings)) -> WhisperTranscriber:
-    return WhisperTranscriber(settings.whisper_model, settings.whisper_device)
+    return WhisperTranscriber(
+        settings.whisper_model,
+        settings.whisper_device,
+        language=settings.whisper_language,
+        beam_size=settings.whisper_beam_size,
+        initial_prompt=settings.whisper_initial_prompt,
+        carry_initial_prompt=settings.whisper_carry_initial_prompt,
+        condition_on_previous_text=settings.whisper_condition_on_previous_text,
+    )
 
 
 def get_llm_client(settings: Settings = Depends(get_settings)) -> LLMClient:

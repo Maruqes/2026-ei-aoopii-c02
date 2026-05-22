@@ -23,11 +23,23 @@ def env_str(name: str, default: str = "") -> str:
     return value or default
 
 
+def env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    return int(value)
+
+
 @dataclass(frozen=True)
 class Settings:
     database_url: str
     whisper_model: str = "base"
     whisper_device: str = "auto"
+    whisper_language: str = "pt"
+    whisper_beam_size: int = 5
+    whisper_initial_prompt: str = ""
+    whisper_carry_initial_prompt: bool = False
+    whisper_condition_on_previous_text: bool = True
     max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES
     upload_tmp_dir: Path = Path(".tmp/uploads")
     recordings_dir: Path = Path("discord_bot/recordings")
@@ -54,6 +66,11 @@ class Settings:
             database_url=database_url,
             whisper_model=os.getenv("WHISPER_MODEL", "base"),
             whisper_device=os.getenv("WHISPER_DEVICE", "auto").strip().lower(),
+            whisper_language=env_str("WHISPER_LANGUAGE", "pt"),
+            whisper_beam_size=env_int("WHISPER_BEAM_SIZE", 5),
+            whisper_initial_prompt=env_str("WHISPER_INITIAL_PROMPT"),
+            whisper_carry_initial_prompt=env_bool("WHISPER_CARRY_INITIAL_PROMPT", False),
+            whisper_condition_on_previous_text=env_bool("WHISPER_CONDITION_ON_PREVIOUS_TEXT", True),
             max_upload_bytes=int(os.getenv("MAX_UPLOAD_BYTES", str(DEFAULT_MAX_UPLOAD_BYTES))),
             upload_tmp_dir=Path(os.getenv("UPLOAD_TMP_DIR", ".tmp/uploads")),
             recordings_dir=Path(os.getenv("RECORDINGS_DIR", "discord_bot/recordings")),
