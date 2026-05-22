@@ -22,7 +22,7 @@ sudo dnf install opus opus-devel opusfile opusfile-devel pkgconf-pkg-config
 
 const (
 	sampleRate    = 48000
-	channels      = 2
+	channels      = 1
 	bitsPerSample = 16
 	maxFrameMs    = 120
 )

@@ -6,7 +6,21 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"gopkg.in/hraban/opus.v2"
 )
+
+func TestConfiguredDecoderAcceptsDiscordSilenceFrame(t *testing.T) {
+	decoder, err := opus.NewDecoder(sampleRate, channels)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pcm := make([]int16, maxFrameMs*sampleRate/1000*channels)
+	if _, err := decoder.Decode([]byte{0xf8, 0xff, 0xfe}, pcm); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestTimedRecordingPreservesRTPGapsInWAV(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "recording.wav")
@@ -16,10 +30,10 @@ func TestTimedRecordingPreservesRTPGapsInWAV(t *testing.T) {
 	}
 
 	recording := &userAudioRecording{wav: wav, startedAt: time.Now()}
-	if err := recording.writeTimedPCM(7, 100, []int16{1, 2, 3, 4}, 2); err != nil {
+	if err := recording.writeTimedPCM(7, 100, []int16{1, 2}, 2); err != nil {
 		t.Fatal(err)
 	}
-	if err := recording.writeTimedPCM(7, 107, []int16{5, 6}, 1); err != nil {
+	if err := recording.writeTimedPCM(7, 107, []int16{5}, 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := wav.Close(); err != nil {
@@ -27,7 +41,7 @@ func TestTimedRecordingPreservesRTPGapsInWAV(t *testing.T) {
 	}
 
 	samples := readWAVSamples(t, path)
-	want := []int16{1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 6}
+	want := []int16{1, 2, 0, 0, 0, 0, 0, 5}
 	if len(samples) != len(want) {
 		t.Fatalf("got %d samples, want %d: %v", len(samples), len(want), samples)
 	}
