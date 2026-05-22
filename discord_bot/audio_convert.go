@@ -24,6 +24,7 @@ const (
 	channels      = 2
 	bitsPerSample = 16
 	maxFrameMs    = 120
+	minRTPGapPadMs = 60
 )
 
 type WAVWriter struct {
@@ -437,6 +438,9 @@ func (recording *userAudioRecording) rtpGapFrames(ssrc uint32, timestamp uint32)
 	gap := int32(timestamp - recording.nextRTPTimestamp)
 	if gap < 0 {
 		return 0, false
+	}
+	if gap < int32(sampleRate*minRTPGapPadMs/1000) {
+		return 0, true
 	}
 	return int(gap), true
 }

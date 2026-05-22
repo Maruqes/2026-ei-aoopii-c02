@@ -63,7 +63,7 @@ func TestWAVHeaderDescribesDiscordPCM(t *testing.T) {
 	}
 }
 
-func TestTimedRecordingPreservesRTPGapsInWAV(t *testing.T) {
+func TestTimedRecordingCollapsesTinyRTPGapsInWAV(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "recording.wav")
 	wav, err := NewWAVWriter(path, sampleRate, channels, bitsPerSample)
 	if err != nil {
@@ -74,7 +74,7 @@ func TestTimedRecordingPreservesRTPGapsInWAV(t *testing.T) {
 	if err := recording.writeTimedPCM(7, 100, []int16{1, 2, 3, 4}, 2); err != nil {
 		t.Fatal(err)
 	}
-	if err := recording.writeTimedPCM(7, 107, []int16{5, 6}, 1); err != nil {
+	if err := recording.writeTimedPCM(7, 100+sampleRate/1000*20, []int16{5, 6}, 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := wav.Close(); err != nil {
@@ -82,13 +82,57 @@ func TestTimedRecordingPreservesRTPGapsInWAV(t *testing.T) {
 	}
 
 	samples := readWAVSamples(t, path)
-	want := []int16{1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 6}
+	want := []int16{1, 2, 3, 4, 5, 6}
 	if len(samples) != len(want) {
 		t.Fatalf("got %d samples, want %d: %v", len(samples), len(want), samples)
 	}
 	for i := range want {
 		if samples[i] != want[i] {
 			t.Fatalf("sample %d = %d, want %d", i, samples[i], want[i])
+		}
+	}
+}
+
+func TestTimedRecordingPreservesLargeRTPGapsInWAV(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "recording.wav")
+	wav, err := NewWAVWriter(path, sampleRate, channels, bitsPerSample)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recording := &userAudioRecording{wav: wav, startedAt: time.Now()}
+	if err := recording.writeTimedPCM(7, 100, []int16{1, 2}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := recording.writeTimedPCM(7, 100+sampleRate/1000*100, []int16{3, 4}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := wav.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	samples := readWAVSamples(t, path)
+	wantPrefix := []int16{1, 2}
+	wantSuffix := []int16{3, 4}
+	gapFrames := sampleRate / 1000 * 100
+	wantLen := len(wantPrefix) + gapFrames*channels + len(wantSuffix)
+	if len(samples) != wantLen {
+		t.Fatalf("got %d samples, want %d", len(samples), wantLen)
+	}
+	for i := range wantPrefix {
+		if samples[i] != wantPrefix[i] {
+			t.Fatalf("prefix sample %d = %d, want %d", i, samples[i], wantPrefix[i])
+		}
+	}
+	for i := len(wantPrefix); i < len(samples)-len(wantSuffix); i++ {
+		if samples[i] != 0 {
+			t.Fatalf("gap sample %d = %d, want 0", i, samples[i])
+		}
+	}
+	for i := range wantSuffix {
+		idx := len(samples) - len(wantSuffix) + i
+		if samples[idx] != wantSuffix[i] {
+			t.Fatalf("suffix sample %d = %d, want %d", idx, samples[idx], wantSuffix[i])
 		}
 	}
 }
