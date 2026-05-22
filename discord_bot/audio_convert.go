@@ -45,7 +45,6 @@ type userAudioRecording struct {
 	ssrc             uint32
 	nextRTPTimestamp uint32
 	hasRTPTimestamp  bool
-	lastFrame        []int16
 }
 
 type discordOpusDecoder struct {
@@ -440,6 +439,9 @@ func (recording *userAudioRecording) rtpGapFrames(ssrc uint32, timestamp uint32)
 	if gap < 0 {
 		return 0, false
 	}
+	if gap < int32(sampleRate*minRTPGapPadMs/1000) {
+		return 0, true
+	}
 	return int(gap), true
 }
 
@@ -456,32 +458,12 @@ func (recording *userAudioRecording) writeTimedPCM(ssrc uint32, timestamp uint32
 	if !ok {
 		return nil
 	}
-	if gapFrames > 0 {
-		// For small gaps, repeat last frame to mask packet loss but preserve duration;
-		// for larger gaps, write silence.
-		thresholdFrames := int(sampleRate * minRTPGapPadMs / 1000)
-		if gapFrames < thresholdFrames && len(recording.lastFrame) == int(recording.wav.channels) {
-			// repeat lastFrame gapFrames times
-			for i := 0; i < gapFrames; i++ {
-				if err := recording.wav.WritePCM(recording.lastFrame); err != nil {
-					return err
-				}
-			}
-		} else {
-			if err := recording.wav.WriteSilence(gapFrames); err != nil {
-				return err
-			}
-		}
+	if err := recording.wav.WriteSilence(gapFrames); err != nil {
+		return err
 	}
 	if err := recording.wav.WritePCM(pcm[:samples]); err != nil {
 		return err
 	}
-
-	// store last frame for potential repetition on next small gap
-	if recording.lastFrame == nil || len(recording.lastFrame) != int(recording.wav.channels) {
-		recording.lastFrame = make([]int16, int(recording.wav.channels))
-	}
-	copy(recording.lastFrame, pcm[samples-int(recording.wav.channels):samples])
 
 	recording.ssrc = ssrc
 	recording.nextRTPTimestamp = timestamp + uint32(frames)
