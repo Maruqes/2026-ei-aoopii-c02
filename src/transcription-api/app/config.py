@@ -5,9 +5,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-DEFAULT_MAX_UPLOAD_BYTES = 250 * 1024 * 1024
-
-
 def env_bool(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -40,7 +37,6 @@ class Settings:
     whisper_initial_prompt: str = ""
     whisper_carry_initial_prompt: bool = False
     whisper_condition_on_previous_text: bool = True
-    max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES
     upload_tmp_dir: Path = Path(".tmp/uploads")
     recordings_dir: Path = Path("discord_bot/recordings")
     keep_uploads: bool = False
@@ -71,7 +67,6 @@ class Settings:
             whisper_initial_prompt=env_str("WHISPER_INITIAL_PROMPT"),
             whisper_carry_initial_prompt=env_bool("WHISPER_CARRY_INITIAL_PROMPT", False),
             whisper_condition_on_previous_text=env_bool("WHISPER_CONDITION_ON_PREVIOUS_TEXT", True),
-            max_upload_bytes=int(os.getenv("MAX_UPLOAD_BYTES", str(DEFAULT_MAX_UPLOAD_BYTES))),
             upload_tmp_dir=Path(os.getenv("UPLOAD_TMP_DIR", ".tmp/uploads")),
             recordings_dir=Path(os.getenv("RECORDINGS_DIR", "discord_bot/recordings")),
             keep_uploads=env_bool("KEEP_UPLOADS", False),

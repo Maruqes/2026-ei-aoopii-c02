@@ -307,14 +307,8 @@ def validate_recording_file(recording_path: Path, settings: Settings) -> None:
             detail=f"Recording file not found: {recording_path.name}",
         )
 
-    size = recording_path.stat().st_size
-    if size == 0:
+    if recording_path.stat().st_size == 0:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Recording file is empty")
-    if size > settings.max_upload_bytes:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"Recording exceeds {settings.max_upload_bytes} bytes",
-        )
 
 
 def schedule_transcription_job(
