@@ -19,13 +19,14 @@ from .agent import SessionAgent
 from .config import Settings
 from .docs_client import LocalMarkdownProfileClient
 from .llm import LLMClient, OllamaClient, OpenAICompatibleClient
-from .profile_updater import start_text_profile_sync_loop
+from .profile_updater import run_text_profile_sync, start_text_profile_sync_loop
 from .schemas import (
     CreateSessionRequest,
     FinishSessionRequest,
     SessionSummaryResponse,
     TextMessageRequest,
     TextMessageResponse,
+    TextProfileSyncResponse,
     TranscriptionAcceptedResponse,
     UserProfileResponse,
     VoiceSessionResponse,
@@ -182,6 +183,20 @@ def create_app() -> FastAPI:
             status="stored",
             user_id=insert_result.user_id,
             message_id=insert_result.message_id,
+        )
+
+    @service.post("/v1/text-profile-sync", response_model=TextProfileSyncResponse)
+    def force_text_profile_sync(
+        repository: DataRepository = Depends(get_repository),
+        llm: LLMClient = Depends(get_llm_client),
+        docs: LocalMarkdownProfileClient = Depends(get_docs_client),
+    ) -> TextProfileSyncResponse:
+        started = time.perf_counter()
+        updated = run_text_profile_sync(repository=repository, llm=llm, docs=docs)
+        return TextProfileSyncResponse(
+            status="completed",
+            updated_profiles=updated,
+            processing_ms=int((time.perf_counter() - started) * 1000),
         )
 
     @service.post("/v1/sessions", response_model=VoiceSessionResponse)

@@ -53,6 +53,12 @@ class TextMessageResponse(BaseModel):
     message_id: int
 
 
+class TextProfileSyncResponse(BaseModel):
+    status: str
+    updated_profiles: int
+    processing_ms: int
+
+
 class CreateSessionRequest(BaseModel):
     guild_id: str
     voice_channel_id: str

@@ -93,6 +93,12 @@ type TextMessageResponse struct {
 	MessageID int64  `json:"message_id"`
 }
 
+type TextProfileSyncResponse struct {
+	Status          string `json:"status"`
+	UpdatedProfiles int64  `json:"updated_profiles"`
+	ProcessingMS    int64  `json:"processing_ms"`
+}
+
 func NewTranscriptionClientFromEnv() *TranscriptionClient {
 	baseURL := transcriptionBaseURLFromEnv(os.Getenv("TRANSCRIPTION_API_URL"))
 	client := &TranscriptionClient{
@@ -305,6 +311,14 @@ func (c *TranscriptionClient) SubmitTextMessage(ctx context.Context, request Tex
 	request = request.withFallbacks()
 	var response TextMessageResponse
 	return c.postJSON(ctx, "/v1/messages", request, &response)
+}
+
+func (c *TranscriptionClient) ForceTextProfileSync(ctx context.Context) (*TextProfileSyncResponse, error) {
+	var response TextProfileSyncResponse
+	if err := c.postJSON(ctx, "/v1/text-profile-sync", map[string]string{}, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
 }
 
 func (c *TranscriptionClient) postJSON(ctx context.Context, path string, body any, target any) error {

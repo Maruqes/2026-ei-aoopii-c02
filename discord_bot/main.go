@@ -49,6 +49,10 @@ func registerCommands(dg *discordgo.Session, appID string) error {
 				},
 			},
 		},
+		{
+			Name:        "sync",
+			Description: "Forca a sincronizacao dos perfis com as mensagens de texto guardadas.",
+		},
 	})
 	if err != nil {
 		return err
@@ -67,6 +71,8 @@ func handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		stopHook(s, i)
 	case "profile":
 		profileHook(s, i)
+	case "sync":
+		syncHook(s, i)
 	}
 }
 
@@ -114,6 +120,32 @@ func profileHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{Embeds: []*discordgo.MessageEmbed{embed}},
 	})
+}
+
+func syncHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	respondText(s, i, "Sincronizacao de texto iniciada. Aviso aqui quando terminar.")
+
+	client := botAPIClient
+	if client == nil {
+		client = NewTranscriptionClientFromEnv()
+	}
+	channelID := i.ChannelID
+
+	go func() {
+		result, err := client.ForceTextProfileSync(context.Background())
+		if err != nil {
+			_, _ = s.ChannelMessageSend(channelID, fmt.Sprintf("Sincronizacao de texto falhou: %v", err))
+			return
+		}
+		_, _ = s.ChannelMessageSend(
+			channelID,
+			fmt.Sprintf(
+				"Sincronizacao de texto concluida: %d perfis atualizados em %.1fs.",
+				result.UpdatedProfiles,
+				float64(result.ProcessingMS)/1000,
+			),
+		)
+	}()
 }
 
 func profileTarget(s *discordgo.Session, i *discordgo.InteractionCreate) (string, string) {
@@ -230,7 +262,7 @@ func main() {
 	}
 	defer dg.Close()
 
-	fmt.Println("Bot online. Comandos: /ping /start /stop /profile")
+	fmt.Println("Bot online. Comandos: /ping /start /stop /profile /sync")
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
