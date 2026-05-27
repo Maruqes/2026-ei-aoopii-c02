@@ -31,6 +31,16 @@ class LLMClient(Protocol):
     ) -> GeneratedProfile:
         ...
 
+    def update_profile_from_text(
+        self,
+        *,
+        username: str,
+        existing_profile: UserProfile | None,
+        existing_doc_text: str,
+        observations: str,
+    ) -> GeneratedProfile:
+        ...
+
 
 class OpenAICompatibleClient:
     def __init__(
@@ -80,6 +90,33 @@ class OpenAICompatibleClient:
                 f"Existing cached profile JSON:\n{json.dumps(existing, default=str)}\n\n"
                 f"Existing profile document text:\n{existing_doc_text or '<empty>'}\n\n"
                 f"Latest session transcript:\n{transcript}"
+            ),
+            json_format=True,
+        )
+        return generated_profile_from_json(content)
+
+    def update_profile_from_text(
+        self,
+        *,
+        username: str,
+        existing_profile: UserProfile | None,
+        existing_doc_text: str,
+        observations: str,
+    ) -> GeneratedProfile:
+        existing = asdict(existing_profile) if existing_profile else {}
+        content = self._chat(
+            system=(
+                "You update lively, creative Discord user profiles from batches of text chat messages. "
+                "Treat chat messages as lightweight evidence: extract durable interests, recurring topics, communication style, and notable recent changes. "
+                "Ignore trivial acknowledgements, commands, and one-off jokes unless they reveal a stable pattern. "
+                "Stay grounded in what the user actually wrote. Do not list identifiers, usernames, Discord IDs, or generic account facts. "
+                "Return only valid JSON with keys: summary, interests, communication_style, persona_notes, recent_updates."
+            ),
+            user=(
+                f"User: {username}\n\n"
+                f"Existing cached profile JSON:\n{json.dumps(existing, default=str)}\n\n"
+                f"Existing profile document text:\n{existing_doc_text or '<empty>'}\n\n"
+                f"New chat observations:\n{observations}"
             ),
             json_format=True,
         )
@@ -155,6 +192,33 @@ class OllamaClient:
                 f"Existing cached profile JSON:\n{json.dumps(existing, default=str)}\n\n"
                 f"Existing profile document text:\n{existing_doc_text or '<empty>'}\n\n"
                 f"Latest session transcript:\n{transcript}"
+            ),
+            json_format=True,
+        )
+        return generated_profile_from_json(content)
+
+    def update_profile_from_text(
+        self,
+        *,
+        username: str,
+        existing_profile: UserProfile | None,
+        existing_doc_text: str,
+        observations: str,
+    ) -> GeneratedProfile:
+        existing = asdict(existing_profile) if existing_profile else {}
+        content = self._chat(
+            system=(
+                "You update lively, creative Discord user profiles from batches of text chat messages. "
+                "Treat chat messages as lightweight evidence: extract durable interests, recurring topics, communication style, and notable recent changes. "
+                "Ignore trivial acknowledgements, commands, and one-off jokes unless they reveal a stable pattern. "
+                "Stay grounded in what the user actually wrote. Do not list identifiers, usernames, Discord IDs, or generic account facts. "
+                "Return only valid JSON with keys: summary, interests, communication_style, persona_notes, recent_updates."
+            ),
+            user=(
+                f"User: {username}\n\n"
+                f"Existing cached profile JSON:\n{json.dumps(existing, default=str)}\n\n"
+                f"Existing profile document text:\n{existing_doc_text or '<empty>'}\n\n"
+                f"New chat observations:\n{observations}"
             ),
             json_format=True,
         )

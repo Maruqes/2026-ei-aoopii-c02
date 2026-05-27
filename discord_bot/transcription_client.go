@@ -74,6 +74,25 @@ type UserProfileResponse struct {
 	ProfileFileURL     *string `json:"google_doc_url"`
 }
 
+type TextMessageRequest struct {
+	GuildID          string     `json:"guild_id"`
+	ChannelID        string     `json:"channel_id"`
+	ChannelName      string     `json:"channel_name"`
+	DiscordMessageID string     `json:"discord_message_id"`
+	DiscordID        string     `json:"discord_id"`
+	Username         string     `json:"username"`
+	DisplayName      string     `json:"display_name,omitempty"`
+	Content          string     `json:"content"`
+	Tstamp           time.Time  `json:"tstamp"`
+	EditedAt         *time.Time `json:"edited_at,omitempty"`
+}
+
+type TextMessageResponse struct {
+	Status    string `json:"status"`
+	UserID    int64  `json:"user_id"`
+	MessageID int64  `json:"message_id"`
+}
+
 func NewTranscriptionClientFromEnv() *TranscriptionClient {
 	baseURL := transcriptionBaseURLFromEnv(os.Getenv("TRANSCRIPTION_API_URL"))
 	client := &TranscriptionClient{
@@ -268,6 +287,26 @@ func (c *TranscriptionClient) GetUserProfile(ctx context.Context, discordID stri
 	return &profile, nil
 }
 
+func (c *TranscriptionClient) QueueTextMessage(request TextMessageRequest) {
+	if c == nil {
+		log.Printf("cliente API transcricao nil; mensagem de texto ignorada user=%s message=%s", request.DiscordID, request.DiscordMessageID)
+		return
+	}
+
+	request = request.withFallbacks()
+	go func() {
+		if err := c.SubmitTextMessage(context.Background(), request); err != nil {
+			log.Printf("erro ao guardar mensagem de texto user=%s message=%s: %v", request.DiscordID, request.DiscordMessageID, err)
+		}
+	}()
+}
+
+func (c *TranscriptionClient) SubmitTextMessage(ctx context.Context, request TextMessageRequest) error {
+	request = request.withFallbacks()
+	var response TextMessageResponse
+	return c.postJSON(ctx, "/v1/messages", request, &response)
+}
+
 func (c *TranscriptionClient) postJSON(ctx context.Context, path string, body any, target any) error {
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -335,6 +374,29 @@ func (r TranscriptionRequest) withFallbacks() TranscriptionRequest {
 	}
 	if r.RecordingStartedAt.IsZero() {
 		r.RecordingStartedAt = time.Now().UTC()
+	}
+
+	return r
+}
+
+func (r TextMessageRequest) withFallbacks() TextMessageRequest {
+	r.GuildID = strings.TrimSpace(r.GuildID)
+	r.ChannelID = strings.TrimSpace(r.ChannelID)
+	r.ChannelName = strings.TrimSpace(r.ChannelName)
+	r.DiscordMessageID = strings.TrimSpace(r.DiscordMessageID)
+	r.DiscordID = strings.TrimSpace(r.DiscordID)
+	r.Username = strings.TrimSpace(r.Username)
+	r.DisplayName = strings.TrimSpace(r.DisplayName)
+	r.Content = strings.TrimSpace(r.Content)
+
+	if r.Username == "" {
+		r.Username = r.DiscordID
+	}
+	if r.ChannelName == "" {
+		r.ChannelName = r.ChannelID
+	}
+	if r.Tstamp.IsZero() {
+		r.Tstamp = time.Now().UTC()
 	}
 
 	return r

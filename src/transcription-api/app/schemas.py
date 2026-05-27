@@ -34,6 +34,25 @@ class TranscriptionAcceptedResponse(BaseModel):
     message: str
 
 
+class TextMessageRequest(BaseModel):
+    guild_id: str
+    channel_id: str
+    channel_name: str
+    discord_message_id: str
+    discord_id: str
+    username: str
+    display_name: str | None = None
+    content: str
+    tstamp: datetime
+    edited_at: datetime | None = None
+
+
+class TextMessageResponse(BaseModel):
+    status: str
+    user_id: int
+    message_id: int
+
+
 class CreateSessionRequest(BaseModel):
     guild_id: str
     voice_channel_id: str

@@ -218,8 +218,12 @@ func main() {
 		log.Fatalf("erro ao registar comandos: %v", err)
 	}
 	dg.AddHandler(OnVoiceStateUpdate)
+	dg.AddHandler(OnMessageCreate)
 
-	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildVoiceStates
+	dg.Identify.Intents = discordgo.IntentsGuilds |
+		discordgo.IntentsGuildVoiceStates |
+		discordgo.IntentsGuildMessages |
+		discordgo.IntentsMessageContent
 
 	if err := dg.Open(); err != nil {
 		log.Fatalf("erro ao ligar bot: %v", err)
@@ -231,4 +235,3 @@ func main() {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 }
-

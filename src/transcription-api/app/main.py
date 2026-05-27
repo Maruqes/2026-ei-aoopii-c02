@@ -19,10 +19,13 @@ from .agent import SessionAgent
 from .config import Settings
 from .docs_client import LocalMarkdownProfileClient
 from .llm import LLMClient, OllamaClient, OpenAICompatibleClient
+from .profile_updater import start_text_profile_sync_loop
 from .schemas import (
     CreateSessionRequest,
     FinishSessionRequest,
     SessionSummaryResponse,
+    TextMessageRequest,
+    TextMessageResponse,
     TranscriptionAcceptedResponse,
     UserProfileResponse,
     VoiceSessionResponse,
@@ -47,6 +50,18 @@ logger = logging.getLogger("uvicorn.error")
 
 def create_app() -> FastAPI:
     service = FastAPI(title="Discord Anthropologist Transcription API")
+
+    @service.on_event("startup")
+    def start_profile_sync() -> None:
+        settings = get_settings()
+        if not settings.text_profile_sync_enabled:
+            return
+        start_text_profile_sync_loop(
+            repository=DataRepository(settings.database_url),
+            llm=get_llm_client(settings),
+            docs=get_docs_client(settings),
+            interval_hours=settings.text_profile_sync_interval_hours,
+        )
 
     @service.get("/health")
     def health(repository: DataRepository = Depends(get_repository)) -> dict[str, str]:
@@ -143,6 +158,30 @@ def create_app() -> FastAPI:
             status="accepted",
             recording_filename=recording_path.name,
             message="Transcription scheduled",
+        )
+
+    @service.post("/v1/messages", response_model=TextMessageResponse)
+    def create_text_message(
+        request: TextMessageRequest,
+        repository: DataRepository = Depends(get_repository),
+    ) -> TextMessageResponse:
+        validate_text_message(request)
+        insert_result = repository.insert_text_message(
+            guild_id=request.guild_id.strip(),
+            channel_id=request.channel_id.strip(),
+            channel_name=request.channel_name.strip(),
+            discord_message_id=request.discord_message_id.strip(),
+            discord_id=request.discord_id.strip(),
+            username=request.username.strip(),
+            display_name=request.display_name.strip() if request.display_name else None,
+            content=request.content.strip(),
+            tstamp=request.tstamp,
+            edited_at=request.edited_at,
+        )
+        return TextMessageResponse(
+            status="stored",
+            user_id=insert_result.user_id,
+            message_id=insert_result.message_id,
         )
 
     @service.post("/v1/sessions", response_model=VoiceSessionResponse)
@@ -255,6 +294,27 @@ def validate_metadata(discord_id: str, username: str, channel_name: str) -> None
             "discord_id": discord_id,
             "username": username,
             "channel_name": channel_name,
+        }.items()
+        if not value.strip()
+    ]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Missing required metadata: {', '.join(missing)}",
+        )
+
+
+def validate_text_message(request: TextMessageRequest) -> None:
+    missing = [
+        name
+        for name, value in {
+            "guild_id": request.guild_id,
+            "channel_id": request.channel_id,
+            "channel_name": request.channel_name,
+            "discord_message_id": request.discord_message_id,
+            "discord_id": request.discord_id,
+            "username": request.username,
+            "content": request.content,
         }.items()
         if not value.strip()
     ]
