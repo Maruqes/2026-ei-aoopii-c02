@@ -104,10 +104,10 @@ func resolveTextChannelName(s *discordgo.Session, channelID string) string {
 	return channelID
 }
 
-func discordgoTimestampPtr(value *discordgo.Timestamp) *time.Time {
+func discordgoTimestampPtr(value *time.Time) *time.Time {
 	if value == nil {
 		return nil
 	}
-	tstamp := time.Time(*value)
+	tstamp := *value
 	return &tstamp
 }
