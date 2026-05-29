@@ -59,6 +59,19 @@ class TextProfileSyncResponse(BaseModel):
     processing_ms: int
 
 
+class ProfilePromptRequest(BaseModel):
+    question: str
+
+
+class ProfilePromptResponse(BaseModel):
+    discord_id: str
+    username: str
+    display_name: str | None
+    anthropologist_title: str
+    question: str
+    answer: str
+
+
 class CreateSessionRequest(BaseModel):
     guild_id: str
     voice_channel_id: str
@@ -95,6 +108,7 @@ class UserProfileResponse(BaseModel):
     discord_id: str
     username: str
     display_name: str | None
+    anthropologist_title: str
     summary: str
     interests: str
     communication_style: str

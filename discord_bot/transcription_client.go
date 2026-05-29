@@ -63,15 +63,16 @@ type SessionSummaryResponse struct {
 }
 
 type UserProfileResponse struct {
-	DiscordID          string  `json:"discord_id"`
-	Username           string  `json:"username"`
-	DisplayName        *string `json:"display_name"`
-	Summary            string  `json:"summary"`
-	Interests          string  `json:"interests"`
-	CommunicationStyle string  `json:"communication_style"`
-	PersonaNotes       string  `json:"persona_notes"`
-	RecentUpdates      string  `json:"recent_updates"`
-	ProfileFileURL     *string `json:"google_doc_url"`
+	DiscordID           string  `json:"discord_id"`
+	Username            string  `json:"username"`
+	DisplayName         *string `json:"display_name"`
+	AnthropologistTitle string  `json:"anthropologist_title"`
+	Summary             string  `json:"summary"`
+	Interests           string  `json:"interests"`
+	CommunicationStyle  string  `json:"communication_style"`
+	PersonaNotes        string  `json:"persona_notes"`
+	RecentUpdates       string  `json:"recent_updates"`
+	ProfileFileURL      *string `json:"google_doc_url"`
 }
 
 type TextMessageRequest struct {
@@ -97,6 +98,19 @@ type TextProfileSyncResponse struct {
 	Status          string `json:"status"`
 	UpdatedProfiles int64  `json:"updated_profiles"`
 	ProcessingMS    int64  `json:"processing_ms"`
+}
+
+type ProfilePromptRequest struct {
+	Question string `json:"question"`
+}
+
+type ProfilePromptResponse struct {
+	DiscordID           string  `json:"discord_id"`
+	Username            string  `json:"username"`
+	DisplayName         *string `json:"display_name"`
+	AnthropologistTitle string  `json:"anthropologist_title"`
+	Question            string  `json:"question"`
+	Answer              string  `json:"answer"`
 }
 
 func NewTranscriptionClientFromEnv() *TranscriptionClient {
@@ -291,6 +305,15 @@ func (c *TranscriptionClient) GetUserProfile(ctx context.Context, discordID stri
 		return nil, err
 	}
 	return &profile, nil
+}
+
+func (c *TranscriptionClient) PromptUserProfile(ctx context.Context, discordID string, question string) (*ProfilePromptResponse, error) {
+	var response ProfilePromptResponse
+	request := ProfilePromptRequest{Question: strings.TrimSpace(question)}
+	if err := c.postJSON(ctx, "/v1/users/"+url.PathEscape(discordID)+"/prompt", request, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
 }
 
 func (c *TranscriptionClient) QueueTextMessage(request TextMessageRequest) {

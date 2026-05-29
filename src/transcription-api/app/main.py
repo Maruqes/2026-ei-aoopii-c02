@@ -23,6 +23,8 @@ from .profile_updater import run_text_profile_sync, start_text_profile_sync_loop
 from .schemas import (
     CreateSessionRequest,
     FinishSessionRequest,
+    ProfilePromptRequest,
+    ProfilePromptResponse,
     SessionSummaryResponse,
     TextMessageRequest,
     TextMessageResponse,
@@ -252,6 +254,41 @@ def create_app() -> FastAPI:
         if profile is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
         return user_profile_response(profile)
+
+    @service.post("/v1/users/{discord_id}/prompt", response_model=ProfilePromptResponse)
+    def prompt_user_profile(
+        discord_id: str,
+        request: ProfilePromptRequest,
+        repository: DataRepository = Depends(get_repository),
+        llm: LLMClient = Depends(get_llm_client),
+        docs: LocalMarkdownProfileClient = Depends(get_docs_client),
+    ) -> ProfilePromptResponse:
+        question = " ".join(request.question.split())
+        if not question:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Question is required")
+
+        profile = repository.get_user_profile_by_discord_id(discord_id)
+        if profile is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+        profile_doc_text = docs.read_doc_text(profile.google_doc_id)
+        if not profile_doc_text.strip():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile lore not found")
+
+        username = display_profile_name(profile)
+        answer = llm.answer_profile_question(
+            username=username,
+            profile_doc_text=profile_doc_text,
+            question=question,
+        )
+        return ProfilePromptResponse(
+            discord_id=profile.discord_id,
+            username=profile.username,
+            display_name=profile.display_name,
+            anthropologist_title=profile.anthropologist_title,
+            question=question,
+            answer=answer,
+        )
 
     return service
 
@@ -580,6 +617,7 @@ def user_profile_response(profile: UserProfile) -> UserProfileResponse:
         discord_id=profile.discord_id,
         username=profile.username,
         display_name=profile.display_name,
+        anthropologist_title=profile.anthropologist_title,
         summary=profile.summary,
         interests=profile.interests,
         communication_style=profile.communication_style,
@@ -588,6 +626,10 @@ def user_profile_response(profile: UserProfile) -> UserProfileResponse:
         google_doc_url=profile.google_doc_url,
         last_updated_at=profile.last_updated_at,
     )
+
+
+def display_profile_name(profile: UserProfile) -> str:
+    return profile.display_name or profile.username or profile.discord_id
 
 
 app = create_app()

@@ -76,6 +76,7 @@ class UserProfile:
     discord_id: str
     username: str
     display_name: str | None
+    anthropologist_title: str
     summary: str
     interests: str
     communication_style: str
@@ -579,6 +580,7 @@ class DataRepository:
             cur.execute(
                 """
                 SELECT u.id, u.discord_id, u.username, u.display_name,
+                       COALESCE(p.anthropologist_title, ''),
                        COALESCE(p.summary, ''),
                        COALESCE(p.interests, ''),
                        COALESCE(p.communication_style, ''),
@@ -606,6 +608,7 @@ class DataRepository:
             cur.execute(
                 """
                 SELECT u.id, u.discord_id, u.username, u.display_name,
+                       COALESCE(p.anthropologist_title, ''),
                        COALESCE(p.summary, ''),
                        COALESCE(p.interests, ''),
                        COALESCE(p.communication_style, ''),
@@ -630,6 +633,7 @@ class DataRepository:
         self,
         *,
         user_id: int,
+        anthropologist_title: str,
         summary: str,
         interests: str,
         communication_style: str,
@@ -644,12 +648,13 @@ class DataRepository:
             cur.execute(
                 """
                 INSERT INTO user_profiles (
-                    user_id, summary, interests, communication_style, known_facts,
+                    user_id, anthropologist_title, summary, interests, communication_style, known_facts,
                     recent_updates, google_doc_id, google_doc_url, last_updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                 ON CONFLICT (user_id) DO UPDATE
-                SET summary = EXCLUDED.summary,
+                SET anthropologist_title = EXCLUDED.anthropologist_title,
+                    summary = EXCLUDED.summary,
                     interests = EXCLUDED.interests,
                     communication_style = EXCLUDED.communication_style,
                     known_facts = EXCLUDED.known_facts,
@@ -660,6 +665,7 @@ class DataRepository:
                 """,
                 (
                     user_id,
+                    anthropologist_title.strip(),
                     summary.strip(),
                     interests.strip(),
                     communication_style.strip(),
@@ -817,13 +823,14 @@ def user_profile_from_row(row) -> UserProfile:
         discord_id=row[1],
         username=row[2],
         display_name=row[3],
-        summary=row[4],
-        interests=row[5],
-        communication_style=row[6],
-        known_facts=row[7],
-        recent_updates=row[8],
-        google_doc_id=row[9],
-        google_doc_url=row[10],
-        last_updated_at=row[11],
-        last_text_seen_at=row[12],
+        anthropologist_title=row[4],
+        summary=row[5],
+        interests=row[6],
+        communication_style=row[7],
+        known_facts=row[8],
+        recent_updates=row[9],
+        google_doc_id=row[10],
+        google_doc_url=row[11],
+        last_updated_at=row[12],
+        last_text_seen_at=row[13],
     )

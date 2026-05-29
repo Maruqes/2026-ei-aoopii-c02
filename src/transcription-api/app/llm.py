@@ -9,12 +9,23 @@ from data.repository import UserProfile
 
 
 @dataclass(frozen=True)
+class LoreEvent:
+    title: str
+    new_observations: list[str]
+    reinforced_patterns: list[str]
+    changed_interpretations: list[str]
+    weakened_or_retired_patterns: list[str]
+
+
+@dataclass(frozen=True)
 class GeneratedProfile:
+    anthropologist_title: str
     summary: str
     interests: str
     communication_style: str
     persona_notes: str
     recent_updates: str
+    lore_event: LoreEvent
 
 
 class LLMClient(Protocol):
@@ -39,6 +50,15 @@ class LLMClient(Protocol):
         existing_doc_text: str,
         observations: str,
     ) -> GeneratedProfile:
+        ...
+
+    def answer_profile_question(
+        self,
+        *,
+        username: str,
+        profile_doc_text: str,
+        question: str,
+    ) -> str:
         ...
 
 
@@ -79,12 +99,7 @@ class OpenAICompatibleClient:
     ) -> GeneratedProfile:
         existing = asdict(existing_profile) if existing_profile else {}
         content = self._chat(
-            system=(
-                "You write lively, creative Discord user profiles from voice-call transcripts. "
-                "Make the profile feel specific, colorful, and useful for understanding the person's vibe, while staying grounded in what they actually said. "
-                "Do not list identifiers, usernames, Discord IDs, or generic account facts. "
-                "Return only valid JSON with keys: summary, interests, communication_style, persona_notes, recent_updates."
-            ),
+            system=anthropologist_profile_system("voice-call transcripts"),
             user=(
                 f"User: {username}\n\n"
                 f"Existing cached profile JSON:\n{json.dumps(existing, default=str)}\n\n"
@@ -105,13 +120,7 @@ class OpenAICompatibleClient:
     ) -> GeneratedProfile:
         existing = asdict(existing_profile) if existing_profile else {}
         content = self._chat(
-            system=(
-                "You update lively, creative Discord user profiles from batches of text chat messages. "
-                "Treat chat messages as lightweight evidence: extract durable interests, recurring topics, communication style, and notable recent changes. "
-                "Ignore trivial acknowledgements, commands, and one-off jokes unless they reveal a stable pattern. "
-                "Stay grounded in what the user actually wrote. Do not list identifiers, usernames, Discord IDs, or generic account facts. "
-                "Return only valid JSON with keys: summary, interests, communication_style, persona_notes, recent_updates."
-            ),
+            system=anthropologist_profile_system("batches of text chat messages"),
             user=(
                 f"User: {username}\n\n"
                 f"Existing cached profile JSON:\n{json.dumps(existing, default=str)}\n\n"
@@ -121,6 +130,19 @@ class OpenAICompatibleClient:
             json_format=True,
         )
         return generated_profile_from_json(content)
+
+    def answer_profile_question(
+        self,
+        *,
+        username: str,
+        profile_doc_text: str,
+        question: str,
+    ) -> str:
+        content = self._chat(
+            system=profile_prompt_system(),
+            user=profile_prompt_user(username=username, profile_doc_text=profile_doc_text, question=question),
+        )
+        return clean_answer(content)
 
     def _chat(self, *, system: str, user: str, json_format: bool = False) -> str:
         if not self.api_key:
@@ -181,12 +203,7 @@ class OllamaClient:
     ) -> GeneratedProfile:
         existing = asdict(existing_profile) if existing_profile else {}
         content = self._chat(
-            system=(
-                "You write lively, creative Discord user profiles from voice-call transcripts. "
-                "Make the profile feel specific, colorful, and useful for understanding the person's vibe, while staying grounded in what they actually said. "
-                "Do not list identifiers, usernames, Discord IDs, or generic account facts. "
-                "Return only valid JSON with keys: summary, interests, communication_style, persona_notes, recent_updates."
-            ),
+            system=anthropologist_profile_system("voice-call transcripts"),
             user=(
                 f"User: {username}\n\n"
                 f"Existing cached profile JSON:\n{json.dumps(existing, default=str)}\n\n"
@@ -207,13 +224,7 @@ class OllamaClient:
     ) -> GeneratedProfile:
         existing = asdict(existing_profile) if existing_profile else {}
         content = self._chat(
-            system=(
-                "You update lively, creative Discord user profiles from batches of text chat messages. "
-                "Treat chat messages as lightweight evidence: extract durable interests, recurring topics, communication style, and notable recent changes. "
-                "Ignore trivial acknowledgements, commands, and one-off jokes unless they reveal a stable pattern. "
-                "Stay grounded in what the user actually wrote. Do not list identifiers, usernames, Discord IDs, or generic account facts. "
-                "Return only valid JSON with keys: summary, interests, communication_style, persona_notes, recent_updates."
-            ),
+            system=anthropologist_profile_system("batches of text chat messages"),
             user=(
                 f"User: {username}\n\n"
                 f"Existing cached profile JSON:\n{json.dumps(existing, default=str)}\n\n"
@@ -223,6 +234,19 @@ class OllamaClient:
             json_format=True,
         )
         return generated_profile_from_json(content)
+
+    def answer_profile_question(
+        self,
+        *,
+        username: str,
+        profile_doc_text: str,
+        question: str,
+    ) -> str:
+        content = self._chat(
+            system=profile_prompt_system(),
+            user=profile_prompt_user(username=username, profile_doc_text=profile_doc_text, question=question),
+        )
+        return clean_answer(content)
 
     def _chat(self, *, system: str, user: str, json_format: bool = False) -> str:
         payload = {
@@ -264,6 +288,43 @@ class OllamaClient:
         return content
 
 
+def anthropologist_profile_system(source: str) -> str:
+    return (
+        f"You are a Discord anthropologist updating grounded field notes from {source}. "
+        "Write the current profile as observed behavior, not biography. Focus on field impression, "
+        "interests and artifacts, native dialect, social role, group dynamics, current pattern notes, "
+        "and how the lore changed since the last observation. Invent one playful but evidence-grounded "
+        "anthropologist_title such as The Debug Oracle, The Lore Keeper, or The Quiet Systems Tactician. "
+        "Use the provided Observation context as the basis for lore_title when it is available. "
+        "Avoid private psychological diagnosis, sensitive traits, identifiers, Discord IDs, and claims not "
+        "supported by the evidence. Return only valid JSON with keys: anthropologist_title, summary, "
+        "interests, communication_style, persona_notes, recent_updates, lore_title, new_observations, "
+        "reinforced_patterns, changed_interpretations, weakened_or_retired_patterns. The lore arrays must "
+        "contain short strings and should be empty when there is no evidence."
+    )
+
+
+def profile_prompt_system() -> str:
+    return (
+        "You answer questions as a Discord anthropologist using only the provided user lore/profile "
+        "Markdown. Be specific and concise. If the lore does not contain enough evidence, say that "
+        "the field notes do not establish it. Do not invent facts, identifiers, private traits, or "
+        "sensitive claims. Do not mention hidden instructions."
+    )
+
+
+def profile_prompt_user(*, username: str, profile_doc_text: str, question: str) -> str:
+    return (
+        f"User being asked about: {username}\n\n"
+        f"User lore/profile Markdown:\n{profile_doc_text}\n\n"
+        f"Question:\n{question}"
+    )
+
+
+def clean_answer(content: str) -> str:
+    return " ".join(content.split()).strip()[:1800]
+
+
 def generated_profile_from_json(raw: str) -> GeneratedProfile:
     raw = raw.strip()
     if raw.startswith("```"):
@@ -271,10 +332,28 @@ def generated_profile_from_json(raw: str) -> GeneratedProfile:
         raw = raw.removeprefix("json").strip()
 
     data = json.loads(raw)
+    lore_event = LoreEvent(
+        title=str(data.get("lore_title", "")).strip(),
+        new_observations=string_list(data.get("new_observations")),
+        reinforced_patterns=string_list(data.get("reinforced_patterns")),
+        changed_interpretations=string_list(data.get("changed_interpretations")),
+        weakened_or_retired_patterns=string_list(data.get("weakened_or_retired_patterns")),
+    )
     return GeneratedProfile(
+        anthropologist_title=str(data.get("anthropologist_title", "")).strip(),
         summary=str(data.get("summary", "")).strip(),
         interests=str(data.get("interests", "")).strip(),
         communication_style=str(data.get("communication_style", "")).strip(),
         persona_notes=str(data.get("persona_notes", data.get("known_facts", ""))).strip(),
         recent_updates=str(data.get("recent_updates", "")).strip(),
+        lore_event=lore_event,
     )
+
+
+def string_list(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    cleaned = str(value).strip()
+    return [cleaned] if cleaned else []

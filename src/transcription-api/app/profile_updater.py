@@ -68,7 +68,10 @@ def update_text_profile(
     current_profile = repository.get_user_profile_by_user_id(pending.user_id)
     username = display_profile_name(current_profile, pending)
     existing_doc_text = docs.read_doc_text(current_profile.google_doc_id if current_profile else None)
-    observations = format_transcript(messages)
+    observations = (
+        f"Observation context: Text observations from {format_channel_list(messages)}\n\n"
+        f"{format_transcript(messages)}"
+    )
     generated = llm.update_profile_from_text(
         username=username,
         existing_profile=current_profile,
@@ -82,6 +85,7 @@ def update_text_profile(
     )
     repository.upsert_user_profile(
         user_id=pending.user_id,
+        anthropologist_title=generated.anthropologist_title,
         summary=generated.summary,
         interests=generated.interests,
         communication_style=generated.communication_style,
@@ -112,6 +116,19 @@ def display_profile_name(profile: UserProfile | None, pending: PendingTextProfil
     if profile is not None:
         return profile.display_name or profile.username or profile.discord_id
     return pending.display_name or pending.username or pending.discord_id
+
+
+def format_channel_list(messages: list[dict]) -> str:
+    channels = []
+    for message in messages:
+        channel = str(message.get("channel_name", "")).strip()
+        if channel and channel not in channels:
+            channels.append(channel)
+    if not channels:
+        return "text chat"
+    if len(channels) == 1:
+        return channels[0]
+    return ", ".join(channels[:3]) + (" and others" if len(channels) > 3 else "")
 
 
 def next_midnight_aligned_run(now: datetime, interval_hours: int = 12) -> datetime:
