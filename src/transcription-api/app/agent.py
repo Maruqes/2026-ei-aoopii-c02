@@ -5,7 +5,7 @@ from datetime import datetime
 from data.repository import DataRepository, SessionParticipant, UserProfile, normalize_timestamp
 
 from .docs_client import LocalMarkdownProfileClient
-from .llm import GeneratedProfile, LLMClient
+from .llm import GeneratedProfile, LLMClient, LoreEvent
 
 
 class SessionAgent:
@@ -21,6 +21,8 @@ class SessionAgent:
         self.docs = docs
 
     def run_for_session(self, session_id: int) -> str:
+        session = self.repository.get_voice_session(session_id)
+        observation_context = f"Voice session in {session.channel_name}" if session else "Voice session"
         messages = self.repository.get_session_messages(session_id)
         transcript = format_transcript(messages)
         if not transcript:
@@ -41,6 +43,7 @@ class SessionAgent:
                 existing_profile=current_profile,
                 existing_doc_text=existing_doc_text,
                 transcript=(
+                    f"Observation context: {observation_context}\n\n"
                     f"Full session:\n{transcript}\n\n"
                     f"Messages by {display_name(participant)}:\n{participant_transcript}"
                 ),
@@ -52,6 +55,7 @@ class SessionAgent:
             )
             self.repository.upsert_user_profile(
                 user_id=participant.user_id,
+                anthropologist_title=generated.anthropologist_title,
                 summary=generated.summary,
                 interests=generated.interests,
                 communication_style=generated.communication_style,
@@ -88,9 +92,17 @@ def normalize_timestamp_value(value) -> datetime:
 
 def blank_profile() -> GeneratedProfile:
     return GeneratedProfile(
+        anthropologist_title="",
         summary="",
         interests="",
         communication_style="",
         persona_notes="",
         recent_updates="",
+        lore_event=LoreEvent(
+            title="",
+            new_observations=[],
+            reinforced_patterns=[],
+            changed_interpretations=[],
+            weakened_or_retired_patterns=[],
+        ),
     )

@@ -49,6 +49,28 @@ func registerCommands(dg *discordgo.Session, appID string) error {
 				},
 			},
 		},
+		{
+			Name:        "prompt",
+			Description: "Faz uma pergunta ao antropologo sobre a lore de um utilizador.",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionUser,
+					Name:        "user",
+					Description: "Utilizador cuja lore deve ser consultada.",
+					Required:    true,
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "question",
+					Description: "Pergunta a responder com base no ficheiro de lore do utilizador.",
+					Required:    true,
+				},
+			},
+		},
+		{
+			Name:        "sync",
+			Description: "Forca a sincronizacao dos perfis com as mensagens de texto guardadas.",
+		},
 	})
 	if err != nil {
 		return err
@@ -67,6 +89,10 @@ func handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		stopHook(s, i)
 	case "profile":
 		profileHook(s, i)
+	case "prompt":
+		promptHook(s, i)
+	case "sync":
+		syncHook(s, i)
 	}
 }
 
@@ -116,6 +142,69 @@ func profileHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	})
 }
 
+func syncHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	respondText(s, i, "Sincronizacao de texto iniciada. Aviso aqui quando terminar.")
+
+	client := botAPIClient
+	if client == nil {
+		client = NewTranscriptionClientFromEnv()
+	}
+	channelID := i.ChannelID
+
+	go func() {
+		result, err := client.ForceTextProfileSync(context.Background())
+		if err != nil {
+			_, _ = s.ChannelMessageSend(channelID, fmt.Sprintf("Sincronizacao de texto falhou: %v", err))
+			return
+		}
+		_, _ = s.ChannelMessageSend(
+			channelID,
+			fmt.Sprintf(
+				"Sincronizacao de texto concluida: %d perfis atualizados em %.1fs.",
+				result.UpdatedProfiles,
+				float64(result.ProcessingMS)/1000,
+			),
+		)
+	}()
+}
+
+func promptHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	targetID, targetName := promptTarget(s, i)
+	question := promptQuestion(i)
+	if targetID == "" {
+		respondText(s, i, "Nao consegui identificar o utilizador.")
+		return
+	}
+	if strings.TrimSpace(question) == "" {
+		respondText(s, i, "Escreve uma pergunta para eu fazer ao antropologo.")
+		return
+	}
+
+	respondText(s, i, fmt.Sprintf("A consultar a lore de %s...", targetName))
+
+	client := botAPIClient
+	if client == nil {
+		client = NewTranscriptionClientFromEnv()
+	}
+	channelID := i.ChannelID
+
+	go func() {
+		response, err := client.PromptUserProfile(context.Background(), targetID, question)
+		if err != nil {
+			_, _ = s.ChannelMessageSend(channelID, fmt.Sprintf("Nao consegui consultar a lore de %s: %v", targetName, err))
+			return
+		}
+		name := firstNonEmpty(stringValue(response.DisplayName), response.Username, targetName, response.DiscordID)
+		title := strings.TrimSpace(response.AnthropologistTitle)
+		header := fmt.Sprintf("**%s**", name)
+		if title != "" {
+			header = fmt.Sprintf("%s - %s", header, title)
+		}
+		message := fmt.Sprintf("%s\n> %s\n\n%s", header, truncateDiscordMessage(response.Question), response.Answer)
+		_, _ = s.ChannelMessageSend(channelID, truncateDiscordMessage(message))
+	}()
+}
+
 func profileTarget(s *discordgo.Session, i *discordgo.InteractionCreate) (string, string) {
 	data := i.ApplicationCommandData()
 	for _, option := range data.Options {
@@ -133,14 +222,36 @@ func profileTarget(s *discordgo.Session, i *discordgo.InteractionCreate) (string
 	return "", ""
 }
 
+func promptTarget(s *discordgo.Session, i *discordgo.InteractionCreate) (string, string) {
+	data := i.ApplicationCommandData()
+	for _, option := range data.Options {
+		if option.Name == "user" {
+			user := option.UserValue(s)
+			return user.ID, firstNonEmpty(user.GlobalName, user.Username, user.ID)
+		}
+	}
+	return "", ""
+}
+
+func promptQuestion(i *discordgo.InteractionCreate) string {
+	data := i.ApplicationCommandData()
+	for _, option := range data.Options {
+		if option.Name == "question" {
+			return strings.TrimSpace(option.StringValue())
+		}
+	}
+	return ""
+}
+
 func profileEmbed(profile *UserProfileResponse, fallbackName string) *discordgo.MessageEmbed {
 	name := displayProfileName(profile, fallbackName)
 	fields := []*discordgo.MessageEmbedField{
-		profileField("Summary", profile.Summary),
-		profileField("Interests", profile.Interests),
-		profileField("Communication Style", profile.CommunicationStyle),
-		profileField("Persona Notes", profile.PersonaNotes),
-		profileField("Recent Updates", profile.RecentUpdates),
+		profileField("Title", profile.AnthropologistTitle),
+		profileField("Field Impression", profile.Summary),
+		profileField("Interests and Artifacts", profile.Interests),
+		profileField("Native Dialect", profile.CommunicationStyle),
+		profileField("Social Role and Group Dynamics", profile.PersonaNotes),
+		profileField("Current Pattern Notes", profile.RecentUpdates),
 	}
 	return &discordgo.MessageEmbed{
 		Title:  "Profile: " + name,
@@ -191,6 +302,13 @@ func truncateDiscordField(value string) string {
 	return value[:997] + "..."
 }
 
+func truncateDiscordMessage(value string) string {
+	if len(value) <= 1900 {
+		return value
+	}
+	return value[:1897] + "..."
+}
+
 func main() {
 	_ = godotenv.Load("../.env", ".env")
 
@@ -215,15 +333,19 @@ func main() {
 		log.Fatalf("erro ao registar comandos: %v", err)
 	}
 	dg.AddHandler(OnVoiceStateUpdate)
+	dg.AddHandler(OnMessageCreate)
 
-	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildVoiceStates
+	dg.Identify.Intents = discordgo.IntentsGuilds |
+		discordgo.IntentsGuildVoiceStates |
+		discordgo.IntentsGuildMessages |
+		discordgo.IntentsMessageContent
 
 	if err := dg.Open(); err != nil {
 		log.Fatalf("erro ao ligar bot: %v", err)
 	}
 	defer dg.Close()
 
-	fmt.Println("Bot online. Comandos: /ping /start /stop /profile")
+	fmt.Println("Bot online. Comandos: /ping /start /stop /profile /sync")
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop

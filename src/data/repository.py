@@ -33,6 +33,12 @@ class TranscriptionInsertResult:
 
 
 @dataclass(frozen=True)
+class TextMessageInsertResult:
+    user_id: int
+    message_id: int
+
+
+@dataclass(frozen=True)
 class VoiceSession:
     id: int
     guild_id: str
@@ -55,11 +61,22 @@ class SessionParticipant:
 
 
 @dataclass(frozen=True)
+class PendingTextProfile:
+    user_id: int
+    discord_id: str
+    username: str
+    display_name: str | None
+    last_text_seen_at: datetime | None
+    latest_message_at: datetime
+
+
+@dataclass(frozen=True)
 class UserProfile:
     user_id: int
     discord_id: str
     username: str
     display_name: str | None
+    anthropologist_title: str
     summary: str
     interests: str
     communication_style: str
@@ -68,6 +85,7 @@ class UserProfile:
     google_doc_id: str | None
     google_doc_url: str | None
     last_updated_at: datetime | None
+    last_text_seen_at: datetime | None
 
 
 def normalize_timestamp(value: datetime) -> datetime:
@@ -145,6 +163,65 @@ class DataRepository:
         finally:
             conn.close()
 
+    def insert_text_message(
+        self,
+        *,
+        guild_id: str,
+        channel_id: str,
+        channel_name: str,
+        discord_message_id: str,
+        discord_id: str,
+        username: str,
+        display_name: str | None,
+        content: str,
+        tstamp: datetime,
+        edited_at: datetime | None = None,
+    ) -> TextMessageInsertResult:
+        content = " ".join(content.split())
+        if not content:
+            raise ValueError("content is required")
+
+        conn = connect(self.database_url)
+        try:
+            user_id = self._upsert_user(conn, discord_id, username, display_name)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO messages (
+                    user_id, session_id, source_type, guild_id, channel_id, channel_name,
+                    discord_message_id, content, tstamp, edited_at
+                )
+                VALUES (%s, NULL, 'text', %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (discord_message_id) WHERE discord_message_id IS NOT NULL DO UPDATE
+                SET user_id = EXCLUDED.user_id,
+                    guild_id = EXCLUDED.guild_id,
+                    channel_id = EXCLUDED.channel_id,
+                    channel_name = EXCLUDED.channel_name,
+                    content = EXCLUDED.content,
+                    tstamp = EXCLUDED.tstamp,
+                    edited_at = COALESCE(EXCLUDED.edited_at, messages.edited_at)
+                RETURNING id
+                """,
+                (
+                    user_id,
+                    guild_id.strip(),
+                    channel_id.strip(),
+                    channel_name.strip(),
+                    discord_message_id.strip(),
+                    content,
+                    normalize_timestamp(tstamp),
+                    normalize_timestamp(edited_at) if edited_at else None,
+                ),
+            )
+            message_id = int(cur.fetchone()[0])
+            conn.commit()
+            return TextMessageInsertResult(user_id=user_id, message_id=message_id)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def _upsert_user(
         self,
         conn,
@@ -203,6 +280,7 @@ class DataRepository:
                 FROM messages m
                 JOIN users u ON u.id = m.user_id
                 WHERE m.channel_name = %s
+                  AND m.source_type = 'voice'
                   AND m.tstamp >= %s
                   AND m.tstamp < %s
                 ORDER BY m.tstamp ASC, m.id ASC
@@ -502,6 +580,7 @@ class DataRepository:
             cur.execute(
                 """
                 SELECT u.id, u.discord_id, u.username, u.display_name,
+                       COALESCE(p.anthropologist_title, ''),
                        COALESCE(p.summary, ''),
                        COALESCE(p.interests, ''),
                        COALESCE(p.communication_style, ''),
@@ -509,7 +588,8 @@ class DataRepository:
                        COALESCE(p.recent_updates, ''),
                        p.google_doc_id,
                        p.google_doc_url,
-                       p.last_updated_at
+                       p.last_updated_at,
+                       p.last_text_seen_at
                 FROM users u
                 LEFT JOIN user_profiles p ON p.user_id = u.id
                 WHERE u.discord_id = %s
@@ -521,10 +601,39 @@ class DataRepository:
         finally:
             conn.close()
 
+    def get_user_profile_by_user_id(self, user_id: int) -> UserProfile | None:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT u.id, u.discord_id, u.username, u.display_name,
+                       COALESCE(p.anthropologist_title, ''),
+                       COALESCE(p.summary, ''),
+                       COALESCE(p.interests, ''),
+                       COALESCE(p.communication_style, ''),
+                       COALESCE(p.known_facts, ''),
+                       COALESCE(p.recent_updates, ''),
+                       p.google_doc_id,
+                       p.google_doc_url,
+                       p.last_updated_at,
+                       p.last_text_seen_at
+                FROM users u
+                LEFT JOIN user_profiles p ON p.user_id = u.id
+                WHERE u.id = %s
+                """,
+                (user_id,),
+            )
+            row = cur.fetchone()
+            return user_profile_from_row(row) if row else None
+        finally:
+            conn.close()
+
     def upsert_user_profile(
         self,
         *,
         user_id: int,
+        anthropologist_title: str,
         summary: str,
         interests: str,
         communication_style: str,
@@ -539,12 +648,13 @@ class DataRepository:
             cur.execute(
                 """
                 INSERT INTO user_profiles (
-                    user_id, summary, interests, communication_style, known_facts,
+                    user_id, anthropologist_title, summary, interests, communication_style, known_facts,
                     recent_updates, google_doc_id, google_doc_url, last_updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                 ON CONFLICT (user_id) DO UPDATE
-                SET summary = EXCLUDED.summary,
+                SET anthropologist_title = EXCLUDED.anthropologist_title,
+                    summary = EXCLUDED.summary,
                     interests = EXCLUDED.interests,
                     communication_style = EXCLUDED.communication_style,
                     known_facts = EXCLUDED.known_facts,
@@ -555,6 +665,7 @@ class DataRepository:
                 """,
                 (
                     user_id,
+                    anthropologist_title.strip(),
                     summary.strip(),
                     interests.strip(),
                     communication_style.strip(),
@@ -563,6 +674,112 @@ class DataRepository:
                     google_doc_id,
                     google_doc_url,
                 ),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def get_pending_text_profiles(self) -> list[PendingTextProfile]:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT u.id, u.discord_id, u.username, u.display_name,
+                       p.last_text_seen_at,
+                       MAX(m.tstamp) AS latest_message_at
+                FROM messages m
+                JOIN users u ON u.id = m.user_id
+                LEFT JOIN user_profiles p ON p.user_id = u.id
+                WHERE m.source_type = 'text'
+                  AND m.content <> ''
+                  AND (
+                      p.last_text_seen_at IS NULL
+                      OR m.tstamp > p.last_text_seen_at
+                  )
+                GROUP BY u.id, u.discord_id, u.username, u.display_name, p.last_text_seen_at
+                ORDER BY latest_message_at ASC
+                """
+            )
+            return [
+                PendingTextProfile(
+                    user_id=int(row[0]),
+                    discord_id=row[1],
+                    username=row[2],
+                    display_name=row[3],
+                    last_text_seen_at=row[4],
+                    latest_message_at=row[5],
+                )
+                for row in cur.fetchall()
+            ]
+        finally:
+            conn.close()
+
+    def get_text_messages_for_profile(self, user_id: int, after: datetime | None) -> list[dict]:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            if after is None:
+                cur.execute(
+                    """
+                    SELECT m.tstamp, u.discord_id, u.username, u.display_name,
+                           m.channel_name, m.content
+                    FROM messages m
+                    JOIN users u ON u.id = m.user_id
+                    WHERE m.user_id = %s
+                      AND m.source_type = 'text'
+                      AND m.content <> ''
+                    ORDER BY m.tstamp ASC, m.id ASC
+                    """,
+                    (user_id,),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT m.tstamp, u.discord_id, u.username, u.display_name,
+                           m.channel_name, m.content
+                    FROM messages m
+                    JOIN users u ON u.id = m.user_id
+                    WHERE m.user_id = %s
+                      AND m.source_type = 'text'
+                      AND m.content <> ''
+                      AND m.tstamp > %s
+                    ORDER BY m.tstamp ASC, m.id ASC
+                    """,
+                    (user_id, normalize_timestamp(after)),
+                )
+            return [
+                {
+                    "tstamp": row[0],
+                    "discord_id": row[1],
+                    "username": row[2],
+                    "display_name": row[3],
+                    "channel_name": row[4],
+                    "content": row[5],
+                }
+                for row in cur.fetchall()
+            ]
+        finally:
+            conn.close()
+
+    def mark_user_text_profile_seen(self, user_id: int, seen_at: datetime) -> None:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO user_profiles (user_id, last_text_seen_at)
+                VALUES (%s, %s)
+                ON CONFLICT (user_id) DO UPDATE
+                SET last_text_seen_at = GREATEST(
+                        COALESCE(user_profiles.last_text_seen_at, '-infinity'::timestamptz),
+                        EXCLUDED.last_text_seen_at
+                    )
+                """,
+                (user_id, normalize_timestamp(seen_at)),
             )
             conn.commit()
         except Exception:
@@ -606,12 +823,14 @@ def user_profile_from_row(row) -> UserProfile:
         discord_id=row[1],
         username=row[2],
         display_name=row[3],
-        summary=row[4],
-        interests=row[5],
-        communication_style=row[6],
-        known_facts=row[7],
-        recent_updates=row[8],
-        google_doc_id=row[9],
-        google_doc_url=row[10],
-        last_updated_at=row[11],
+        anthropologist_title=row[4],
+        summary=row[5],
+        interests=row[6],
+        communication_style=row[7],
+        known_facts=row[8],
+        recent_updates=row[9],
+        google_doc_id=row[10],
+        google_doc_url=row[11],
+        last_updated_at=row[12],
+        last_text_seen_at=row[13],
     )

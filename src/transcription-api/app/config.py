@@ -51,6 +51,8 @@ class Settings:
     ollama_model: str = "qwen3.5:2b"
     profile_docs_provider: str = "local"
     local_profile_dir: Path = Path("profiles")
+    text_profile_sync_enabled: bool = True
+    text_profile_sync_interval_hours: int = 12
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -84,4 +86,6 @@ class Settings:
             ollama_model=env_str("OLLAMA_MODEL", "qwen3.5:2b"),
             profile_docs_provider=env_str("PROFILE_DOCS_PROVIDER", "local").lower(),
             local_profile_dir=Path(env_str("LOCAL_PROFILE_DIR", "profiles")),
+            text_profile_sync_enabled=env_bool("TEXT_PROFILE_SYNC_ENABLED", True),
+            text_profile_sync_interval_hours=env_int("TEXT_PROFILE_SYNC_INTERVAL_HOURS", 12),
         )

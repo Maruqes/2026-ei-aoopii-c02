@@ -34,6 +34,44 @@ class TranscriptionAcceptedResponse(BaseModel):
     message: str
 
 
+class TextMessageRequest(BaseModel):
+    guild_id: str
+    channel_id: str
+    channel_name: str
+    discord_message_id: str
+    discord_id: str
+    username: str
+    display_name: str | None = None
+    content: str
+    tstamp: datetime
+    edited_at: datetime | None = None
+
+
+class TextMessageResponse(BaseModel):
+    status: str
+    user_id: int
+    message_id: int
+
+
+class TextProfileSyncResponse(BaseModel):
+    status: str
+    updated_profiles: int
+    processing_ms: int
+
+
+class ProfilePromptRequest(BaseModel):
+    question: str
+
+
+class ProfilePromptResponse(BaseModel):
+    discord_id: str
+    username: str
+    display_name: str | None
+    anthropologist_title: str
+    question: str
+    answer: str
+
+
 class CreateSessionRequest(BaseModel):
     guild_id: str
     voice_channel_id: str
@@ -70,6 +108,7 @@ class UserProfileResponse(BaseModel):
     discord_id: str
     username: str
     display_name: str | None
+    anthropologist_title: str
     summary: str
     interests: str
     communication_style: str
