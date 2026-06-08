@@ -29,6 +29,12 @@ class GeneratedProfile:
 
 
 class LLMClient(Protocol):
+    def list_models(self) -> list[str]:
+        ...
+
+    def test_model(self) -> str:
+        ...
+
     def summarize_session(self, transcript: str) -> str:
         ...
 
@@ -147,6 +153,21 @@ class OpenAICompatibleClient:
         )
         return clean_answer(content)
 
+    def list_models(self) -> list[str]:
+        if not self.api_key:
+            raise RuntimeError(f"{self.api_key_env} is required when LLM_PROVIDER={self.provider_name}")
+        models = self._load_client().models.list()
+        return sorted(
+            {
+                str(model.id).strip()
+                for model in models.data
+                if getattr(model, "id", None) and str(model.id).strip()
+            }
+        )
+
+    def test_model(self) -> str:
+        return self._chat(system="Reply briefly.", user="Ola!")
+
     def _chat(self, *, system: str, user: str, json_format: bool = False) -> str:
         if not self.api_key:
             raise RuntimeError(f"{self.api_key_env} is required when LLM_PROVIDER={self.provider_name}")
@@ -253,6 +274,27 @@ class OllamaClient:
             user=profile_prompt_user(username=username, profile_doc_text=profile_doc_text, question=question),
         )
         return clean_answer(content)
+
+    def list_models(self) -> list[str]:
+        req = request.Request(f"{self.base_url}/api/tags", method="GET")
+        try:
+            with request.urlopen(req, timeout=30) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Ollama returned HTTP {exc.code}: {body}") from exc
+        except error.URLError as exc:
+            raise RuntimeError(f"Could not reach Ollama: {exc.reason}") from exc
+        return sorted(
+            {
+                str(model.get("name", "")).strip()
+                for model in data.get("models", [])
+                if str(model.get("name", "")).strip()
+            }
+        )
+
+    def test_model(self) -> str:
+        return self._chat(system="Reply briefly.", user="Ola!")
 
     def _chat(self, *, system: str, user: str, json_format: bool = False) -> str:
         payload = {

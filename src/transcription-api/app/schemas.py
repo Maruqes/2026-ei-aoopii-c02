@@ -59,6 +59,22 @@ class TextProfileSyncResponse(BaseModel):
     processing_ms: int
 
 
+class LLMModelsResponse(BaseModel):
+    provider: str
+    current_model: str
+    models: list[str]
+
+
+class SelectLLMModelRequest(BaseModel):
+    model: str
+
+
+class SelectLLMModelResponse(BaseModel):
+    provider: str
+    model: str
+    test_response: str
+
+
 class ProfilePromptRequest(BaseModel):
     question: str
 

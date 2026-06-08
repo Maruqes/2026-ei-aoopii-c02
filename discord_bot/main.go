@@ -16,12 +16,16 @@ import (
 var APP_ID string
 var botAPIClient *TranscriptionClient
 
+const modelSelectCustomID = "llm-model-select"
+
 func registerCommands(dg *discordgo.Session, appID string) error {
 	dg.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
-		if i.Type != discordgo.InteractionApplicationCommand {
-			return
+		switch i.Type {
+		case discordgo.InteractionApplicationCommand:
+			handleCommand(s, i)
+		case discordgo.InteractionMessageComponent:
+			handleComponent(s, i)
 		}
-		handleCommand(s, i)
 	})
 
 	_, err := dg.ApplicationCommandBulkOverwrite(appID, "", []*discordgo.ApplicationCommand{
@@ -71,6 +75,10 @@ func registerCommands(dg *discordgo.Session, appID string) error {
 			Name:        "sync",
 			Description: "Forca a sincronizacao dos perfis com as mensagens de texto guardadas.",
 		},
+		{
+			Name:        "models",
+			Description: "Lista e permite alterar o modelo LLM ativo.",
+		},
 	})
 	if err != nil {
 		return err
@@ -93,6 +101,14 @@ func handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		promptHook(s, i)
 	case "sync":
 		syncHook(s, i)
+	case "models":
+		modelsHook(s, i)
+	}
+}
+
+func handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if i.MessageComponentData().CustomID == modelSelectCustomID {
+		modelSelectHook(s, i)
 	}
 }
 
@@ -205,6 +221,141 @@ func promptHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}()
 }
 
+func modelsHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	client := botAPIClient
+	if client == nil {
+		client = NewTranscriptionClientFromEnv()
+	}
+	models, err := client.GetLLMModels(context.Background())
+	if err != nil {
+		respondText(s, i, fmt.Sprintf("Nao consegui listar os modelos: %v", err))
+		return
+	}
+	if len(models.Models) == 0 {
+		respondText(s, i, "O provider nao devolveu modelos disponiveis.")
+		return
+	}
+
+	displayedModels := modelMenuItems(models.Models, models.CurrentModel, 25)
+	if len(displayedModels) == 0 {
+		respondText(s, i, "Os IDs dos modelos devolvidos excedem o limite suportado pelo menu do Discord.")
+		return
+	}
+	options := make([]discordgo.SelectMenuOption, 0, len(displayedModels))
+	for _, model := range displayedModels {
+		options = append(options, discordgo.SelectMenuOption{
+			Label:       truncateDiscordOption(model),
+			Value:       model,
+			Default:     model == models.CurrentModel,
+			Description: modelDescription(model, models.CurrentModel),
+		})
+	}
+	content := fmt.Sprintf("Provider: **%s**\nModelo atual: **%s**\nEscolhe um modelo para o testar com `Ola!` e ativar.", models.Provider, models.CurrentModel)
+	if len(models.Models) > len(displayedModels) {
+		content += fmt.Sprintf("\nA mostrar %d de %d modelos.", len(displayedModels), len(models.Models))
+	}
+	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: content,
+			Components: []discordgo.MessageComponent{
+				discordgo.ActionsRow{
+					Components: []discordgo.MessageComponent{
+						discordgo.SelectMenu{
+							MenuType:    discordgo.StringSelectMenu,
+							CustomID:    modelSelectCustomID,
+							Placeholder: "Seleciona o modelo LLM",
+							MinValues:   intPointer(1),
+							MaxValues:   1,
+							Options:     options,
+						},
+					},
+				},
+			},
+		},
+	})
+}
+
+func modelSelectHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	data := i.MessageComponentData()
+	if len(data.Values) != 1 {
+		respondText(s, i, "Seleciona exatamente um modelo.")
+		return
+	}
+	model := data.Values[0]
+	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredMessageUpdate,
+	})
+
+	client := botAPIClient
+	if client == nil {
+		client = NewTranscriptionClientFromEnv()
+	}
+	result, err := client.SelectLLMModel(context.Background(), model)
+	content := ""
+	if err != nil {
+		content = fmt.Sprintf("O modelo **%s** falhou o teste e nao foi ativado: %v", model, err)
+	} else {
+		content = fmt.Sprintf(
+			"Modelo ativo: **%s** (`%s`).\nTeste com `Ola!`: %s",
+			result.Model,
+			result.Provider,
+			truncateDiscordMessageAt(result.TestResponse, 1700),
+		)
+	}
+	emptyComponents := []discordgo.MessageComponent{}
+	_, _ = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+		Content:    &content,
+		Components: &emptyComponents,
+	})
+}
+
+func modelDescription(model string, current string) string {
+	if model == current {
+		return "Modelo ativo"
+	}
+	return ""
+}
+
+func modelMenuItems(models []string, current string, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+	eligible := make([]string, 0, len(models))
+	for _, model := range models {
+		if len(model) <= 100 {
+			eligible = append(eligible, model)
+		}
+	}
+	if len(eligible) <= limit {
+		return eligible
+	}
+	items := append([]string(nil), eligible[:limit]...)
+	for _, model := range items {
+		if model == current {
+			return items
+		}
+	}
+	for _, model := range eligible[limit:] {
+		if model == current {
+			items[limit-1] = current
+			break
+		}
+	}
+	return items
+}
+
+func truncateDiscordOption(value string) string {
+	if len(value) <= 100 {
+		return value
+	}
+	return value[:97] + "..."
+}
+
+func intPointer(value int) *int {
+	return &value
+}
+
 func profileTarget(s *discordgo.Session, i *discordgo.InteractionCreate) (string, string) {
 	data := i.ApplicationCommandData()
 	for _, option := range data.Options {
@@ -303,10 +454,17 @@ func truncateDiscordField(value string) string {
 }
 
 func truncateDiscordMessage(value string) string {
-	if len(value) <= 1900 {
+	return truncateDiscordMessageAt(value, 1900)
+}
+
+func truncateDiscordMessageAt(value string, limit int) string {
+	if limit <= 3 {
+		return value[:min(len(value), limit)]
+	}
+	if len(value) <= limit {
 		return value
 	}
-	return value[:1897] + "..."
+	return value[:limit-3] + "..."
 }
 
 func main() {

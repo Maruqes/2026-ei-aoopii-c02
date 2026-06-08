@@ -19,12 +19,16 @@ from .agent import SessionAgent
 from .config import Settings
 from .docs_client import LocalMarkdownProfileClient
 from .llm import LLMClient, OllamaClient, OpenAICompatibleClient
+from .model_selection import current_model, select_model
 from .profile_updater import run_text_profile_sync, start_text_profile_sync_loop
 from .schemas import (
     CreateSessionRequest,
     FinishSessionRequest,
+    LLMModelsResponse,
     ProfilePromptRequest,
     ProfilePromptResponse,
+    SelectLLMModelRequest,
+    SelectLLMModelResponse,
     SessionSummaryResponse,
     TextMessageRequest,
     TextMessageResponse,
@@ -61,7 +65,7 @@ def create_app() -> FastAPI:
             return
         start_text_profile_sync_loop(
             repository=DataRepository(settings.database_url),
-            llm=get_llm_client(settings),
+            llm_factory=lambda: get_llm_client(get_settings()),
             docs=get_docs_client(settings),
             interval_hours=settings.text_profile_sync_interval_hours,
         )
@@ -201,6 +205,53 @@ def create_app() -> FastAPI:
             processing_ms=int((time.perf_counter() - started) * 1000),
         )
 
+    @service.get("/v1/models", response_model=LLMModelsResponse)
+    def list_llm_models(settings: Settings = Depends(get_settings)) -> LLMModelsResponse:
+        try:
+            models = get_llm_client(settings).list_models()
+        except Exception as exc:
+            logger.exception("falha ao listar modelos LLM provider=%s", settings.llm_provider)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Could not list LLM models: {exc}",
+            ) from exc
+        return LLMModelsResponse(
+            provider=settings.llm_provider,
+            current_model=current_model(settings),
+            models=models,
+        )
+
+    @service.post("/v1/models/current", response_model=SelectLLMModelResponse)
+    def change_llm_model(
+        request: SelectLLMModelRequest,
+        settings: Settings = Depends(get_settings),
+    ) -> SelectLLMModelResponse:
+        model = request.model.strip()
+        if not model:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Model is required")
+
+        available_models = get_llm_client(settings).list_models()
+        if model not in available_models:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model is not available")
+
+        candidate = build_llm_client(settings, model)
+        try:
+            test_response = candidate.test_model()
+        except Exception as exc:
+            logger.exception("teste do modelo LLM falhou provider=%s model=%s", settings.llm_provider, model)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Model test failed: {exc}",
+            ) from exc
+
+        select_model(settings.llm_provider, model)
+        logger.info("modelo LLM alterado provider=%s model=%s", settings.llm_provider, model)
+        return SelectLLMModelResponse(
+            provider=settings.llm_provider,
+            model=model,
+            test_response=test_response,
+        )
+
     @service.post("/v1/sessions", response_model=VoiceSessionResponse)
     def create_session(
         request: CreateSessionRequest,
@@ -314,19 +365,23 @@ def get_transcriber(settings: Settings = Depends(get_settings)) -> WhisperTransc
 
 
 def get_llm_client(settings: Settings = Depends(get_settings)) -> LLMClient:
+    return build_llm_client(settings, current_model(settings))
+
+
+def build_llm_client(settings: Settings, model: str) -> LLMClient:
     if settings.llm_provider == "ollama":
-        return OllamaClient(base_url=settings.ollama_base_url, model=settings.ollama_model)
+        return OllamaClient(base_url=settings.ollama_base_url, model=model)
     if settings.llm_provider == "openai":
         return OpenAICompatibleClient(
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
-            model=settings.openai_model,
+            model=model,
         )
     if settings.llm_provider == "groq":
         return OpenAICompatibleClient(
             api_key=settings.groq_api_key,
             base_url=settings.groq_base_url,
-            model=settings.groq_model,
+            model=model,
             api_key_env="GROQ_API_KEY",
             provider_name="groq",
         )

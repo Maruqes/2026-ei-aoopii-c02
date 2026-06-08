@@ -5,6 +5,7 @@ import re
 import threading
 import time
 from datetime import datetime, timedelta
+from typing import Callable
 
 from data.repository import DataRepository, PendingTextProfile, UserProfile
 
@@ -144,15 +145,19 @@ def next_midnight_aligned_run(now: datetime, interval_hours: int = 12) -> dateti
 def start_text_profile_sync_loop(
     *,
     repository: DataRepository,
-    llm: LLMClient,
+    llm: LLMClient | None = None,
+    llm_factory: Callable[[], LLMClient] | None = None,
     docs: LocalMarkdownProfileClient,
     interval_hours: int = 12,
 ) -> threading.Thread:
+    if llm is None and llm_factory is None:
+        raise ValueError("llm or llm_factory is required")
     thread = threading.Thread(
         target=text_profile_sync_loop,
         kwargs={
             "repository": repository,
             "llm": llm,
+            "llm_factory": llm_factory,
             "docs": docs,
             "interval_hours": interval_hours,
         },
@@ -165,17 +170,23 @@ def start_text_profile_sync_loop(
 def text_profile_sync_loop(
     *,
     repository: DataRepository,
-    llm: LLMClient,
+    llm: LLMClient | None = None,
+    llm_factory: Callable[[], LLMClient] | None = None,
     docs: LocalMarkdownProfileClient,
     interval_hours: int = 12,
 ) -> None:
+    if llm is None and llm_factory is None:
+        raise ValueError("llm or llm_factory is required")
     while True:
         next_run = next_midnight_aligned_run(datetime.now().astimezone(), interval_hours)
         sleep_seconds = max(0.0, (next_run - datetime.now().astimezone()).total_seconds())
         logger.info("proxima sincronizacao de perfis por texto em %s", next_run.isoformat())
         time.sleep(sleep_seconds)
         try:
-            updated = run_text_profile_sync(repository=repository, llm=llm, docs=docs)
+            active_llm = llm_factory() if llm_factory is not None else llm
+            if active_llm is None:
+                raise RuntimeError("LLM client is not configured")
+            updated = run_text_profile_sync(repository=repository, llm=active_llm, docs=docs)
             logger.info("sincronizacao de perfis por texto concluida perfis_atualizados=%d", updated)
         except Exception:
             logger.exception("sincronizacao de perfis por texto falhou")

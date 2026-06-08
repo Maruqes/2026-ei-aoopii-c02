@@ -101,6 +101,22 @@ type TextProfileSyncResponse struct {
 	ProcessingMS    int64  `json:"processing_ms"`
 }
 
+type LLMModelsResponse struct {
+	Provider     string   `json:"provider"`
+	CurrentModel string   `json:"current_model"`
+	Models       []string `json:"models"`
+}
+
+type SelectLLMModelRequest struct {
+	Model string `json:"model"`
+}
+
+type SelectLLMModelResponse struct {
+	Provider     string `json:"provider"`
+	Model        string `json:"model"`
+	TestResponse string `json:"test_response"`
+}
+
 type ProfilePromptRequest struct {
 	Question string `json:"question"`
 }
@@ -343,6 +359,23 @@ func (c *TranscriptionClient) SubmitTextMessage(ctx context.Context, request Tex
 func (c *TranscriptionClient) ForceTextProfileSync(ctx context.Context) (*TextProfileSyncResponse, error) {
 	var response TextProfileSyncResponse
 	if err := c.postJSON(ctx, "/v1/text-profile-sync", map[string]string{}, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *TranscriptionClient) GetLLMModels(ctx context.Context) (*LLMModelsResponse, error) {
+	var response LLMModelsResponse
+	if err := c.getJSON(ctx, "/v1/models", &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *TranscriptionClient) SelectLLMModel(ctx context.Context, model string) (*SelectLLMModelResponse, error) {
+	var response SelectLLMModelResponse
+	request := SelectLLMModelRequest{Model: strings.TrimSpace(model)}
+	if err := c.postJSON(ctx, "/v1/models/current", request, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
