@@ -52,12 +52,15 @@ class OpenAICompatibleClient:
     def summarize_session(self, transcript: str) -> str:
         content = self._chat(
             system=(
-                "You summarize Discord voice-call transcripts. Return exactly one concise sentence. "
-                "Do not mention that this came from a transcript."
+                "You summarize Discord voice-call conversations for the people who were there. "
+                "The Summary length should be corresponding to the lenght of the conversation"
+                "Return a Discord-ready summary with 4 to 7 short bullets. Cover the main topics, decisions, disagreements, notable jokes or moments, and any follow-up actions. "
+                "Be specific and useful, but do not invent facts, do not include timestamps, and do not mention that this came from a transcript. "
+                "Keep the whole answer under 1800 characters."
             ),
             user=f"Transcript:\n{transcript}",
         )
-        return " ".join(content.split())[:500]
+        return normalize_summary(content)
 
     def update_profile(
         self,
@@ -127,12 +130,15 @@ class OllamaClient:
     def summarize_session(self, transcript: str) -> str:
         content = self._chat(
             system=(
-                "You summarize Discord voice-call transcripts. Return exactly one concise sentence. "
-                "Do not mention that this came from a transcript."
+                "You summarize Discord voice-call conversations for the people who were there. "
+                "Write in the same language as the conversation, using European Portuguese when the conversation is mostly Portuguese. "
+                "Return a Discord-ready summary with 4 to 7 short bullets. Cover the main topics, decisions, disagreements, notable jokes or moments, and any follow-up actions. "
+                "Be specific and useful, but do not invent facts, do not include timestamps, and do not mention that this came from a transcript. "
+                "Keep the whole answer under 1800 characters."
             ),
             user=f"Transcript:\n{transcript}",
         )
-        return " ".join(content.split())[:500]
+        return normalize_summary(content)
 
     def update_profile(
         self,
@@ -214,3 +220,10 @@ def generated_profile_from_json(raw: str) -> GeneratedProfile:
         persona_notes=str(data.get("persona_notes", data.get("known_facts", ""))).strip(),
         recent_updates=str(data.get("recent_updates", "")).strip(),
     )
+
+
+def normalize_summary(content: str) -> str:
+    summary = "\n".join(line.strip() for line in content.splitlines() if line.strip())
+    if not summary:
+        return ""
+    return summary[:1800].rstrip()

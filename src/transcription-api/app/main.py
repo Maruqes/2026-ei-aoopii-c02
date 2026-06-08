@@ -510,7 +510,6 @@ def user_profile_response(profile: UserProfile) -> UserProfileResponse:
         communication_style=profile.communication_style,
         persona_notes=profile.known_facts,
         recent_updates=profile.recent_updates,
-        google_doc_url=profile.google_doc_url,
         last_updated_at=profile.last_updated_at,
     )
 

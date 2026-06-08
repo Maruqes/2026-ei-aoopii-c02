@@ -18,6 +18,7 @@ const (
 	defaultTranscriptionAPIURL     = "http://localhost:8000"
 	defaultTranscriptionAPITimeout = 10 * time.Minute
 	defaultSummaryPollTimeout      = 15 * time.Minute
+	defaultSummaryPollInterval     = 5 * time.Second
 )
 
 type TranscriptionClient struct {
@@ -71,7 +72,6 @@ type UserProfileResponse struct {
 	CommunicationStyle string  `json:"communication_style"`
 	PersonaNotes       string  `json:"persona_notes"`
 	RecentUpdates      string  `json:"recent_updates"`
-	ProfileFileURL     *string `json:"google_doc_url"`
 }
 
 func NewTranscriptionClientFromEnv() *TranscriptionClient {
@@ -240,7 +240,9 @@ func (c *TranscriptionClient) FinishSessionAndWait(ctx context.Context, sessionI
 	}
 
 	timeout := summaryPollTimeoutFromEnv(os.Getenv("SESSION_SUMMARY_TIMEOUT"))
+	interval := summaryPollIntervalFromEnv(os.Getenv("SESSION_SUMMARY_POLL_INTERVAL"))
 	deadline := time.Now().Add(timeout)
+	timeoutLogged := false
 	for {
 		summary, err := c.GetSessionSummary(ctx, sessionID)
 		if err != nil {
@@ -249,13 +251,14 @@ func (c *TranscriptionClient) FinishSessionAndWait(ctx context.Context, sessionI
 		if summary.Status == "agent_done" || summary.Status == "agent_failed" {
 			return summary, nil
 		}
-		if time.Now().After(deadline) {
-			return summary, fmt.Errorf("timeout a espera do resumo da sessao %d; estado=%s", sessionID, summary.Status)
+		if !timeoutLogged && timeout > 0 && time.Now().After(deadline) {
+			log.Printf("resumo da sessao %d ainda nao esta pronto apos %s; estado=%s; a continuar a aguardar", sessionID, timeout, summary.Status)
+			timeoutLogged = true
 		}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(5 * time.Second):
+		case <-time.After(interval):
 		}
 	}
 }
@@ -318,6 +321,19 @@ func summaryPollTimeoutFromEnv(raw string) time.Duration {
 		return defaultSummaryPollTimeout
 	}
 	return timeout
+}
+
+func summaryPollIntervalFromEnv(raw string) time.Duration {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return defaultSummaryPollInterval
+	}
+	interval, err := time.ParseDuration(value)
+	if err != nil || interval <= 0 {
+		log.Printf("SESSION_SUMMARY_POLL_INTERVAL invalido (%q), a usar %s", value, defaultSummaryPollInterval)
+		return defaultSummaryPollInterval
+	}
+	return interval
 }
 
 func (r TranscriptionRequest) withFallbacks() TranscriptionRequest {

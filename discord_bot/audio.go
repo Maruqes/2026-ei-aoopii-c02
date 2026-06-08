@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"log"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +27,9 @@ type voiceConnectionState struct {
 
 	channelMu   sync.RWMutex
 	channelName string
+
+	leaveTimerMu sync.Mutex
+	leaveTimer   *time.Timer
 }
 
 type voiceUserInfo struct {
@@ -106,14 +111,18 @@ func getDiscordIDBySSRC(guildID string, ssrc uint32) (string, bool) {
 
 func clearVoiceConnection(guildID string, vc *discordgo.VoiceConnection) {
 	voiceMu.Lock()
-	defer voiceMu.Unlock()
-
 	current, ok := voiceConnections[guildID]
 	if !ok {
+		voiceMu.Unlock()
 		return
 	}
 	if current.vc == vc {
 		delete(voiceConnections, guildID)
+	}
+	voiceMu.Unlock()
+
+	if current.vc == vc {
+		current.stopLeaveTimer()
 	}
 }
 
@@ -136,6 +145,7 @@ func stopAllVoiceConnections() {
 			continue
 		}
 
+		state.stopLeaveTimer()
 		state.queueAllRecordingsFinish()
 		state.ssrcUsers.Reset()
 		if err := state.vc.Disconnect(); err != nil {
@@ -261,6 +271,75 @@ func (state *voiceConnectionState) queueRecordingEvent(event recordingControlEve
 	}
 }
 
+func botLeaveDurationFromEnv(raw string) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0
+	}
+
+	minutes, err := strconv.Atoi(raw)
+	if err != nil || minutes < 0 {
+		log.Printf("BOT_LEAVE inválido %q; saída automática desativada", raw)
+		return 0
+	}
+	if minutes == 0 {
+		return 0
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+func (state *voiceConnectionState) startLeaveTimer(guildID string, duration time.Duration) {
+	if state == nil || duration <= 0 {
+		return
+	}
+
+	state.leaveTimerMu.Lock()
+	if state.leaveTimer != nil {
+		state.leaveTimer.Stop()
+	}
+	state.leaveTimer = time.AfterFunc(duration, func() {
+		log.Printf("limite de %s atingido no servidor %s, a desligar bot e iniciar processamento", duration, guildID)
+		disconnectVoiceConnection(guildID, state)
+	})
+	state.leaveTimerMu.Unlock()
+}
+
+func (state *voiceConnectionState) stopLeaveTimer() {
+	if state == nil {
+		return
+	}
+
+	state.leaveTimerMu.Lock()
+	if state.leaveTimer != nil {
+		state.leaveTimer.Stop()
+		state.leaveTimer = nil
+	}
+	state.leaveTimerMu.Unlock()
+}
+
+func disconnectVoiceConnection(guildID string, state *voiceConnectionState) bool {
+	if state == nil || state.vc == nil {
+		return false
+	}
+
+	voiceMu.Lock()
+	current := voiceConnections[guildID]
+	if current != state {
+		voiceMu.Unlock()
+		return false
+	}
+	delete(voiceConnections, guildID)
+	voiceMu.Unlock()
+
+	state.stopLeaveTimer()
+	state.queueAllRecordingsFinish()
+	state.ssrcUsers.Reset()
+	if err := state.vc.Disconnect(); err != nil {
+		log.Printf("erro ao desligar bot do servidor %s: %v", guildID, err)
+	}
+	return true
+}
+
 func disconnectIfBotIsAlone(s *discordgo.Session, guildID string, state *voiceConnectionState) bool {
 	if state == nil || state.vc == nil {
 		return false
@@ -281,14 +360,7 @@ func disconnectIfBotIsAlone(s *discordgo.Session, guildID string, state *voiceCo
 	}
 
 	log.Printf("sem utilizadores no canal %s do servidor %s, a desligar bot", state.vc.ChannelID, guildID)
-	state.queueAllRecordingsFinish()
-	state.ssrcUsers.Reset()
-	if err := state.vc.Disconnect(); err != nil {
-		log.Printf("erro ao desligar bot do servidor %s: %v", guildID, err)
-	}
-	clearVoiceConnection(guildID, state.vc)
-
-	return true
+	return disconnectVoiceConnection(guildID, state)
 }
 
 func receiveAudio(s *discordgo.Session, guildID string, state *voiceConnectionState) {
@@ -399,6 +471,7 @@ func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 	setVoiceConnection(guildID, state)
 	log.Println("bot entrou na call")
 
+	state.startLeaveTimer(guildID, botLeaveDurationFromEnv(os.Getenv("BOT_LEAVE")))
 	go receiveAudio(s, guildID, state)
 }
 

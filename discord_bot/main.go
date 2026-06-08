@@ -142,9 +142,6 @@ func profileEmbed(profile *UserProfileResponse, fallbackName string) *discordgo.
 		profileField("Persona Notes", profile.PersonaNotes),
 		profileField("Recent Updates", profile.RecentUpdates),
 	}
-	if strings.TrimSpace(stringValue(profile.ProfileFileURL)) != "" {
-		fields = append(fields, profileField("Profile File", stringValue(profile.ProfileFileURL)))
-	}
 	return &discordgo.MessageEmbed{
 		Title:  "Profile: " + name,
 		Color:  0x2F80ED,
@@ -231,4 +228,3 @@ func main() {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 }
-

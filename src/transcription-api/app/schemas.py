@@ -75,5 +75,4 @@ class UserProfileResponse(BaseModel):
     communication_style: str
     persona_notes: str
     recent_updates: str
-    google_doc_url: str | None
     last_updated_at: datetime | None
