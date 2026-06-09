@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Form, HTTPException, status
@@ -344,6 +345,7 @@ def create_app() -> FastAPI:
     return service
 
 
+@lru_cache
 def get_settings() -> Settings:
     return Settings.from_env()
 
@@ -352,6 +354,7 @@ def get_repository(settings: Settings = Depends(get_settings)) -> DataRepository
     return DataRepository(settings.database_url)
 
 
+@lru_cache
 def get_transcriber(settings: Settings = Depends(get_settings)) -> WhisperTranscriber:
     return WhisperTranscriber(
         settings.whisper_model,

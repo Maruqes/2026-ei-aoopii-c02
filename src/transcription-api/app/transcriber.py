@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,8 @@ class WhisperResult:
 
 
 class WhisperTranscriber:
+    _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="whisper")
+
     def __init__(
         self,
         model_name: str,
@@ -47,6 +50,11 @@ class WhisperTranscriber:
         self._model: Any | None = None
 
     def transcribe(self, audio_path: Path) -> WhisperResult:
+        logger.info("whisper transcription queued file=%s", audio_path)
+        return self._executor.submit(self._transcribe, audio_path).result()
+
+    def _transcribe(self, audio_path: Path) -> WhisperResult:
+        logger.info("whisper transcription started file=%s", audio_path)
         model = self._load_model()
         options: dict[str, Any] = {
             "beam_size": self.beam_size if self.beam_size > 0 else None,
