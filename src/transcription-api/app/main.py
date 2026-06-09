@@ -361,6 +361,8 @@ def get_transcriber(settings: Settings = Depends(get_settings)) -> WhisperTransc
         initial_prompt=settings.whisper_initial_prompt,
         carry_initial_prompt=settings.whisper_carry_initial_prompt,
         condition_on_previous_text=settings.whisper_condition_on_previous_text,
+        hallucination_silence_threshold=settings.whisper_hallucination_silence_threshold,
+        max_no_speech_prob=settings.whisper_max_no_speech_prob,
     )
 
 

@@ -50,16 +50,20 @@ Whisper quality settings:
 WHISPER_MODEL=large-v3
 WHISPER_LANGUAGE=pt
 # Beam search is slower than greedy decoding but usually gives a better first decode.
-WHISPER_BEAM_SIZE=5
+WHISPER_BEAM_SIZE=10
 # Optional vocabulary hint for names, acronyms, and project-specific words.
 WHISPER_INITIAL_PROMPT=Transcricao de uma conversa em portugues de Portugal sobre Discord, FastAPI e Whisper.
 WHISPER_CARRY_INITIAL_PROMPT=true
+WHISPER_CONDITION_ON_PREVIOUS_TEXT=false
+WHISPER_HALLUCINATION_SILENCE_THRESHOLD=2.0
+WHISPER_MAX_NO_SPEECH_PROB=0.8
 ```
 
 Set `WHISPER_LANGUAGE=auto` only when recordings are genuinely multilingual or the
-fixed language is wrong. If long recordings start repeating an incorrect phrase,
-try `WHISPER_CONDITION_ON_PREVIOUS_TEXT=false`; this reduces the context carried
-between Whisper windows and can make phrasing less consistent.
+fixed language is wrong. Keeping `WHISPER_CONDITION_ON_PREVIOUS_TEXT=false` reduces
+repeated incorrect phrases in long recordings. The hallucination silence threshold
+helps skip invented speech around silent regions; set it to `0` to disable it.
+Segments that exceed `WHISPER_MAX_NO_SPEECH_PROB` are also discarded.
 
 Transcribe an audio file:
 

@@ -27,16 +27,25 @@ def env_int(name: str, default: int) -> int:
     return int(value)
 
 
+def env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    return float(value)
+
+
 @dataclass(frozen=True)
 class Settings:
     database_url: str
-    whisper_model: str = "base"
+    whisper_model: str = "large-v3"
     whisper_device: str = "auto"
     whisper_language: str = "pt"
-    whisper_beam_size: int = 5
+    whisper_beam_size: int = 10
     whisper_initial_prompt: str = ""
     whisper_carry_initial_prompt: bool = False
-    whisper_condition_on_previous_text: bool = True
+    whisper_condition_on_previous_text: bool = False
+    whisper_hallucination_silence_threshold: float = 2.0
+    whisper_max_no_speech_prob: float = 0.8
     upload_tmp_dir: Path = Path(".tmp/uploads")
     recordings_dir: Path = Path("discord_bot/recordings")
     keep_uploads: bool = False
@@ -62,13 +71,18 @@ class Settings:
 
         return cls(
             database_url=database_url,
-            whisper_model=os.getenv("WHISPER_MODEL", "base"),
+            whisper_model=os.getenv("WHISPER_MODEL", "large-v3"),
             whisper_device=os.getenv("WHISPER_DEVICE", "auto").strip().lower(),
             whisper_language=env_str("WHISPER_LANGUAGE", "pt"),
-            whisper_beam_size=env_int("WHISPER_BEAM_SIZE", 5),
+            whisper_beam_size=env_int("WHISPER_BEAM_SIZE", 10),
             whisper_initial_prompt=env_str("WHISPER_INITIAL_PROMPT"),
             whisper_carry_initial_prompt=env_bool("WHISPER_CARRY_INITIAL_PROMPT", False),
-            whisper_condition_on_previous_text=env_bool("WHISPER_CONDITION_ON_PREVIOUS_TEXT", True),
+            whisper_condition_on_previous_text=env_bool("WHISPER_CONDITION_ON_PREVIOUS_TEXT", False),
+            whisper_hallucination_silence_threshold=env_float(
+                "WHISPER_HALLUCINATION_SILENCE_THRESHOLD",
+                2.0,
+            ),
+            whisper_max_no_speech_prob=env_float("WHISPER_MAX_NO_SPEECH_PROB", 0.8),
             upload_tmp_dir=Path(os.getenv("UPLOAD_TMP_DIR", ".tmp/uploads")),
             recordings_dir=Path(os.getenv("RECORDINGS_DIR", "discord_bot/recordings")),
             keep_uploads=env_bool("KEEP_UPLOADS", False),

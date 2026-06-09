@@ -31,7 +31,9 @@ class WhisperTranscriber:
         beam_size: int = 5,
         initial_prompt: str = "",
         carry_initial_prompt: bool = False,
-        condition_on_previous_text: bool = True,
+        condition_on_previous_text: bool = False,
+        hallucination_silence_threshold: float = 2.0,
+        max_no_speech_prob: float = 0.8,
     ):
         self.model_name = model_name
         self.device = device
@@ -40,6 +42,8 @@ class WhisperTranscriber:
         self.initial_prompt = initial_prompt
         self.carry_initial_prompt = carry_initial_prompt
         self.condition_on_previous_text = condition_on_previous_text
+        self.hallucination_silence_threshold = hallucination_silence_threshold
+        self.max_no_speech_prob = max_no_speech_prob
         self._model: Any | None = None
 
     def transcribe(self, audio_path: Path) -> WhisperResult:
@@ -50,6 +54,8 @@ class WhisperTranscriber:
             "fp16": False,
             "language": self._language_option(),
         }
+        if self.hallucination_silence_threshold > 0:
+            options["hallucination_silence_threshold"] = self.hallucination_silence_threshold
         if self.initial_prompt.strip():
             options["initial_prompt"] = self.initial_prompt.strip()
             options["carry_initial_prompt"] = self.carry_initial_prompt
@@ -66,9 +72,10 @@ class WhisperTranscriber:
             )
             for segment in result.get("segments", [])
             if str(segment.get("text", "")).strip()
+            and float(segment.get("no_speech_prob", 0.0)) < self.max_no_speech_prob
         ]
         return WhisperResult(
-            text=str(result.get("text", "")).strip(),
+            text=" ".join(segment.text for segment in segments),
             segments=segments,
         )
 
