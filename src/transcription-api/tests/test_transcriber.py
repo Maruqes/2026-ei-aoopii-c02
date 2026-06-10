@@ -1,8 +1,9 @@
+import os
 import threading
 import time
 from pathlib import Path
 
-from app.transcriber import WhisperTranscriber
+from app.transcriber import WhisperTranscriber, configure_cpu_threads
 
 
 class FakeModel:
@@ -15,6 +16,14 @@ class FakeModel:
             "text": "texto",
             "segments": [{"start": 1.0, "end": 2.0, "text": " texto "}],
         }
+
+
+def test_configure_cpu_threads_sets_blas_env_vars(monkeypatch) -> None:
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    resolved = configure_cpu_threads(8)
+    assert resolved == 8
+    assert os.environ["OMP_NUM_THREADS"] == "8"
+    assert os.environ["MKL_NUM_THREADS"] == "8"
 
 
 def test_transcriber_uses_anti_hallucination_options() -> None:

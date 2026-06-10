@@ -369,6 +369,7 @@ def get_transcriber(settings: Settings = Depends(get_settings)) -> WhisperTransc
         condition_on_previous_text=settings.whisper_condition_on_previous_text,
         hallucination_silence_threshold=settings.whisper_hallucination_silence_threshold,
         max_no_speech_prob=settings.whisper_max_no_speech_prob,
+        num_threads=settings.whisper_num_threads,
         timeout_seconds=settings.whisper_timeout_seconds,
     )
 

@@ -1,12 +1,33 @@
 from __future__ import annotations
 
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("uvicorn.error")
+
+_THREAD_ENV_VARS = (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+)
+
+
+def configure_cpu_threads(num_threads: int = 0) -> int:
+    resolved = num_threads if num_threads > 0 else (os.cpu_count() or 1)
+    for key in _THREAD_ENV_VARS:
+        os.environ[key] = str(resolved)
+
+    import torch
+
+    torch.set_num_threads(resolved)
+    torch.set_num_interop_threads(min(4, max(1, resolved // 4)))
+    logger.info("whisper cpu threads configured threads=%d", resolved)
+    return resolved
 
 
 @dataclass(frozen=True)
@@ -37,10 +58,12 @@ class WhisperTranscriber:
         condition_on_previous_text: bool = False,
         hallucination_silence_threshold: float = 2.0,
         max_no_speech_prob: float = 0.8,
+        num_threads: int = 0,
         timeout_seconds: float = 1800,
     ):
         self.model_name = model_name
         self.device = device
+        self.num_threads = num_threads
         self.timeout_seconds = timeout_seconds
         self.language = language
         self.beam_size = beam_size
@@ -97,6 +120,7 @@ class WhisperTranscriber:
 
     def _load_model(self) -> Any:
         if self._model is None:
+            configure_cpu_threads(self.num_threads)
             import torch
             import whisper
 
