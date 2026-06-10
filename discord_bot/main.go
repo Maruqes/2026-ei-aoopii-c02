@@ -477,10 +477,7 @@ func healthHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		client = NewTranscriptionClientFromEnv()
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	health, err := client.GetHealth(ctx)
+	health, err := client.GetHealth(context.Background())
 	if err != nil {
 		respondText(s, i, fmt.Sprintf("API indisponivel: %v", err))
 		return

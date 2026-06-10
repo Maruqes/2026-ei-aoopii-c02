@@ -6,12 +6,9 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
-func TestFinishSessionAndWaitContinuesAfterSummaryTimeout(t *testing.T) {
-	t.Setenv("SESSION_SUMMARY_TIMEOUT", "1ms")
-	t.Setenv("SESSION_SUMMARY_MAX_WAIT", "5s")
+func TestFinishSessionAndWaitContinuesUntilSummaryIsReady(t *testing.T) {
 	t.Setenv("SESSION_SUMMARY_POLL_INTERVAL", "1ms")
 
 	var summaryRequests int32
@@ -46,9 +43,7 @@ func TestFinishSessionAndWaitContinuesAfterSummaryTimeout(t *testing.T) {
 
 	client := &TranscriptionClient{
 		baseURL: server.URL,
-		httpClient: &http.Client{
-			Timeout: time.Second,
-		},
+		httpClient: &http.Client{},
 	}
 
 	summary, err := client.FinishSessionAndWait(t.Context(), 42)

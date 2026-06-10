@@ -14,7 +14,6 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-discord} -d ${POSTGRES_DB:-discord_anthropologist}"]
       interval: 5s
-      timeout: 5s
       retries: 10
 
   api:
@@ -37,7 +36,6 @@ services:
       WHISPER_HALLUCINATION_SILENCE_THRESHOLD: ${WHISPER_HALLUCINATION_SILENCE_THRESHOLD:-2.0}
       WHISPER_MAX_NO_SPEECH_PROB: ${WHISPER_MAX_NO_SPEECH_PROB:-0.8}
       WHISPER_NUM_THREADS: ${WHISPER_NUM_THREADS:-0}
-      WHISPER_TIMEOUT: ${WHISPER_TIMEOUT:-30m}
       UPLOAD_TMP_DIR: ${UPLOAD_TMP_DIR:-.tmp/uploads}
       RECORDINGS_DIR: /app/recordings
       KEEP_UPLOADS: ${KEEP_UPLOADS:-false}
@@ -78,9 +76,6 @@ services:
       BOT_LEAVE: ${BOT_LEAVE:-0}
       RECORDINGS_DIR: /app/recordings
       TRANSCRIPTION_API_URL: http://api:8000
-      TRANSCRIPTION_API_TIMEOUT: ${TRANSCRIPTION_API_TIMEOUT:-10m}
-      SESSION_SUMMARY_TIMEOUT: ${SESSION_SUMMARY_TIMEOUT:-15m}
-      SESSION_SUMMARY_MAX_WAIT: ${SESSION_SUMMARY_MAX_WAIT:-30m}
     volumes:
       - ./discord_bot/recordings:/app/recordings
     depends_on:

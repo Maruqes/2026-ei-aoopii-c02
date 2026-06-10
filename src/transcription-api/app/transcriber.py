@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -59,12 +59,10 @@ class WhisperTranscriber:
         hallucination_silence_threshold: float = 2.0,
         max_no_speech_prob: float = 0.8,
         num_threads: int = 0,
-        timeout_seconds: float = 1800,
     ):
         self.model_name = model_name
         self.device = device
         self.num_threads = num_threads
-        self.timeout_seconds = timeout_seconds
         self.language = language
         self.beam_size = beam_size
         self.initial_prompt = initial_prompt
@@ -75,14 +73,9 @@ class WhisperTranscriber:
         self._model: Any | None = None
 
     def transcribe(self, audio_path: Path) -> WhisperResult:
-        logger.info("whisper transcription queued file=%s timeout=%ss", audio_path, self.timeout_seconds)
+        logger.info("whisper transcription queued file=%s", audio_path)
         future = self._executor.submit(self._transcribe, audio_path)
-        try:
-            return future.result(timeout=self.timeout_seconds)
-        except FutureTimeoutError as exc:
-            raise TimeoutError(
-                f"Whisper transcription timed out after {self.timeout_seconds}s for {audio_path}"
-            ) from exc
+        return future.result()
 
     def _transcribe(self, audio_path: Path) -> WhisperResult:
         logger.info("whisper transcription started file=%s", audio_path)

@@ -15,11 +15,8 @@ import (
 )
 
 const (
-	defaultTranscriptionAPIURL     = "http://localhost:8000"
-	defaultTranscriptionAPITimeout = 10 * time.Minute
-	defaultSummaryPollTimeout      = 15 * time.Minute
-	defaultSummaryMaxWait          = 30 * time.Minute
-	defaultSummaryPollInterval     = 5 * time.Second
+	defaultTranscriptionAPIURL = "http://localhost:8000"
+	defaultSummaryPollInterval = 5 * time.Second
 )
 
 type TranscriptionClient struct {
@@ -185,11 +182,9 @@ func NewTranscriptionClientFromEnv() *TranscriptionClient {
 	client := &TranscriptionClient{
 		baseURL:  baseURL,
 		endpoint: baseURL + "/v1/transcriptions",
-		httpClient: &http.Client{
-			Timeout: transcriptionTimeoutFromEnv(os.Getenv("TRANSCRIPTION_API_TIMEOUT")),
-		},
+		httpClient: &http.Client{},
 	}
-	log.Printf("cliente API transcricao configurado endpoint=%s timeout=%s", client.endpoint, client.httpClient.Timeout)
+	log.Printf("cliente API transcricao configurado endpoint=%s", client.endpoint)
 	return client
 }
 
@@ -204,20 +199,6 @@ func transcriptionBaseURLFromEnv(raw string) string {
 		return strings.TrimSuffix(endpoint, "/v1/transcriptions")
 	}
 	return endpoint
-}
-
-func transcriptionTimeoutFromEnv(raw string) time.Duration {
-	value := strings.TrimSpace(raw)
-	if value == "" {
-		return defaultTranscriptionAPITimeout
-	}
-
-	timeout, err := time.ParseDuration(value)
-	if err != nil {
-		log.Printf("TRANSCRIPTION_API_TIMEOUT invalido (%q), a usar %s", value, defaultTranscriptionAPITimeout)
-		return defaultTranscriptionAPITimeout
-	}
-	return timeout
 }
 
 func (c *TranscriptionClient) QueueTranscription(request TranscriptionRequest) {
@@ -345,12 +326,7 @@ func (c *TranscriptionClient) FinishSessionAndWait(ctx context.Context, sessionI
 		return nil, err
 	}
 
-	timeout := summaryPollTimeoutFromEnv(os.Getenv("SESSION_SUMMARY_TIMEOUT"))
-	maxWait := summaryMaxWaitFromEnv(os.Getenv("SESSION_SUMMARY_MAX_WAIT"), timeout)
 	interval := summaryPollIntervalFromEnv(os.Getenv("SESSION_SUMMARY_POLL_INTERVAL"))
-	softDeadline := time.Now().Add(timeout)
-	hardDeadline := time.Now().Add(maxWait)
-	timeoutLogged := false
 	for {
 		summary, err := c.GetSessionSummary(ctx, sessionID)
 		if err != nil {
@@ -358,14 +334,6 @@ func (c *TranscriptionClient) FinishSessionAndWait(ctx context.Context, sessionI
 		}
 		if summary.Status == "agent_done" || summary.Status == "agent_failed" {
 			return summary, nil
-		}
-		now := time.Now()
-		if !timeoutLogged && timeout > 0 && now.After(softDeadline) {
-			log.Printf("resumo da sessao %d ainda nao esta pronto apos %s; estado=%s; a continuar a aguardar", sessionID, timeout, summary.Status)
-			timeoutLogged = true
-		}
-		if maxWait > 0 && now.After(hardDeadline) {
-			return summary, fmt.Errorf("resumo da sessao %d nao ficou pronto apos %s; ultimo estado=%s", sessionID, maxWait, summary.Status)
 		}
 		select {
 		case <-ctx.Done():
@@ -529,35 +497,6 @@ func (c *TranscriptionClient) doJSON(request *http.Request, target any) error {
 		return fmt.Errorf("API devolveu %s: %s", response.Status, strings.TrimSpace(string(body)))
 	}
 	return json.NewDecoder(response.Body).Decode(target)
-}
-
-func summaryPollTimeoutFromEnv(raw string) time.Duration {
-	value := strings.TrimSpace(raw)
-	if value == "" {
-		return defaultSummaryPollTimeout
-	}
-	timeout, err := time.ParseDuration(value)
-	if err != nil {
-		log.Printf("SESSION_SUMMARY_TIMEOUT invalido (%q), a usar %s", value, defaultSummaryPollTimeout)
-		return defaultSummaryPollTimeout
-	}
-	return timeout
-}
-
-func summaryMaxWaitFromEnv(raw string, softTimeout time.Duration) time.Duration {
-	value := strings.TrimSpace(raw)
-	if value == "" {
-		if softTimeout > 0 {
-			return softTimeout * 2
-		}
-		return defaultSummaryMaxWait
-	}
-	maxWait, err := time.ParseDuration(value)
-	if err != nil || maxWait <= 0 {
-		log.Printf("SESSION_SUMMARY_MAX_WAIT invalido (%q), a usar %s", value, defaultSummaryMaxWait)
-		return defaultSummaryMaxWait
-	}
-	return maxWait
 }
 
 func summaryPollIntervalFromEnv(raw string) time.Duration {

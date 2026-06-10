@@ -310,7 +310,7 @@ class OllamaClient:
     def list_models(self) -> list[str]:
         req = request.Request(f"{self.base_url}/api/tags", method="GET")
         try:
-            with request.urlopen(req, timeout=30) as response:
+            with request.urlopen(req) as response:
                 data = json.loads(response.read().decode("utf-8"))
         except error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
@@ -348,7 +348,7 @@ class OllamaClient:
             method="POST",
         )
         try:
-            with request.urlopen(req, timeout=180) as response:
+            with request.urlopen(req) as response:
                 raw = response.read().decode("utf-8")
         except error.HTTPError as exc:
             raw_error = exc.read().decode("utf-8", errors="replace")

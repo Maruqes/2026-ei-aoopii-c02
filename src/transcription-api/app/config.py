@@ -27,26 +27,6 @@ def env_int(name: str, default: int) -> int:
     return int(value)
 
 
-def _whisper_timeout_default() -> float:
-    raw = os.getenv("WHISPER_TIMEOUT", "30m").strip()
-    if not raw:
-        return 1800
-    try:
-        seconds = float(raw)
-        return seconds if seconds > 0 else 1800
-    except ValueError:
-        pass
-    multipliers = {"s": 1, "m": 60, "h": 3600}
-    unit = raw[-1].lower()
-    if unit in multipliers:
-        try:
-            value = float(raw[:-1])
-            return value * multipliers[unit]
-        except ValueError:
-            pass
-    return 1800
-
-
 def env_float(name: str, default: float) -> float:
     value = os.getenv(name)
     if value is None or not value.strip():
@@ -67,7 +47,6 @@ class Settings:
     whisper_hallucination_silence_threshold: float = 2.0
     whisper_max_no_speech_prob: float = 0.8
     whisper_num_threads: int = 0
-    whisper_timeout_seconds: float = 1800
     upload_tmp_dir: Path = Path(".tmp/uploads")
     recordings_dir: Path = Path("discord_bot/recordings")
     keep_uploads: bool = False
@@ -106,7 +85,6 @@ class Settings:
             ),
             whisper_max_no_speech_prob=env_float("WHISPER_MAX_NO_SPEECH_PROB", 0.8),
             whisper_num_threads=env_int("WHISPER_NUM_THREADS", 0),
-            whisper_timeout_seconds=env_float("WHISPER_TIMEOUT_SECONDS", _whisper_timeout_default()),
             upload_tmp_dir=Path(os.getenv("UPLOAD_TMP_DIR", ".tmp/uploads")),
             recordings_dir=Path(os.getenv("RECORDINGS_DIR", "discord_bot/recordings")),
             keep_uploads=env_bool("KEEP_UPLOADS", False),
