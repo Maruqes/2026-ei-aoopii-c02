@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 
 from data.repository import DataRepository, SessionParticipant, UserProfile, normalize_timestamp
+
+logger = logging.getLogger("uvicorn.error")
 
 from .docs_client import LocalMarkdownProfileClient
 from .llm import GeneratedProfile, LLMClient, LoreEvent
@@ -33,37 +36,44 @@ class SessionAgent:
         summary = self.llm.summarize_session(transcript)
         participants = self.repository.get_session_participants(session_id)
         for participant in participants:
-            current_profile = self.repository.get_user_profile_by_discord_id(participant.discord_id)
-            participant_transcript = format_transcript(
-                [message for message in messages if message["discord_id"] == participant.discord_id]
-            )
-            existing_doc_text = self.docs.read_doc_text(current_profile.google_doc_id if current_profile else None)
-            generated = self.llm.update_profile(
-                username=display_name(participant),
-                existing_profile=current_profile,
-                existing_doc_text=existing_doc_text,
-                transcript=(
-                    f"Observation context: {observation_context}\n\n"
-                    f"Full session:\n{transcript}\n\n"
-                    f"Messages by {display_name(participant)}:\n{participant_transcript}"
-                ),
-            )
-            stored_doc = self.docs.upsert_profile_doc(
-                doc_id=current_profile.google_doc_id if current_profile else None,
-                username=display_name(participant),
-                profile=generated,
-            )
-            self.repository.upsert_user_profile(
-                user_id=participant.user_id,
-                anthropologist_title=generated.anthropologist_title,
-                summary=generated.summary,
-                interests=generated.interests,
-                communication_style=generated.communication_style,
-                known_facts=generated.persona_notes,
-                recent_updates=generated.recent_updates,
-                google_doc_id=stored_doc.doc_id,
-                google_doc_url=stored_doc.url,
-            )
+            try:
+                current_profile = self.repository.get_user_profile_by_discord_id(participant.discord_id)
+                participant_transcript = format_transcript(
+                    [message for message in messages if message["discord_id"] == participant.discord_id]
+                )
+                existing_doc_text = self.docs.read_doc_text(current_profile.google_doc_id if current_profile else None)
+                generated = self.llm.update_profile(
+                    username=display_name(participant),
+                    existing_profile=current_profile,
+                    existing_doc_text=existing_doc_text,
+                    transcript=(
+                        f"Observation context: {observation_context}\n\n"
+                        f"Full session:\n{transcript}\n\n"
+                        f"Messages by {display_name(participant)}:\n{participant_transcript}"
+                    ),
+                )
+                stored_doc = self.docs.upsert_profile_doc(
+                    doc_id=current_profile.google_doc_id if current_profile else None,
+                    username=display_name(participant),
+                    profile=generated,
+                )
+                self.repository.upsert_user_profile(
+                    user_id=participant.user_id,
+                    anthropologist_title=generated.anthropologist_title,
+                    summary=generated.summary,
+                    interests=generated.interests,
+                    communication_style=generated.communication_style,
+                    known_facts=generated.persona_notes,
+                    recent_updates=generated.recent_updates,
+                    google_doc_id=stored_doc.doc_id,
+                    google_doc_url=stored_doc.url,
+                )
+            except Exception:
+                logger.exception(
+                    "falha ao atualizar perfil do participante session_id=%s discord_id=%s",
+                    session_id,
+                    participant.discord_id,
+                )
 
         self.repository.mark_session_agent_done(session_id, summary)
         return summary

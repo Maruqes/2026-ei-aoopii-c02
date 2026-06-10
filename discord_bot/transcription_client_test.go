@@ -11,6 +11,7 @@ import (
 
 func TestFinishSessionAndWaitContinuesAfterSummaryTimeout(t *testing.T) {
 	t.Setenv("SESSION_SUMMARY_TIMEOUT", "1ms")
+	t.Setenv("SESSION_SUMMARY_MAX_WAIT", "5s")
 	t.Setenv("SESSION_SUMMARY_POLL_INTERVAL", "1ms")
 
 	var summaryRequests int32

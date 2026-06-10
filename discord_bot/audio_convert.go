@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -250,7 +249,6 @@ func closeAndTranscribeRecording(recording *userAudioRecording, info voiceUserIn
 
 	if err := recording.padToElapsed(time.Now().UTC()); err != nil {
 		log.Printf("erro ao preencher silêncio final do WAV de user=%s: %v", user.DiscordID, err)
-		return err
 	}
 
 	log.Printf(
@@ -282,7 +280,11 @@ func closeAndTranscribeRecording(recording *userAudioRecording, info voiceUserIn
 		recording.wav.dataSize,
 		time.Since(recording.startedAt).Round(time.Second),
 	)
-	if err := transcriptions.SubmitTranscription(context.Background(), TranscriptionRequest{
+	if transcriptions == nil {
+		log.Printf("cliente de transcricao nil; WAV ignorado user=%s file=%s", user.DiscordID, recording.path)
+		return nil
+	}
+	transcriptions.QueueTranscription(TranscriptionRequest{
 		SessionID:          recording.sessionID,
 		AudioPath:          recording.path,
 		DiscordID:          user.DiscordID,
@@ -290,10 +292,7 @@ func closeAndTranscribeRecording(recording *userAudioRecording, info voiceUserIn
 		DisplayName:        user.DisplayName,
 		ChannelName:        recording.channel,
 		RecordingStartedAt: recording.startedAt,
-	}); err != nil {
-		log.Printf("erro ao submeter transcriÃ§Ã£o user=%s file=%s: %v", user.DiscordID, recording.path, err)
-		return err
-	}
+	})
 
 	return nil
 }
@@ -331,11 +330,14 @@ func ListenAndWriteOpusToWAV(
 				continue
 			}
 			if event.finishAll {
-				log.Printf("evento recebido: finalizar todas as gravações ativas count=%d", len(userRecordings))
+				log.Printf("evento recebido: finalizar todas as gravações ativas count=%d stop=%v", len(userRecordings), event.stopListening)
 				if err := closeUserRecordings(userRecordings, transcriptions); err != nil {
 					return err
 				}
-				return nil
+				if event.stopListening {
+					return nil
+				}
+				continue
 			}
 			log.Printf("evento recebido: finalizar gravação user=%s", event.user.DiscordID)
 			if err := finishUserRecording(userRecordings, event.user, transcriptions); err != nil {
@@ -437,7 +439,8 @@ func (recording *userAudioRecording) rtpGapFrames(ssrc uint32, timestamp uint32)
 
 	gap := int32(timestamp - recording.nextRTPTimestamp)
 	if gap < 0 {
-		return 0, false
+		recording.hasRTPTimestamp = false
+		return 0, true
 	}
 	if gap < int32(sampleRate*minRTPGapPadMs/1000) {
 		return 0, true

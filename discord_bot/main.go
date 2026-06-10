@@ -122,6 +122,41 @@ func pingHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 func startHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	setBotEnabled(true)
 	respondText(s, i, "Bot reativado. Vou voltar a entrar nas calls normalmente.")
+	go rejoinActiveVoiceChannels(s)
+}
+
+func rejoinActiveVoiceChannels(s *discordgo.Session) {
+	if s == nil || s.State == nil || s.State.User == nil {
+		return
+	}
+
+	botUserID := s.State.User.ID
+	for _, guild := range s.State.Guilds {
+		if guild == nil || getVoiceConnection(guild.ID) != nil {
+			continue
+		}
+
+		channelUsers := make(map[string]string)
+		for _, voiceState := range guild.VoiceStates {
+			if voiceState == nil || voiceState.ChannelID == "" || voiceState.UserID == botUserID {
+				continue
+			}
+			if _, exists := channelUsers[voiceState.ChannelID]; !exists {
+				channelUsers[voiceState.ChannelID] = voiceState.UserID
+			}
+		}
+
+		for channelID, userID := range channelUsers {
+			OnVoiceStateUpdate(s, &discordgo.VoiceStateUpdate{
+				VoiceState: &discordgo.VoiceState{
+					GuildID:   guild.ID,
+					ChannelID: channelID,
+					UserID:    userID,
+				},
+			})
+			break
+		}
+	}
 }
 
 func stopHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -143,7 +178,11 @@ func profileHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}
 	profile, err := client.GetUserProfile(context.Background(), targetID)
 	if err != nil {
-		respondText(s, i, fmt.Sprintf("Ainda nao ha perfil para %s.", targetName))
+		if strings.Contains(err.Error(), "404") {
+			respondText(s, i, fmt.Sprintf("Ainda nao ha perfil para %s.", targetName))
+			return
+		}
+		respondText(s, i, fmt.Sprintf("Erro ao consultar perfil de %s: %v", targetName, err))
 		return
 	}
 	if strings.TrimSpace(profile.Summary+profile.Interests+profile.CommunicationStyle+profile.PersonaNotes+profile.RecentUpdates) == "" {

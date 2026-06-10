@@ -39,13 +39,15 @@ type voiceUserInfo struct {
 }
 
 type recordingControlEvent struct {
-	finishAll bool
-	user      voiceUserInfo
+	finishAll     bool
+	stopListening bool
+	user          voiceUserInfo
 }
 
 var (
 	voiceConnections = make(map[string]*voiceConnectionState)
 	voiceMu          sync.Mutex
+	voiceJoinMu      sync.Mutex
 	botEnabled       atomic.Bool
 )
 
@@ -253,6 +255,14 @@ func (state *voiceConnectionState) queueAllRecordingsFinish() {
 		return
 	}
 
+	state.queueRecordingEvent(recordingControlEvent{finishAll: true, stopListening: true})
+}
+
+func (state *voiceConnectionState) queueCloseAllRecordings() {
+	if state == nil {
+		return
+	}
+
 	state.queueRecordingEvent(recordingControlEvent{finishAll: true})
 }
 
@@ -266,8 +276,9 @@ func (state *voiceConnectionState) queueRecordingEvent(event recordingControlEve
 
 	select {
 	case state.recordingEvents <- event:
-	default:
-		log.Printf("fila de eventos de gravação cheia; evento ignorado para user=%s", event.user.DiscordID)
+	case <-time.After(5 * time.Second):
+		log.Printf("fila de eventos de gravação cheia; a aguardar envio para user=%s finishAll=%v", event.user.DiscordID, event.finishAll)
+		state.recordingEvents <- event
 	}
 }
 
@@ -369,7 +380,7 @@ func receiveAudio(s *discordgo.Session, guildID string, state *voiceConnectionSt
 
 	err := ListenAndWriteOpusToWAV(
 		state.vc,
-		"recordings",
+		recordingsDirFromEnv(),
 		state.sessionID,
 		state.ssrcUsers,
 		state.recordingEvents,
@@ -415,17 +426,13 @@ func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 
 	channelID := vs.ChannelID
 
-	if current != nil && disconnectIfBotIsAlone(s, guildID, current) {
-		return
-	}
-
 	// Se já houver conexão no servidor, muda para o novo canal.
 	if current != nil {
 		if current.vc.ChannelID == channelID {
 			return
 		}
 
-		current.queueAllRecordingsFinish()
+		current.queueCloseAllRecordings()
 		if err := current.vc.ChangeChannel(channelID, false, false); err != nil {
 			log.Printf("erro ao mover para canal %s no servidor %s: %v", channelID, guildID, err)
 			_ = current.vc.Disconnect()
@@ -433,8 +440,16 @@ func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 		} else {
 			current.ssrcUsers.Reset()
 			current.setChannelName(resolveVoiceChannelName(s, channelID))
+			current.startLeaveTimer(guildID, botLeaveDurationFromEnv(os.Getenv("BOT_LEAVE")))
 			log.Printf("bot movido para canal %s no servidor %s", channelID, guildID)
 		}
+		return
+	}
+
+	voiceJoinMu.Lock()
+	defer voiceJoinMu.Unlock()
+
+	if existing := getVoiceConnection(guildID); existing != nil {
 		return
 	}
 
@@ -448,7 +463,10 @@ func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 
 	ssrcUsers := NewSSRCUserMap()
 	channelName := resolveVoiceChannelName(s, channelID)
-	transcriptionClient := NewTranscriptionClientFromEnv()
+	transcriptionClient := botAPIClient
+	if transcriptionClient == nil {
+		transcriptionClient = NewTranscriptionClientFromEnv()
+	}
 	summaryChannelID := resolveSummaryTextChannelID(s, guildID)
 	if summaryChannelID == "" {
 		log.Printf("nao foi possivel resolver canal de texto para resumo no servidor %s", guildID)
@@ -675,7 +693,7 @@ func canSendSummaryToChannel(s *discordgo.Session, channel *discordgo.Channel) b
 	permissions, err := s.UserChannelPermissions(s.State.User.ID, channel.ID)
 	if err != nil {
 		log.Printf("erro ao verificar permissao de envio no canal de resumo %s: %v", channel.ID, err)
-		return true
+		return false
 	}
 	return permissions&discordgo.PermissionSendMessages != 0
 }
@@ -746,18 +764,36 @@ func finishSessionAndPostSummary(s *discordgo.Session, state *voiceConnectionSta
 	if summary == nil {
 		return
 	}
-	summaryText := stringValue(summary.Summary)
-	if strings.TrimSpace(summaryText) == "" {
-		return
-	}
 	if strings.TrimSpace(state.summaryChannelID) == "" {
 		log.Printf("resumo pronto para sessao id=%d mas nao ha canal de texto resolvido", state.sessionID)
+		return
+	}
+
+	summaryText := strings.TrimSpace(stringValue(summary.Summary))
+	if summary.Status == "agent_failed" {
+		errText := strings.TrimSpace(stringValue(summary.AgentError))
+		if errText == "" {
+			errText = "erro desconhecido no agente de resumo"
+		}
+		if _, err := s.ChannelMessageSend(state.summaryChannelID, "Resumo da sessao falhou: "+errText); err != nil {
+			log.Printf("erro ao publicar falha da sessao id=%d no canal %s: %v", state.sessionID, state.summaryChannelID, err)
+		}
+		return
+	}
+	if summaryText == "" {
 		return
 	}
 
 	if _, err := s.ChannelMessageSend(state.summaryChannelID, summaryText); err != nil {
 		log.Printf("erro ao publicar resumo da sessao id=%d no canal %s: %v", state.sessionID, state.summaryChannelID, err)
 	}
+}
+
+func recordingsDirFromEnv() string {
+	if dir := strings.TrimSpace(os.Getenv("RECORDINGS_DIR")); dir != "" {
+		return dir
+	}
+	return "recordings"
 }
 
 func nowUTC() time.Time {

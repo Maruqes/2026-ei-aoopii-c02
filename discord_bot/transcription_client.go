@@ -18,6 +18,7 @@ const (
 	defaultTranscriptionAPIURL     = "http://localhost:8000"
 	defaultTranscriptionAPITimeout = 10 * time.Minute
 	defaultSummaryPollTimeout      = 15 * time.Minute
+	defaultSummaryMaxWait          = 30 * time.Minute
 	defaultSummaryPollInterval     = 5 * time.Second
 )
 
@@ -296,8 +297,10 @@ func (c *TranscriptionClient) FinishSessionAndWait(ctx context.Context, sessionI
 	}
 
 	timeout := summaryPollTimeoutFromEnv(os.Getenv("SESSION_SUMMARY_TIMEOUT"))
+	maxWait := summaryMaxWaitFromEnv(os.Getenv("SESSION_SUMMARY_MAX_WAIT"), timeout)
 	interval := summaryPollIntervalFromEnv(os.Getenv("SESSION_SUMMARY_POLL_INTERVAL"))
-	deadline := time.Now().Add(timeout)
+	softDeadline := time.Now().Add(timeout)
+	hardDeadline := time.Now().Add(maxWait)
 	timeoutLogged := false
 	for {
 		summary, err := c.GetSessionSummary(ctx, sessionID)
@@ -307,9 +310,13 @@ func (c *TranscriptionClient) FinishSessionAndWait(ctx context.Context, sessionI
 		if summary.Status == "agent_done" || summary.Status == "agent_failed" {
 			return summary, nil
 		}
-		if !timeoutLogged && timeout > 0 && time.Now().After(deadline) {
+		now := time.Now()
+		if !timeoutLogged && timeout > 0 && now.After(softDeadline) {
 			log.Printf("resumo da sessao %d ainda nao esta pronto apos %s; estado=%s; a continuar a aguardar", sessionID, timeout, summary.Status)
 			timeoutLogged = true
+		}
+		if maxWait > 0 && now.After(hardDeadline) {
+			return summary, fmt.Errorf("resumo da sessao %d nao ficou pronto apos %s; ultimo estado=%s", sessionID, maxWait, summary.Status)
 		}
 		select {
 		case <-ctx.Done():
@@ -431,6 +438,22 @@ func summaryPollTimeoutFromEnv(raw string) time.Duration {
 		return defaultSummaryPollTimeout
 	}
 	return timeout
+}
+
+func summaryMaxWaitFromEnv(raw string, softTimeout time.Duration) time.Duration {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		if softTimeout > 0 {
+			return softTimeout * 2
+		}
+		return defaultSummaryMaxWait
+	}
+	maxWait, err := time.ParseDuration(value)
+	if err != nil || maxWait <= 0 {
+		log.Printf("SESSION_SUMMARY_MAX_WAIT invalido (%q), a usar %s", value, defaultSummaryMaxWait)
+		return defaultSummaryMaxWait
+	}
+	return maxWait
 }
 
 func summaryPollIntervalFromEnv(raw string) time.Duration {

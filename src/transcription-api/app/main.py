@@ -55,6 +55,9 @@ SUPPORTED_EXTENSIONS = {
 
 logger = logging.getLogger("uvicorn.error")
 
+_session_agent_lock = threading.Lock()
+_session_agent_pending: set[int] = set()
+
 
 def create_app() -> FastAPI:
     service = FastAPI(title="Discord Anthropologist Transcription API")
@@ -366,6 +369,7 @@ def get_transcriber(settings: Settings = Depends(get_settings)) -> WhisperTransc
         condition_on_previous_text=settings.whisper_condition_on_previous_text,
         hallucination_silence_threshold=settings.whisper_hallucination_silence_threshold,
         max_no_speech_prob=settings.whisper_max_no_speech_prob,
+        timeout_seconds=settings.whisper_timeout_seconds,
     )
 
 
@@ -589,8 +593,9 @@ def process_recording_file(
             int((time.perf_counter() - started) * 1000),
         )
         repository.mark_recording_completed(recording_id)
-    except Exception:
-        repository.mark_recording_failed(recording_id, "transcription failed")
+    except Exception as exc:
+        error_msg = str(exc).strip() or "transcription failed"
+        repository.mark_recording_failed(recording_id, error_msg[:500])
         logger.exception(
             "job transcricao erro file=%s discord_id=%s elapsed_ms=%d",
             recording_path,
@@ -626,17 +631,24 @@ def maybe_schedule_session_agent(
     llm: LLMClient,
     docs: LocalMarkdownProfileClient,
 ) -> None:
-    thread = threading.Thread(
-        target=process_session_agent,
-        kwargs={
-            "session_id": session_id,
-            "repository": repository,
-            "llm": llm,
-            "docs": docs,
-        },
-        daemon=True,
-    )
-    thread.start()
+    with _session_agent_lock:
+        if session_id in _session_agent_pending:
+            return
+        _session_agent_pending.add(session_id)
+
+    def runner() -> None:
+        try:
+            process_session_agent(
+                session_id=session_id,
+                repository=repository,
+                llm=llm,
+                docs=docs,
+            )
+        finally:
+            with _session_agent_lock:
+                _session_agent_pending.discard(session_id)
+
+    threading.Thread(target=runner, daemon=True).start()
 
 
 def process_session_agent(
