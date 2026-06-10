@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
@@ -109,12 +110,36 @@ def affected_windows(timestamps: Iterable[datetime]) -> list[tuple[datetime, dat
 def format_chunk_rows(rows: Iterable[dict]) -> str:
     lines: list[str] = []
     for row in rows:
-        tstamp = normalize_timestamp(row["tstamp"])
-        username = row["username"]
-        content = " ".join(str(row["content"]).split())
-        if content:
-            lines.append(f"[{tstamp:%H:%M}] {username}: {content}")
+        line = format_context_message_row(row, time_only=True)
+        if line:
+            lines.append(line)
     return "\n".join(lines)
+
+
+def format_context_message_row(row: dict, *, time_only: bool = False) -> str:
+    tstamp = normalize_timestamp(row["tstamp"])
+    username = row.get("display_name") or row.get("username") or row.get("discord_id") or "unknown"
+    content = " ".join(str(row.get("content", "")).split())
+    if not content:
+        return ""
+    if time_only:
+        return f"[{tstamp:%H:%M}] {username}: {content}"
+    channel_name = str(row.get("channel_name") or "").strip()
+    source_type = str(row.get("source_type") or "").strip()
+    prefix = f"[{tstamp:%Y-%m-%d %H:%M}]"
+    if channel_name:
+        prefix += f" ({channel_name})"
+    if source_type:
+        prefix += f" [{source_type}]"
+    return f"{prefix} {username}: {content}"
+
+
+def display_name_from_row(username: str, display_name: str | None, discord_id: str) -> str:
+    for value in (display_name, username, discord_id):
+        cleaned = str(value or "").strip()
+        if cleaned:
+            return cleaned
+    return "unknown"
 
 
 class DataRepository:
@@ -127,6 +152,87 @@ class DataRepository:
             cur = conn.cursor()
             cur.execute("SELECT 1")
             return cur.fetchone()[0] == 1
+        finally:
+            conn.close()
+
+    def get_health_details(self) -> dict:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT status, COUNT(*)::int
+                FROM voice_recordings
+                GROUP BY status
+                """
+            )
+            counts = {row[0]: int(row[1]) for row in cur.fetchall()}
+            cur.execute(
+                """
+                SELECT status, recording_filename, updated_at
+                FROM voice_recordings
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """
+            )
+            last_row = cur.fetchone()
+            return {
+                "recordings_transcribing": counts.get("transcribing", 0) + counts.get("pending", 0),
+                "recordings_failed": counts.get("failed", 0),
+                "recordings_completed": counts.get("completed", 0),
+                "last_recording_status": last_row[0] if last_row else None,
+                "last_recording_filename": last_row[1] if last_row else None,
+                "last_recording_at": last_row[2] if last_row else None,
+            }
+        finally:
+            conn.close()
+
+    def delete_user_by_discord_id(self, discord_id: str) -> dict | None:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM users WHERE discord_id = %s", (discord_id.strip(),))
+            row = cur.fetchone()
+            if not row:
+                return None
+
+            user_id = int(row[0])
+            cur.execute("SELECT google_doc_id FROM user_profiles WHERE user_id = %s", (user_id,))
+            profile_row = cur.fetchone()
+            google_doc_id = profile_row[0] if profile_row else None
+
+            cur.execute(
+                """
+                SELECT DISTINCT channel_name
+                FROM messages
+                WHERE user_id = %s
+                  AND source_type = 'voice'
+                  AND channel_name IS NOT NULL
+                """,
+                (user_id,),
+            )
+            channel_names = [channel_row[0] for channel_row in cur.fetchall()]
+
+            cur.execute("SELECT COUNT(*)::int FROM messages WHERE user_id = %s", (user_id,))
+            messages_deleted = int(cur.fetchone()[0])
+
+            cur.execute("DELETE FROM messages WHERE user_id = %s", (user_id,))
+            cur.execute("DELETE FROM user_profiles WHERE user_id = %s", (user_id,))
+            cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
+            cur.execute("DELETE FROM voice_recordings WHERE discord_id = %s", (discord_id.strip(),))
+
+            for channel_name in channel_names:
+                self._rebuild_all_voice_chunks_for_channel(conn, channel_name)
+
+            conn.commit()
+            return {
+                "user_id": user_id,
+                "messages_deleted": messages_deleted,
+                "google_doc_id": google_doc_id,
+            }
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -265,6 +371,48 @@ class DataRepository:
             ids.append(int(cur.fetchone()[0]))
         return ids
 
+    def _rebuild_all_voice_chunks_for_channel(self, conn, channel_name: str) -> None:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT start_at, end_at
+            FROM text_chunks
+            WHERE channel_name = %s
+            ORDER BY start_at ASC
+            """,
+            (channel_name,),
+        )
+        windows = cur.fetchall()
+        for start_at, end_at in windows:
+            cur.execute(
+                """
+                SELECT m.tstamp, u.username, m.content
+                FROM messages m
+                JOIN users u ON u.id = m.user_id
+                WHERE m.channel_name = %s
+                  AND m.source_type = 'voice'
+                  AND m.tstamp >= %s
+                  AND m.tstamp < %s
+                ORDER BY m.tstamp ASC, m.id ASC
+                """,
+                (channel_name, start_at, end_at),
+            )
+            rows = [
+                {"tstamp": row[0], "username": row[1], "content": row[2]}
+                for row in cur.fetchall()
+            ]
+            content = format_chunk_rows(rows)
+            cur.execute(
+                """
+                UPDATE text_chunks
+                SET content = %s
+                WHERE channel_name = %s
+                  AND start_at = %s
+                  AND end_at = %s
+                """,
+                (content, channel_name, start_at, end_at),
+            )
+
     def _rebuild_chunks(
         self,
         conn,
@@ -391,6 +539,214 @@ class DataRepository:
             )
             row = cur.fetchone()
             return voice_session_from_row(row) if row else None
+        finally:
+            conn.close()
+
+    def list_voice_sessions(
+        self,
+        guild_id: str,
+        *,
+        limit: int = 10,
+        voice_channel_id: str | None = None,
+    ) -> list[VoiceSession]:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            params: list = [guild_id.strip()]
+            channel_filter = ""
+            if voice_channel_id and voice_channel_id.strip():
+                channel_filter = "AND voice_channel_id = %s"
+                params.append(voice_channel_id.strip())
+            params.append(max(1, min(limit, 50)))
+            cur.execute(
+                f"""
+                SELECT id, guild_id, voice_channel_id, channel_name, summary_channel_id,
+                       started_at, ended_at, status, summary, agent_error
+                FROM voice_sessions
+                WHERE guild_id = %s
+                {channel_filter}
+                ORDER BY started_at DESC
+                LIMIT %s
+                """,
+                tuple(params),
+            )
+            return [voice_session_from_row(row) for row in cur.fetchall()]
+        finally:
+            conn.close()
+
+    def get_latest_voice_session(
+        self,
+        guild_id: str,
+        *,
+        voice_channel_id: str | None = None,
+    ) -> VoiceSession | None:
+        sessions = self.list_voice_sessions(
+            guild_id,
+            limit=1,
+            voice_channel_id=voice_channel_id,
+        )
+        return sessions[0] if sessions else None
+
+    def get_random_guess_message(self, guild_id: str) -> dict | None:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT m.id, m.content, m.session_id, vs.channel_name,
+                       u.discord_id, u.username, u.display_name
+                FROM messages m
+                JOIN users u ON u.id = m.user_id
+                JOIN voice_sessions vs ON vs.id = m.session_id
+                WHERE vs.guild_id = %s
+                  AND m.source_type = 'voice'
+                  AND m.session_id IS NOT NULL
+                  AND length(trim(m.content)) >= 20
+                  AND (
+                      SELECT COUNT(*)::int
+                      FROM regexp_split_to_table(trim(m.content), '\\s+') AS word
+                      WHERE word <> ''
+                  ) >= 4
+                ORDER BY RANDOM()
+                LIMIT 1
+                """,
+                (guild_id.strip(),),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+
+            message_id = int(row[0])
+            content = str(row[1]).strip()
+            session_id = int(row[2])
+            channel_name = row[3]
+            correct_discord_id = row[4]
+            correct_name = display_name_from_row(row[5], row[6], row[4])
+
+            cur.execute(
+                """
+                SELECT DISTINCT u.discord_id, u.username, u.display_name
+                FROM messages m
+                JOIN users u ON u.id = m.user_id
+                WHERE m.session_id = %s
+                ORDER BY u.username ASC
+                """,
+                (session_id,),
+            )
+            participants = [
+                {
+                    "discord_id": participant_row[0],
+                    "display_name": display_name_from_row(
+                        participant_row[1],
+                        participant_row[2],
+                        participant_row[0],
+                    ),
+                }
+                for participant_row in cur.fetchall()
+            ]
+
+            option_names = [participant["display_name"] for participant in participants]
+            if correct_name not in option_names:
+                option_names.append(correct_name)
+            option_names = list(dict.fromkeys(option_names))
+            random.shuffle(option_names)
+
+            return {
+                "message_id": message_id,
+                "quote": content,
+                "session_id": session_id,
+                "channel_name": channel_name,
+                "correct_discord_id": correct_discord_id,
+                "correct_display_name": correct_name,
+                "options": option_names,
+            }
+        finally:
+            conn.close()
+
+    def get_guild_oracle_context(self, guild_id: str) -> str:
+        conn = connect(self.database_url)
+        try:
+            sections: list[str] = []
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT channel_name, started_at, ended_at, summary, status
+                FROM voice_sessions
+                WHERE guild_id = %s
+                  AND summary IS NOT NULL
+                  AND trim(summary) <> ''
+                ORDER BY started_at DESC
+                LIMIT 5
+                """,
+                (guild_id.strip(),),
+            )
+            summary_lines: list[str] = []
+            for row in cur.fetchall():
+                started = normalize_timestamp(row[1])
+                channel_name = row[0] or "voice"
+                summary_lines.append(
+                    f"Voice session {started:%Y-%m-%d %H:%M} in {channel_name}:\n{row[3].strip()}"
+                )
+            if summary_lines:
+                sections.append("Recent voice session summaries:\n" + "\n\n".join(summary_lines))
+
+            cur.execute(
+                """
+                SELECT tc.channel_name, tc.start_at, tc.end_at, tc.content
+                FROM text_chunks tc
+                WHERE trim(tc.content) <> ''
+                  AND tc.channel_name IN (
+                      SELECT DISTINCT channel_name
+                      FROM voice_sessions
+                      WHERE guild_id = %s
+                  )
+                ORDER BY tc.end_at DESC
+                LIMIT 6
+                """,
+                (guild_id.strip(),),
+            )
+            chunk_lines: list[str] = []
+            for row in cur.fetchall():
+                start_at = normalize_timestamp(row[1])
+                end_at = normalize_timestamp(row[2])
+                chunk_lines.append(
+                    f"Voice chunk {row[0]} [{start_at:%Y-%m-%d %H:%M} - {end_at:%H:%M}]:\n{row[3].strip()}"
+                )
+            if chunk_lines:
+                sections.append("Voice transcript chunks:\n" + "\n\n".join(chunk_lines))
+
+            cur.execute(
+                """
+                SELECT m.tstamp, u.discord_id, u.username, u.display_name,
+                       m.channel_name, m.content, m.source_type
+                FROM messages m
+                JOIN users u ON u.id = m.user_id
+                LEFT JOIN voice_sessions vs ON vs.id = m.session_id
+                WHERE m.guild_id = %s OR vs.guild_id = %s
+                ORDER BY m.tstamp DESC
+                LIMIT 250
+                """,
+                (guild_id.strip(), guild_id.strip()),
+            )
+            message_rows = [
+                {
+                    "tstamp": row[0],
+                    "discord_id": row[1],
+                    "username": row[2],
+                    "display_name": row[3],
+                    "channel_name": row[4],
+                    "content": row[5],
+                    "source_type": row[6],
+                }
+                for row in cur.fetchall()
+            ]
+            message_rows.reverse()
+            message_lines = [format_context_message_row(row) for row in message_rows]
+            message_lines = [line for line in message_lines if line]
+            if message_lines:
+                sections.append("Recent messages (text and voice):\n" + "\n".join(message_lines))
+
+            return "\n\n".join(sections).strip()
         finally:
             conn.close()
 

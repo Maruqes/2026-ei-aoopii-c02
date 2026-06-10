@@ -131,3 +131,52 @@ class UserProfileResponse(BaseModel):
     persona_notes: str
     recent_updates: str
     last_updated_at: datetime | None
+
+
+class HealthResponse(BaseModel):
+    status: str
+    database: str
+    recordings_transcribing: int
+    recordings_failed: int
+    recordings_completed: int
+    last_recording_status: str | None
+    last_recording_filename: str | None
+    last_recording_at: datetime | None
+
+
+class ForgetUserResponse(BaseModel):
+    status: str
+    discord_id: str
+    messages_deleted: int
+    lore_file_deleted: bool
+
+
+class GuildOracleRequest(BaseModel):
+    question: str
+
+
+class GuildOracleResponse(BaseModel):
+    guild_id: str
+    question: str
+    answer: str
+
+
+class GuessResponse(BaseModel):
+    quote: str
+    options: list[str]
+    correct_discord_id: str
+    correct_display_name: str
+    session_id: int | None
+    channel_name: str | None
+
+
+class SessionRecapResponse(BaseModel):
+    session_id: int
+    guild_id: str
+    channel_name: str
+    started_at: datetime
+    ended_at: datetime | None
+    status: str
+    recap_source: str
+    recap: str
+    agent_error: str | None

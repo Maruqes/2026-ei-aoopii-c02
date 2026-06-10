@@ -14,7 +14,13 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from data.repository import DataRepository, MessageInsert, UserProfile, VoiceSession  # noqa: E402
+from data.repository import (  # noqa: E402
+    DataRepository,
+    MessageInsert,
+    UserProfile,
+    VoiceSession,
+    format_context_message_row,
+)
 
 from .agent import SessionAgent
 from .config import Settings
@@ -25,11 +31,17 @@ from .profile_updater import run_text_profile_sync, start_text_profile_sync_loop
 from .schemas import (
     CreateSessionRequest,
     FinishSessionRequest,
+    ForgetUserResponse,
+    GuessResponse,
+    GuildOracleRequest,
+    GuildOracleResponse,
+    HealthResponse,
     LLMModelsResponse,
     ProfilePromptRequest,
     ProfilePromptResponse,
     SelectLLMModelRequest,
     SelectLLMModelResponse,
+    SessionRecapResponse,
     SessionSummaryResponse,
     TextMessageRequest,
     TextMessageResponse,
@@ -74,17 +86,27 @@ def create_app() -> FastAPI:
             interval_hours=settings.text_profile_sync_interval_hours,
         )
 
-    @service.get("/health")
-    def health(repository: DataRepository = Depends(get_repository)) -> dict[str, str]:
+    @service.get("/health", response_model=HealthResponse)
+    def health(repository: DataRepository = Depends(get_repository)) -> HealthResponse:
         try:
             repository.healthcheck()
+            details = repository.get_health_details()
         except Exception as exc:
             logger.exception("healthcheck falhou: database indisponivel")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=f"Database unavailable: {exc}",
             ) from exc
-        return {"status": "ok"}
+        return HealthResponse(
+            status="ok",
+            database="ok",
+            recordings_transcribing=details["recordings_transcribing"],
+            recordings_failed=details["recordings_failed"],
+            recordings_completed=details["recordings_completed"],
+            last_recording_status=details["last_recording_status"],
+            last_recording_filename=details["last_recording_filename"],
+            last_recording_at=details["last_recording_at"],
+        )
 
     @service.post("/v1/transcriptions", response_model=TranscriptionAcceptedResponse)
     async def create_transcription(
@@ -300,6 +322,23 @@ def create_app() -> FastAPI:
             agent_error=session.agent_error,
         )
 
+    @service.delete("/v1/users/{discord_id}", response_model=ForgetUserResponse)
+    def forget_user(
+        discord_id: str,
+        repository: DataRepository = Depends(get_repository),
+        docs: LocalMarkdownProfileClient = Depends(get_docs_client),
+    ) -> ForgetUserResponse:
+        result = repository.delete_user_by_discord_id(discord_id)
+        if result is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        lore_deleted = docs.delete_doc(result.get("google_doc_id"))
+        return ForgetUserResponse(
+            status="deleted",
+            discord_id=discord_id.strip(),
+            messages_deleted=result["messages_deleted"],
+            lore_file_deleted=lore_deleted,
+        )
+
     @service.get("/v1/users/{discord_id}/profile", response_model=UserProfileResponse)
     def get_user_profile(
         discord_id: str,
@@ -344,6 +383,57 @@ def create_app() -> FastAPI:
             question=question,
             answer=answer,
         )
+
+    @service.get("/v1/guilds/{guild_id}/recap", response_model=SessionRecapResponse)
+    def get_guild_recap(
+        guild_id: str,
+        session_id: int | None = None,
+        repository: DataRepository = Depends(get_repository),
+    ) -> SessionRecapResponse:
+        session = resolve_recap_session(repository, guild_id, session_id)
+        recap_source, recap = build_session_recap(repository, session)
+        return session_recap_response(session, recap_source, recap)
+
+    @service.get("/v1/guilds/{guild_id}/guess", response_model=GuessResponse)
+    def get_guild_guess(
+        guild_id: str,
+        repository: DataRepository = Depends(get_repository),
+    ) -> GuessResponse:
+        guess = repository.get_random_guess_message(guild_id)
+        if guess is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No suitable voice quotes found for this guild",
+            )
+        return GuessResponse(
+            quote=guess["quote"],
+            options=guess["options"],
+            correct_discord_id=guess["correct_discord_id"],
+            correct_display_name=guess["correct_display_name"],
+            session_id=guess["session_id"],
+            channel_name=guess["channel_name"],
+        )
+
+    @service.post("/v1/guilds/{guild_id}/oracle", response_model=GuildOracleResponse)
+    def ask_guild_oracle(
+        guild_id: str,
+        request: GuildOracleRequest,
+        repository: DataRepository = Depends(get_repository),
+        llm: LLMClient = Depends(get_llm_client),
+    ) -> GuildOracleResponse:
+        question = " ".join(request.question.split())
+        if not question:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Question is required")
+
+        guild_context = repository.get_guild_oracle_context(guild_id)
+        if not guild_context.strip():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No guild context available yet",
+            )
+
+        answer = llm.answer_guild_question(guild_context=guild_context, question=question)
+        return GuildOracleResponse(guild_id=guild_id.strip(), question=question, answer=answer)
 
     return service
 
@@ -702,6 +792,77 @@ def user_profile_response(profile: UserProfile) -> UserProfileResponse:
 
 def display_profile_name(profile: UserProfile) -> str:
     return profile.display_name or profile.username or profile.discord_id
+
+
+def resolve_recap_session(
+    repository: DataRepository,
+    guild_id: str,
+    session_id: int | None,
+) -> VoiceSession:
+    if session_id is not None:
+        session = repository.get_voice_session(session_id)
+        if session is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+        if session.guild_id != guild_id.strip():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+        return session
+
+    session = repository.get_latest_voice_session(guild_id)
+    if session is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No voice sessions found")
+    return session
+
+
+def build_session_recap(repository: DataRepository, session: VoiceSession) -> tuple[str, str]:
+    summary = (session.summary or "").strip()
+    if summary:
+        return "summary", summary
+
+    if session.status == "agent_failed":
+        error = (session.agent_error or "").strip() or "Session agent failed"
+        return "error", error
+
+    if session.status in {"agent_running", "finished", "open"}:
+        messages = repository.get_session_messages(session.id)
+        transcript_lines = [
+            format_context_message_row(
+                {
+                    "tstamp": message["tstamp"],
+                    "display_name": message.get("display_name"),
+                    "username": message.get("username"),
+                    "discord_id": message.get("discord_id"),
+                    "channel_name": message.get("channel_name"),
+                    "content": message.get("content"),
+                    "source_type": "voice",
+                },
+                time_only=True,
+            )
+            for message in messages
+        ]
+        transcript_lines = [line for line in transcript_lines if line]
+        if transcript_lines:
+            transcript = "\n".join(transcript_lines)
+            if len(transcript) > 1800:
+                transcript = transcript[:1797] + "..."
+            return "transcript", transcript
+        if session.status in {"agent_running", "open"}:
+            return "pending", "A sessao ainda esta em curso ou a ser processada."
+
+    return "pending", "Ainda nao ha resumo nem transcricao para esta sessao."
+
+
+def session_recap_response(session: VoiceSession, recap_source: str, recap: str) -> SessionRecapResponse:
+    return SessionRecapResponse(
+        session_id=session.id,
+        guild_id=session.guild_id,
+        channel_name=session.channel_name,
+        started_at=session.started_at,
+        ended_at=session.ended_at,
+        status=session.status,
+        recap_source=recap_source,
+        recap=recap,
+        agent_error=session.agent_error,
+    )
 
 
 app = create_app()

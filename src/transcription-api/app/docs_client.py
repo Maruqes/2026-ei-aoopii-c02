@@ -44,6 +44,15 @@ class LocalMarkdownProfileClient:
         path.write_text(markdown, encoding="utf-8")
         return StoredDoc(doc_id=filename, url=str(path))
 
+    def delete_doc(self, doc_id: str | None) -> bool:
+        if not doc_id:
+            return False
+        path = self._resolve_path(doc_id)
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+
     def _resolve_path(self, doc_id: str) -> Path:
         path = Path(doc_id)
         if path.is_absolute():

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"sort"
@@ -45,14 +46,16 @@ type recordingControlEvent struct {
 }
 
 var (
-	voiceConnections = make(map[string]*voiceConnectionState)
-	voiceMu          sync.Mutex
-	voiceJoinMu      sync.Mutex
-	botEnabled       atomic.Bool
+	voiceConnections       = make(map[string]*voiceConnectionState)
+	voiceMu                sync.Mutex
+	voiceJoinMu            sync.Mutex
+	botEnabled             atomic.Bool
+	botLeaveOverrideMinutes atomic.Int64
 )
 
 func init() {
 	botEnabled.Store(true)
+	botLeaveOverrideMinutes.Store(-1)
 }
 
 func newVoiceConnectionState(
@@ -299,6 +302,84 @@ func botLeaveDurationFromEnv(raw string) time.Duration {
 	return time.Duration(minutes) * time.Minute
 }
 
+func botLeaveDuration() time.Duration {
+	override := botLeaveOverrideMinutes.Load()
+	if override >= 0 {
+		if override == 0 {
+			return 0
+		}
+		return time.Duration(override) * time.Minute
+	}
+	return botLeaveDurationFromEnv(os.Getenv("BOT_LEAVE"))
+}
+
+func botLeaveMinutes() int {
+	override := botLeaveOverrideMinutes.Load()
+	if override >= 0 {
+		return int(override)
+	}
+	raw := strings.TrimSpace(os.Getenv("BOT_LEAVE"))
+	if raw == "" {
+		return 0
+	}
+	minutes, err := strconv.Atoi(raw)
+	if err != nil || minutes < 0 {
+		return 0
+	}
+	return minutes
+}
+
+func setBotLeaveMinutes(minutes int) {
+	if minutes < 0 {
+		minutes = 0
+	}
+	botLeaveOverrideMinutes.Store(int64(minutes))
+	applyBotLeaveTimeoutToActiveConnections()
+}
+
+func applyBotLeaveTimeoutToActiveConnections() {
+	duration := botLeaveDuration()
+
+	voiceMu.Lock()
+	connections := make(map[string]*voiceConnectionState, len(voiceConnections))
+	for guildID, state := range voiceConnections {
+		connections[guildID] = state
+	}
+	voiceMu.Unlock()
+
+	for guildID, state := range connections {
+		state.startLeaveTimer(guildID, duration)
+	}
+}
+
+func voiceConnectionStatus() string {
+	if !isBotEnabled() {
+		return "pausado (/start para reativar)"
+	}
+
+	voiceMu.Lock()
+	defer voiceMu.Unlock()
+
+	if len(voiceConnections) == 0 {
+		return "fora de call"
+	}
+
+	parts := make([]string, 0, len(voiceConnections))
+	for guildID, state := range voiceConnections {
+		if state == nil || state.vc == nil {
+			parts = append(parts, guildID+": desconhecido")
+			continue
+		}
+		channelName := state.currentChannelName()
+		if channelName == "" {
+			channelName = state.vc.ChannelID
+		}
+		parts = append(parts, fmt.Sprintf("%s (%s)", channelName, guildID))
+	}
+	sort.Strings(parts)
+	return "em call: " + strings.Join(parts, ", ")
+}
+
 func (state *voiceConnectionState) startLeaveTimer(guildID string, duration time.Duration) {
 	if state == nil || duration <= 0 {
 		return
@@ -440,7 +521,7 @@ func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 		} else {
 			current.ssrcUsers.Reset()
 			current.setChannelName(resolveVoiceChannelName(s, channelID))
-			current.startLeaveTimer(guildID, botLeaveDurationFromEnv(os.Getenv("BOT_LEAVE")))
+			current.startLeaveTimer(guildID, botLeaveDuration())
 			log.Printf("bot movido para canal %s no servidor %s", channelID, guildID)
 		}
 		return
@@ -489,7 +570,7 @@ func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 	setVoiceConnection(guildID, state)
 	log.Println("bot entrou na call")
 
-	state.startLeaveTimer(guildID, botLeaveDurationFromEnv(os.Getenv("BOT_LEAVE")))
+	state.startLeaveTimer(guildID, botLeaveDuration())
 	go receiveAudio(s, guildID, state)
 }
 

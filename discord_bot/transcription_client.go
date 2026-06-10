@@ -131,6 +131,55 @@ type ProfilePromptResponse struct {
 	Answer              string  `json:"answer"`
 }
 
+type HealthResponse struct {
+	Status                  string     `json:"status"`
+	Database                string     `json:"database"`
+	RecordingsTranscribing  int        `json:"recordings_transcribing"`
+	RecordingsFailed        int        `json:"recordings_failed"`
+	RecordingsCompleted     int        `json:"recordings_completed"`
+	LastRecordingStatus     *string    `json:"last_recording_status"`
+	LastRecordingFilename   *string    `json:"last_recording_filename"`
+	LastRecordingAt         *time.Time `json:"last_recording_at"`
+}
+
+type ForgetUserResponse struct {
+	Status           string `json:"status"`
+	DiscordID        string `json:"discord_id"`
+	MessagesDeleted  int    `json:"messages_deleted"`
+	LoreFileDeleted  bool   `json:"lore_file_deleted"`
+}
+
+type GuildOracleRequest struct {
+	Question string `json:"question"`
+}
+
+type GuildOracleResponse struct {
+	GuildID  string `json:"guild_id"`
+	Question string `json:"question"`
+	Answer   string `json:"answer"`
+}
+
+type GuessResponse struct {
+	Quote                string   `json:"quote"`
+	Options              []string `json:"options"`
+	CorrectDiscordID     string   `json:"correct_discord_id"`
+	CorrectDisplayName   string   `json:"correct_display_name"`
+	SessionID            *int64   `json:"session_id"`
+	ChannelName          *string  `json:"channel_name"`
+}
+
+type SessionRecapResponse struct {
+	SessionID   int64      `json:"session_id"`
+	GuildID     string     `json:"guild_id"`
+	ChannelName string     `json:"channel_name"`
+	StartedAt   time.Time  `json:"started_at"`
+	EndedAt     *time.Time `json:"ended_at"`
+	Status      string     `json:"status"`
+	RecapSource string     `json:"recap_source"`
+	Recap       string     `json:"recap"`
+	AgentError  *string    `json:"agent_error"`
+}
+
 func NewTranscriptionClientFromEnv() *TranscriptionClient {
 	baseURL := transcriptionBaseURLFromEnv(os.Getenv("TRANSCRIPTION_API_URL"))
 	client := &TranscriptionClient{
@@ -326,6 +375,53 @@ func (c *TranscriptionClient) FinishSessionAndWait(ctx context.Context, sessionI
 	}
 }
 
+func (c *TranscriptionClient) GetHealth(ctx context.Context) (*HealthResponse, error) {
+	var response HealthResponse
+	if err := c.getJSON(ctx, "/health", &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *TranscriptionClient) GetGuildRecap(ctx context.Context, guildID string, sessionID int64) (*SessionRecapResponse, error) {
+	path := "/v1/guilds/" + url.PathEscape(guildID) + "/recap"
+	if sessionID > 0 {
+		path += "?session_id=" + url.QueryEscape(fmt.Sprintf("%d", sessionID))
+	}
+	var response SessionRecapResponse
+	if err := c.getJSON(ctx, path, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *TranscriptionClient) GetGuildGuess(ctx context.Context, guildID string) (*GuessResponse, error) {
+	var response GuessResponse
+	path := "/v1/guilds/" + url.PathEscape(guildID) + "/guess"
+	if err := c.getJSON(ctx, path, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *TranscriptionClient) AskGuildOracle(ctx context.Context, guildID string, question string) (*GuildOracleResponse, error) {
+	var response GuildOracleResponse
+	request := GuildOracleRequest{Question: strings.TrimSpace(question)}
+	path := "/v1/guilds/" + url.PathEscape(guildID) + "/oracle"
+	if err := c.postJSON(ctx, path, request, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *TranscriptionClient) ForgetUser(ctx context.Context, discordID string) (*ForgetUserResponse, error) {
+	var response ForgetUserResponse
+	if err := c.deleteJSON(ctx, "/v1/users/"+url.PathEscape(discordID), &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
 func (c *TranscriptionClient) GetUserProfile(ctx context.Context, discordID string) (*UserProfileResponse, error) {
 	var profile UserProfileResponse
 	if err := c.getJSON(ctx, "/v1/users/"+url.PathEscape(discordID)+"/profile", &profile); err != nil {
@@ -403,6 +499,14 @@ func (c *TranscriptionClient) postJSON(ctx context.Context, path string, body an
 
 func (c *TranscriptionClient) getJSON(ctx context.Context, path string, target any) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return err
+	}
+	return c.doJSON(request, target)
+}
+
+func (c *TranscriptionClient) deleteJSON(ctx context.Context, path string, target any) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+path, nil)
 	if err != nil {
 		return err
 	}

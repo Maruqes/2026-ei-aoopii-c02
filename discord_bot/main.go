@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/joho/godotenv"
@@ -79,6 +80,65 @@ func registerCommands(dg *discordgo.Session, appID string) error {
 			Name:        "models",
 			Description: "Lista e permite alterar o modelo LLM ativo.",
 		},
+		{
+			Name:        "health",
+			Description: "Verifica API, Postgres e estado das transcricoes.",
+		},
+		{
+			Name:        "forget",
+			Description: "Apaga mensagens, perfil e lore de um utilizador.",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionUser,
+					Name:        "user",
+					Description: "Utilizador a apagar da base de dados.",
+					Required:    true,
+				},
+			},
+		},
+		{
+			Name:        "timeout",
+			Description: "Configura minutos antes de sair da call (BOT_LEAVE). 0 desativa.",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionInteger,
+					Name:        "minutes",
+					Description: "Minutos na call antes de sair e processar. 0 = sem limite.",
+					Required:    true,
+					MinValue:    float64Pointer(0),
+					MaxValue:    24 * 60,
+				},
+			},
+		},
+		{
+			Name:        "recap",
+			Description: "Mostra o resumo da ultima sessao de voz do servidor.",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionInteger,
+					Name:        "session",
+					Description: "ID da sessao. Se vazio, usa a mais recente.",
+					Required:    false,
+					MinValue:    float64Pointer(1),
+				},
+			},
+		},
+		{
+			Name:        "oracle",
+			Description: "Pergunta ao antropologo sobre a historia do grupo.",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "question",
+					Description: "Pergunta sobre decisoes, topicos ou lore do servidor.",
+					Required:    true,
+				},
+			},
+		},
+		{
+			Name:        "guess",
+			Description: "Mini-jogo: adivinha quem disse uma frase da call.",
+		},
 	})
 	if err != nil {
 		return err
@@ -103,6 +163,18 @@ func handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		syncHook(s, i)
 	case "models":
 		modelsHook(s, i)
+	case "health":
+		healthHook(s, i)
+	case "forget":
+		forgetHook(s, i)
+	case "timeout":
+		timeoutHook(s, i)
+	case "recap":
+		recapHook(s, i)
+	case "oracle":
+		oracleHook(s, i)
+	case "guess":
+		guessHook(s, i)
 	}
 }
 
@@ -395,6 +467,282 @@ func intPointer(value int) *int {
 	return &value
 }
 
+func float64Pointer(value float64) *float64 {
+	return &value
+}
+
+func healthHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	client := botAPIClient
+	if client == nil {
+		client = NewTranscriptionClientFromEnv()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	health, err := client.GetHealth(ctx)
+	if err != nil {
+		respondText(s, i, fmt.Sprintf("API indisponivel: %v", err))
+		return
+	}
+
+	lines := []string{
+		fmt.Sprintf("**API:** %s", health.Status),
+		fmt.Sprintf("**Postgres:** %s", health.Database),
+		fmt.Sprintf("**Bot:** %s", voiceConnectionStatus()),
+		fmt.Sprintf("**BOT_LEAVE:** %s", formatBotLeaveMinutes(botLeaveMinutes())),
+		fmt.Sprintf(
+			"**Transcricoes:** %d em curso, %d falhadas, %d concluidas",
+			health.RecordingsTranscribing,
+			health.RecordingsFailed,
+			health.RecordingsCompleted,
+		),
+	}
+
+	if health.LastRecordingStatus != nil && strings.TrimSpace(*health.LastRecordingStatus) != "" {
+		lastLine := fmt.Sprintf("**Ultima transcricao:** %s", *health.LastRecordingStatus)
+		if health.LastRecordingFilename != nil && strings.TrimSpace(*health.LastRecordingFilename) != "" {
+			lastLine += " (" + *health.LastRecordingFilename + ")"
+		}
+		if health.LastRecordingAt != nil {
+			lastLine += " @ " + health.LastRecordingAt.UTC().Format(time.RFC3339)
+		}
+		lines = append(lines, lastLine)
+	}
+
+	respondText(s, i, strings.Join(lines, "\n"))
+}
+
+func formatBotLeaveMinutes(minutes int) string {
+	if minutes == 0 {
+		return "desativado (0)"
+	}
+	return fmt.Sprintf("%d min", minutes)
+}
+
+func forgetHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	targetID, targetName := forgetTarget(s, i)
+	if targetID == "" {
+		respondText(s, i, "Nao consegui identificar o utilizador.")
+		return
+	}
+
+	client := botAPIClient
+	if client == nil {
+		client = NewTranscriptionClientFromEnv()
+	}
+
+	result, err := client.ForgetUser(context.Background(), targetID)
+	if err != nil {
+		if strings.Contains(err.Error(), "404") {
+			respondText(s, i, fmt.Sprintf("Nao ha dados guardados para %s.", targetName))
+			return
+		}
+		respondText(s, i, fmt.Sprintf("Erro ao apagar dados de %s: %v", targetName, err))
+		return
+	}
+
+	loreNote := "lore removida"
+	if !result.LoreFileDeleted {
+		loreNote = "sem ficheiro de lore"
+	}
+	respondText(
+		s,
+		i,
+		fmt.Sprintf(
+			"Dados de **%s** apagados: %d mensagens, perfil e %s.",
+			targetName,
+			result.MessagesDeleted,
+			loreNote,
+		),
+	)
+}
+
+func timeoutHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	minutes := timeoutMinutes(i)
+	if minutes < 0 {
+		respondText(s, i, "Indica minutos validos (0 para desativar).")
+		return
+	}
+
+	setBotLeaveMinutes(minutes)
+	if minutes == 0 {
+		respondText(s, i, "BOT_LEAVE desativado. O bot so sai quando a call fica vazia.")
+		return
+	}
+	respondText(s, i, fmt.Sprintf("BOT_LEAVE configurado para %d min. Timer reiniciado nas calls ativas.", minutes))
+}
+
+func forgetTarget(s *discordgo.Session, i *discordgo.InteractionCreate) (string, string) {
+	data := i.ApplicationCommandData()
+	for _, option := range data.Options {
+		if option.Name == "user" {
+			user := option.UserValue(s)
+			return user.ID, firstNonEmpty(user.GlobalName, user.Username, user.ID)
+		}
+	}
+	return "", ""
+}
+
+func timeoutMinutes(i *discordgo.InteractionCreate) int {
+	data := i.ApplicationCommandData()
+	for _, option := range data.Options {
+		if option.Name == "minutes" {
+			return int(option.IntValue())
+		}
+	}
+	return -1
+}
+
+func recapHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	guildID := i.GuildID
+	if guildID == "" {
+		respondText(s, i, "Este comando so funciona em um servidor.")
+		return
+	}
+
+	client := botAPIClient
+	if client == nil {
+		client = NewTranscriptionClientFromEnv()
+	}
+
+	recap, err := client.GetGuildRecap(context.Background(), guildID, recapSessionID(i))
+	if err != nil {
+		if strings.Contains(err.Error(), "404") {
+			respondText(s, i, "Ainda nao ha sessoes de voz guardadas neste servidor.")
+			return
+		}
+		respondText(s, i, fmt.Sprintf("Nao consegui obter o recap: %v", err))
+		return
+	}
+
+	header := fmt.Sprintf(
+		"**Recap** sessao #%d — %s",
+		recap.SessionID,
+		recap.ChannelName,
+	)
+	if recap.EndedAt != nil {
+		header += fmt.Sprintf(" (%s → %s)", recap.StartedAt.UTC().Format("2006-01-02 15:04"), recap.EndedAt.UTC().Format("15:04"))
+	} else {
+		header += fmt.Sprintf(" (inicio %s)", recap.StartedAt.UTC().Format("2006-01-02 15:04"))
+	}
+	if recap.RecapSource == "error" {
+		respondText(s, i, header+"\nResumo falhou: "+truncateDiscordMessage(recap.Recap))
+		return
+	}
+	if recap.RecapSource == "pending" {
+		respondText(s, i, header+"\n"+recap.Recap)
+		return
+	}
+
+	sourceNote := ""
+	switch recap.RecapSource {
+	case "transcript":
+		sourceNote = "_transcricao bruta_"
+	case "summary":
+		sourceNote = "_resumo LLM_"
+	}
+	message := fmt.Sprintf("%s %s\n\n%s", header, sourceNote, recap.Recap)
+	respondText(s, i, truncateDiscordMessage(message))
+}
+
+func oracleHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	guildID := i.GuildID
+	if guildID == "" {
+		respondText(s, i, "Este comando so funciona em um servidor.")
+		return
+	}
+
+	question := oracleQuestion(i)
+	if strings.TrimSpace(question) == "" {
+		respondText(s, i, "Escreve uma pergunta para o oraculo.")
+		return
+	}
+
+	respondText(s, i, "A consultar a memoria do grupo...")
+
+	client := botAPIClient
+	if client == nil {
+		client = NewTranscriptionClientFromEnv()
+	}
+	channelID := i.ChannelID
+
+	go func() {
+		response, err := client.AskGuildOracle(context.Background(), guildID, question)
+		if err != nil {
+			if strings.Contains(err.Error(), "404") {
+				_, _ = s.ChannelMessageSend(channelID, "Ainda nao ha contexto guardado neste servidor para responder.")
+				return
+			}
+			_, _ = s.ChannelMessageSend(channelID, fmt.Sprintf("O oraculo nao respondeu: %v", err))
+			return
+		}
+		message := fmt.Sprintf("**Oraculo**\n> %s\n\n%s", truncateDiscordMessage(response.Question), response.Answer)
+		_, _ = s.ChannelMessageSend(channelID, truncateDiscordMessage(message))
+	}()
+}
+
+func guessHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	guildID := i.GuildID
+	if guildID == "" {
+		respondText(s, i, "Este comando so funciona em um servidor.")
+		return
+	}
+
+	client := botAPIClient
+	if client == nil {
+		client = NewTranscriptionClientFromEnv()
+	}
+
+	guess, err := client.GetGuildGuess(context.Background(), guildID)
+	if err != nil {
+		if strings.Contains(err.Error(), "404") {
+			respondText(s, i, "Ainda nao ha frases de voz suficientes para o jogo neste servidor.")
+			return
+		}
+		respondText(s, i, fmt.Sprintf("Nao consegui preparar o jogo: %v", err))
+		return
+	}
+
+	lines := []string{
+		"**Quem disse isto?**",
+		"> " + truncateDiscordMessageAt(guess.Quote, 900),
+	}
+	if len(guess.Options) > 0 {
+		optionLines := make([]string, 0, len(guess.Options))
+		for index, option := range guess.Options {
+			optionLines = append(optionLines, fmt.Sprintf("%d. %s", index+1, option))
+		}
+		lines = append(lines, "", strings.Join(optionLines, "\n"))
+	}
+	lines = append(lines, "", fmt.Sprintf("||Resposta: %s||", guess.CorrectDisplayName))
+	if guess.ChannelName != nil && strings.TrimSpace(*guess.ChannelName) != "" {
+		lines = append(lines, fmt.Sprintf("_Canal: %s_", strings.TrimSpace(*guess.ChannelName)))
+	}
+
+	respondText(s, i, truncateDiscordMessage(strings.Join(lines, "\n")))
+}
+
+func recapSessionID(i *discordgo.InteractionCreate) int64 {
+	data := i.ApplicationCommandData()
+	for _, option := range data.Options {
+		if option.Name == "session" {
+			return option.IntValue()
+		}
+	}
+	return 0
+}
+
+func oracleQuestion(i *discordgo.InteractionCreate) string {
+	data := i.ApplicationCommandData()
+	for _, option := range data.Options {
+		if option.Name == "question" {
+			return strings.TrimSpace(option.StringValue())
+		}
+	}
+	return ""
+}
+
 func profileTarget(s *discordgo.Session, i *discordgo.InteractionCreate) (string, string) {
 	data := i.ApplicationCommandData()
 	for _, option := range data.Options {
@@ -542,7 +890,7 @@ func main() {
 	}
 	defer dg.Close()
 
-	fmt.Println("Bot online. Comandos: /ping /start /stop /profile /sync")
+	fmt.Println("Bot online. Comandos: /ping /start /stop /profile /prompt /sync /models /health /forget /timeout /recap /oracle /guess")
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop

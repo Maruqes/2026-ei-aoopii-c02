@@ -67,6 +67,14 @@ class LLMClient(Protocol):
     ) -> str:
         ...
 
+    def answer_guild_question(
+        self,
+        *,
+        guild_context: str,
+        question: str,
+    ) -> str:
+        ...
+
 
 class OpenAICompatibleClient:
     def __init__(
@@ -150,6 +158,18 @@ class OpenAICompatibleClient:
         content = self._chat(
             system=profile_prompt_system(),
             user=profile_prompt_user(username=username, profile_doc_text=profile_doc_text, question=question),
+        )
+        return clean_answer(content)
+
+    def answer_guild_question(
+        self,
+        *,
+        guild_context: str,
+        question: str,
+    ) -> str:
+        content = self._chat(
+            system=guild_oracle_system(),
+            user=guild_oracle_user(guild_context=guild_context, question=question),
         )
         return clean_answer(content)
 
@@ -275,6 +295,18 @@ class OllamaClient:
         )
         return clean_answer(content)
 
+    def answer_guild_question(
+        self,
+        *,
+        guild_context: str,
+        question: str,
+    ) -> str:
+        content = self._chat(
+            system=guild_oracle_system(),
+            user=guild_oracle_user(guild_context=guild_context, question=question),
+        )
+        return clean_answer(content)
+
     def list_models(self) -> list[str]:
         req = request.Request(f"{self.base_url}/api/tags", method="GET")
         try:
@@ -365,6 +397,23 @@ def profile_prompt_user(*, username: str, profile_doc_text: str, question: str) 
     return (
         f"User being asked about: {username}\n\n"
         f"User lore/profile Markdown:\n{profile_doc_text}\n\n"
+        f"Question:\n{question}"
+    )
+
+
+def guild_oracle_system() -> str:
+    return (
+        "You answer questions as a Discord anthropologist about a community's shared history. "
+        "Use only the provided guild context: voice session summaries, voice transcript chunks, "
+        "and recent text and voice messages. Be specific and concise. If the context does not "
+        "contain enough evidence, say that the field notes do not establish it. Do not invent "
+        "facts, identifiers, private traits, or sensitive claims."
+    )
+
+
+def guild_oracle_user(*, guild_context: str, question: str) -> str:
+    return (
+        f"Guild context:\n{guild_context}\n\n"
         f"Question:\n{question}"
     )
 
