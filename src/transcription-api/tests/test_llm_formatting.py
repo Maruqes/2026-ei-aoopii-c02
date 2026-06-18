@@ -22,6 +22,7 @@ clean_answer = llm.clean_answer
 guild_oracle_system = llm.guild_oracle_system
 normalize_summary = llm.normalize_summary
 profile_prompt_system = llm.profile_prompt_system
+session_summary_system = llm.session_summary_system
 
 
 def test_clean_answer_preserves_discord_bullets_and_full_text() -> None:
@@ -46,6 +47,7 @@ def test_prompt_system_uses_standard_discord_sections() -> None:
 
     assert "**Resposta curta**" in prompt
     assert "**Pontos da lore**" in prompt
+    assert "**Roast contextual**" in prompt
     assert "Markdown tables" in prompt
 
 
@@ -54,4 +56,13 @@ def test_oracle_system_requires_server_and_relationship_view() -> None:
 
     assert "**Visao geral**" in prompt
     assert "**Pessoas e relacoes**" in prompt
+    assert "**Roast cruzado**" in prompt
     assert "Read the whole guild context" in prompt
+
+
+def test_summary_system_requires_full_topic_timeline_and_roast() -> None:
+    prompt = session_summary_system()
+
+    assert "**Linha do tempo**" in prompt
+    assert "**Cruzamentos e roast**" in prompt
+    assert "every substantive topic" in prompt

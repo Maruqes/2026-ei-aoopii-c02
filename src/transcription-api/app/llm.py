@@ -35,7 +35,7 @@ class LLMClient(Protocol):
     def test_model(self) -> str:
         ...
 
-    def summarize_session(self, transcript: str) -> str:
+    def summarize_session(self, transcript: str, *, session_context: str = "") -> str:
         ...
 
     def update_profile(
@@ -93,10 +93,10 @@ class OpenAICompatibleClient:
         self.provider_name = provider_name
         self._client = None
 
-    def summarize_session(self, transcript: str) -> str:
+    def summarize_session(self, transcript: str, *, session_context: str = "") -> str:
         content = self._chat(
             system=session_summary_system(),
-            user=f"Transcript:\n{transcript}",
+            user=session_summary_user(session_context=session_context, transcript=transcript),
         )
         return normalize_summary(content)
 
@@ -221,10 +221,10 @@ class OllamaClient:
         self.base_url = base_url.rstrip("/")
         self.model = model
 
-    def summarize_session(self, transcript: str) -> str:
+    def summarize_session(self, transcript: str, *, session_context: str = "") -> str:
         content = self._chat(
             system=session_summary_system(),
-            user=f"Transcript:\n{transcript}",
+            user=session_summary_user(session_context=session_context, transcript=transcript),
         )
         return normalize_summary(content)
 
@@ -365,21 +365,44 @@ def discord_answer_style() -> str:
     )
 
 
+def roast_style() -> str:
+    return (
+        "Use a sharp ironic roast style: direct, sarcastic, socially aware, and funny. "
+        "You may mock contradictions, terrible takes, failed plans, gaming performance, football opinions, repeated habits, "
+        "and obvious self-owns from the provided context. Connect separate topics to build jokes when the evidence supports it. "
+        "Keep the roast playful and contextual, not hateful: no slurs, no dehumanization, no protected-class attacks, "
+        "no private medical/mental-health claims, no doxxing, and no claims that the context does not support. "
+    )
+
+
 def session_summary_system() -> str:
     return (
         "You summarize Discord voice-call conversations for the people who were there. "
         f"{discord_answer_style()}"
-        "Use this format:\n"
-        "**Resumo**\n"
-        "- Main point.\n"
-        "- Main point.\n\n"
-        "**Momentos / decisoes**\n"
-        "- Decision, disagreement, joke, or notable moment.\n\n"
-        "**A fazer**\n"
-        "- Follow-up action, or '- Sem acoes claras.' if none are established.\n"
-        "Scale the detail to the conversation: 4 to 7 bullets for short calls, up to 12 for long calls. "
-        "Do not invent facts, do not include timestamps, and do not mention that this came from a transcript."
+        f"{roast_style()}"
+        "The goal is a complete narrative recap, not a short generic summary. Cover every substantive topic touched in the call. "
+        "For long calls, do not collapse ten topics into three highlights: give one bullet or paragraph per meaningful topic, "
+        "in roughly chronological order, and include who said what when it matters. "
+        "Start with one sentence like 'Nesta call de <date/time/channel if provided>, a conversa passou por X, Y e Z...'. "
+        "Then use this format:\n"
+        "**Mapa da call**\n"
+        "- One sentence listing the main topic arc from start to finish.\n\n"
+        "**Linha do tempo**\n"
+        "- Topic 1: what happened, who was involved, and the best specific detail.\n"
+        "- Topic 2: what changed, who pushed it, and the best specific detail.\n"
+        "- Continue until all substantive topics are covered.\n\n"
+        "**Cruzamentos e roast**\n"
+        "- Connect separate topics into pointed jokes or ironic observations grounded in the call.\n"
+        "- Name the users involved when the transcript supports it.\n\n"
+        "**Decisoes / proximos passos**\n"
+        "- Follow-up action, decision, or '- Sem acoes claras.' if none are established.\n"
+        "Do not invent facts and do not mention that this came from a transcript."
     )
+
+
+def session_summary_user(*, session_context: str, transcript: str) -> str:
+    context = session_context.strip() or "<not provided>"
+    return f"Session context:\n{context}\n\nTranscript:\n{transcript}"
 
 
 def anthropologist_profile_system(source: str) -> str:
@@ -403,12 +426,15 @@ def profile_prompt_system() -> str:
     return (
         "You answer questions as a Discord anthropologist using only the provided user lore/profile "
         f"Markdown. {discord_answer_style()}"
+        f"{roast_style()}"
         "Use this exact structure unless the answer is impossible:\n"
         "**Resposta curta**\n"
-        "- Direct answer to the user's question.\n\n"
+        "- Direct answer to the user's question, with bite when the lore supports it.\n\n"
         "**Pontos da lore**\n"
         "- Evidence from the user's lore/profile.\n"
         "- Another relevant point if available.\n\n"
+        "**Roast contextual**\n"
+        "- A sharp but evidence-grounded joke connecting the user's patterns, contradictions, or repeated habits.\n\n"
         "**Limites**\n"
         "- What the field notes do not establish, or '- Sem limites relevantes nos dados fornecidos.'\n"
         "Be specific and concise. If the lore does not contain enough evidence, say that the field notes "
@@ -429,6 +455,7 @@ def guild_oracle_system() -> str:
         "You answer questions as a Discord anthropologist about a community's shared history. "
         "Use only the provided guild context: voice session summaries, voice transcript chunks, "
         f"and recent text and voice messages. {discord_answer_style()}"
+        f"{roast_style()}"
         "Read the whole guild context before answering, not just the newest messages. "
         "Balance a server-wide view with individual observations. When evidence supports it, mention members "
         "by display name or username, describe their recurring roles, and relate users to each other through "
@@ -442,6 +469,8 @@ def guild_oracle_system() -> str:
         "- Name + Name: relationship, contrast, alliance, recurring topic, or interaction pattern.\n\n"
         "**Resposta ao pedido**\n"
         "- Direct answer to the user's question, with the strongest evidence.\n\n"
+        "**Roast cruzado**\n"
+        "- A pointed ironic observation connecting multiple users, topics, or contradictions from the server context.\n\n"
         "**Limites**\n"
         "- What the field notes do not establish, or '- Sem limites relevantes nos dados fornecidos.'\n"
         "If the context does not contain enough evidence, say that the field notes do not establish it. "

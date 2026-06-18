@@ -840,10 +840,7 @@ def build_session_recap(repository: DataRepository, session: VoiceSession) -> tu
         ]
         transcript_lines = [line for line in transcript_lines if line]
         if transcript_lines:
-            transcript = "\n".join(transcript_lines)
-            if len(transcript) > 1800:
-                transcript = transcript[:1797] + "..."
-            return "transcript", transcript
+            return "transcript", "\n".join(transcript_lines)
         if session.status in {"agent_running", "open"}:
             return "pending", "A sessao ainda esta em curso ou a ser processada."
 

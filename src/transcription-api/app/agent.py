@@ -33,7 +33,7 @@ class SessionAgent:
             self.repository.mark_session_agent_done(session_id, summary)
             return summary
 
-        summary = self.llm.summarize_session(transcript)
+        summary = self.llm.summarize_session(transcript, session_context=format_session_context(session))
         participants = self.repository.get_session_participants(session_id)
         for participant in participants:
             try:
@@ -92,6 +92,20 @@ def format_transcript(messages: list[dict]) -> str:
         if content:
             lines.append(f"[{tstamp:%H:%M}] {username}: {content}")
     return "\n".join(lines)
+
+
+def format_session_context(session) -> str:
+    if session is None:
+        return "Voice session"
+    started = normalize_timestamp_value(session.started_at)
+    parts = [
+        f"Channel: {session.channel_name}",
+        f"Started at: {started:%Y-%m-%d %H:%M UTC}",
+    ]
+    if session.ended_at is not None:
+        ended = normalize_timestamp_value(session.ended_at)
+        parts.append(f"Ended at: {ended:%Y-%m-%d %H:%M UTC}")
+    return "\n".join(parts)
 
 
 def normalize_timestamp_value(value) -> datetime:
