@@ -46,10 +46,10 @@ type recordingControlEvent struct {
 }
 
 var (
-	voiceConnections       = make(map[string]*voiceConnectionState)
-	voiceMu                sync.Mutex
-	voiceJoinMu            sync.Mutex
-	botEnabled             atomic.Bool
+	voiceConnections        = make(map[string]*voiceConnectionState)
+	voiceMu                 sync.Mutex
+	voiceJoinMu             sync.Mutex
+	botEnabled              atomic.Bool
 	botLeaveOverrideMinutes atomic.Int64
 )
 
@@ -865,7 +865,7 @@ func finishSessionAndPostSummary(s *discordgo.Session, state *voiceConnectionSta
 		return
 	}
 
-	if _, err := s.ChannelMessageSend(state.summaryChannelID, summaryText); err != nil {
+	if err := sendLongChannelMessage(s, state.summaryChannelID, summaryText); err != nil {
 		log.Printf("erro ao publicar resumo da sessao id=%d no canal %s: %v", state.sessionID, state.summaryChannelID, err)
 	}
 }

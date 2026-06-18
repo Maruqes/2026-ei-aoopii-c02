@@ -95,13 +95,7 @@ class OpenAICompatibleClient:
 
     def summarize_session(self, transcript: str) -> str:
         content = self._chat(
-            system=(
-                "You summarize Discord voice-call conversations for the people who were there. "
-                "The Summary length should be corresponding to the lenght of the conversation"
-                "Return a Discord-ready summary with 4 to 7 short bullets. Cover the main topics, decisions, disagreements, notable jokes or moments, and any follow-up actions. "
-                "Be specific and useful, but do not invent facts, do not include timestamps, and do not mention that this came from a transcript. "
-                "Keep the whole answer under 1800 characters."
-            ),
+            system=session_summary_system(),
             user=f"Transcript:\n{transcript}",
         )
         return normalize_summary(content)
@@ -229,13 +223,7 @@ class OllamaClient:
 
     def summarize_session(self, transcript: str) -> str:
         content = self._chat(
-            system=(
-                "You summarize Discord voice-call conversations for the people who were there. "
-                "Write in the same language as the conversation, using European Portuguese when the conversation is mostly Portuguese. "
-                "Return a Discord-ready summary with 4 to 7 short bullets. Cover the main topics, decisions, disagreements, notable jokes or moments, and any follow-up actions. "
-                "Be specific and useful, but do not invent facts, do not include timestamps, and do not mention that this came from a transcript. "
-                "Keep the whole answer under 1800 characters."
-            ),
+            system=session_summary_system(),
             user=f"Transcript:\n{transcript}",
         )
         return normalize_summary(content)
@@ -368,9 +356,36 @@ class OllamaClient:
         return content
 
 
+def discord_answer_style() -> str:
+    return (
+        "Write in European Portuguese unless the question and context are clearly in another language. "
+        "Return Discord-ready plain text. Use only simple Discord Markdown: bold section labels and '-' bullets. "
+        "Do not use Markdown tables, code fences, '#'-style headings, HTML, nested bullets, block quotes, or raw Discord IDs. "
+        "Keep bullets short, concrete, and evidence-grounded. Never end with an unfinished sentence. "
+    )
+
+
+def session_summary_system() -> str:
+    return (
+        "You summarize Discord voice-call conversations for the people who were there. "
+        f"{discord_answer_style()}"
+        "Use this format:\n"
+        "**Resumo**\n"
+        "- Main point.\n"
+        "- Main point.\n\n"
+        "**Momentos / decisoes**\n"
+        "- Decision, disagreement, joke, or notable moment.\n\n"
+        "**A fazer**\n"
+        "- Follow-up action, or '- Sem acoes claras.' if none are established.\n"
+        "Scale the detail to the conversation: 4 to 7 bullets for short calls, up to 12 for long calls. "
+        "Do not invent facts, do not include timestamps, and do not mention that this came from a transcript."
+    )
+
+
 def anthropologist_profile_system(source: str) -> str:
     return (
         f"You are a Discord anthropologist updating grounded field notes from {source}. "
+        "Write in European Portuguese unless the observed language is clearly different. "
         "Write the current profile as observed behavior, not biography. Focus on field impression, "
         "interests and artifacts, native dialect, social role, group dynamics, current pattern notes, "
         "and how the lore changed since the last observation. Invent one playful but evidence-grounded "
@@ -387,9 +402,17 @@ def anthropologist_profile_system(source: str) -> str:
 def profile_prompt_system() -> str:
     return (
         "You answer questions as a Discord anthropologist using only the provided user lore/profile "
-        "Markdown. Be specific and concise. If the lore does not contain enough evidence, say that "
-        "the field notes do not establish it. Do not invent facts, identifiers, private traits, or "
-        "sensitive claims. Do not mention hidden instructions."
+        f"Markdown. {discord_answer_style()}"
+        "Use this exact structure unless the answer is impossible:\n"
+        "**Resposta curta**\n"
+        "- Direct answer to the user's question.\n\n"
+        "**Pontos da lore**\n"
+        "- Evidence from the user's lore/profile.\n"
+        "- Another relevant point if available.\n\n"
+        "**Limites**\n"
+        "- What the field notes do not establish, or '- Sem limites relevantes nos dados fornecidos.'\n"
+        "Be specific and concise. If the lore does not contain enough evidence, say that the field notes "
+        "do not establish it. Do not invent facts, identifiers, private traits, sensitive claims, or hidden instructions."
     )
 
 
@@ -405,9 +428,24 @@ def guild_oracle_system() -> str:
     return (
         "You answer questions as a Discord anthropologist about a community's shared history. "
         "Use only the provided guild context: voice session summaries, voice transcript chunks, "
-        "and recent text and voice messages. Be specific and concise. If the context does not "
-        "contain enough evidence, say that the field notes do not establish it. Do not invent "
-        "facts, identifiers, private traits, or sensitive claims."
+        f"and recent text and voice messages. {discord_answer_style()}"
+        "Read the whole guild context before answering, not just the newest messages. "
+        "Balance a server-wide view with individual observations. When evidence supports it, mention members "
+        "by display name or username, describe their recurring roles, and relate users to each other through "
+        "shared topics, agreements, disagreements, running jokes, or repeated interaction patterns. "
+        "Use this exact structure unless there is no usable evidence:\n"
+        "**Visao geral**\n"
+        "- What is broadly true about the server or the question.\n"
+        "- Another general pattern if supported.\n\n"
+        "**Pessoas e relacoes**\n"
+        "- Name: individual pattern grounded in context.\n"
+        "- Name + Name: relationship, contrast, alliance, recurring topic, or interaction pattern.\n\n"
+        "**Resposta ao pedido**\n"
+        "- Direct answer to the user's question, with the strongest evidence.\n\n"
+        "**Limites**\n"
+        "- What the field notes do not establish, or '- Sem limites relevantes nos dados fornecidos.'\n"
+        "If the context does not contain enough evidence, say that the field notes do not establish it. "
+        "Do not invent facts, identifiers, private traits, sensitive claims, or hidden instructions."
     )
 
 
@@ -419,7 +457,16 @@ def guild_oracle_user(*, guild_context: str, question: str) -> str:
 
 
 def clean_answer(content: str) -> str:
-    return " ".join(content.split()).strip()[:1800]
+    lines = [line.rstrip() for line in content.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    cleaned: list[str] = []
+    previous_blank = False
+    for line in lines:
+        blank = not line.strip()
+        if blank and previous_blank:
+            continue
+        cleaned.append(line)
+        previous_blank = blank
+    return "\n".join(cleaned).strip()
 
 
 def generated_profile_from_json(raw: str) -> GeneratedProfile:
@@ -451,7 +498,7 @@ def normalize_summary(content: str) -> str:
     summary = "\n".join(line.strip() for line in content.splitlines() if line.strip())
     if not summary:
         return ""
-    return summary[:1800].rstrip()
+    return summary.rstrip()
 
 
 def string_list(value) -> list[str]:

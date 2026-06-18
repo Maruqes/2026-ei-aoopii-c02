@@ -21,6 +21,7 @@ var botAPIClient *TranscriptionClient
 const modelSelectCustomID = "llm-model-select"
 const modelPageCustomIDPrefix = "llm-models-page:"
 const modelPageSize = 25
+const discordMessageChunkLimit = 1900
 
 func registerCommands(dg *discordgo.Session, appID string) error {
 	dg.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -335,8 +336,10 @@ func promptHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		if title != "" {
 			header = fmt.Sprintf("%s - %s", header, title)
 		}
-		message := fmt.Sprintf("%s\n> %s\n\n%s", header, truncateDiscordMessage(response.Question), response.Answer)
-		_, _ = s.ChannelMessageSend(channelID, truncateDiscordMessage(message))
+		message := fmt.Sprintf("%s\n> %s\n\n%s", header, response.Question, response.Answer)
+		if err := sendLongChannelMessage(s, channelID, message); err != nil {
+			log.Printf("erro ao enviar resposta /prompt para canal %s: %v", channelID, err)
+		}
 	}()
 }
 
@@ -477,21 +480,31 @@ func modelSelectHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}
 	result, err := client.SelectLLMModel(context.Background(), model)
 	content := ""
+	extraChunks := []string{}
 	if err != nil {
 		content = fmt.Sprintf("O modelo **%s** falhou o teste e nao foi ativado: %v", model, err)
 	} else {
-		content = fmt.Sprintf(
-			"Modelo ativo: **%s** (`%s`).\nTeste com `Ola!`: %s",
+		message := fmt.Sprintf(
+			"Modelo ativo: **%s** (`%s`).\nTeste com `Ola!`:\n%s",
 			result.Model,
 			result.Provider,
-			truncateDiscordMessageAt(result.TestResponse, 1700),
+			result.TestResponse,
 		)
+		chunks := splitDiscordMessage(message)
+		content = chunks[0]
+		extraChunks = chunks[1:]
 	}
 	emptyComponents := []discordgo.MessageComponent{}
 	_, _ = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
 		Content:    &content,
 		Components: &emptyComponents,
 	})
+	for _, chunk := range extraChunks {
+		if _, err := s.ChannelMessageSend(i.ChannelID, chunk); err != nil {
+			log.Printf("erro ao enviar continuacao de /models para canal %s: %v", i.ChannelID, err)
+			return
+		}
+	}
 }
 
 func modelDescription(model string, current string) string {
@@ -752,7 +765,7 @@ func recapHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		header += fmt.Sprintf(" (inicio %s)", recap.StartedAt.UTC().Format("2006-01-02 15:04"))
 	}
 	if recap.RecapSource == "error" {
-		respondText(s, i, header+"\nResumo falhou: "+truncateDiscordMessage(recap.Recap))
+		respondLongText(s, i, header+"\nResumo falhou: "+recap.Recap)
 		return
 	}
 	if recap.RecapSource == "pending" {
@@ -768,7 +781,7 @@ func recapHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		sourceNote = "_resumo LLM_"
 	}
 	message := fmt.Sprintf("%s %s\n\n%s", header, sourceNote, recap.Recap)
-	respondText(s, i, truncateDiscordMessage(message))
+	respondLongText(s, i, message)
 }
 
 func oracleHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -802,8 +815,10 @@ func oracleHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			_, _ = s.ChannelMessageSend(channelID, fmt.Sprintf("O oraculo nao respondeu: %v", err))
 			return
 		}
-		message := fmt.Sprintf("**Oraculo**\n> %s\n\n%s", truncateDiscordMessage(response.Question), response.Answer)
-		_, _ = s.ChannelMessageSend(channelID, truncateDiscordMessage(message))
+		message := fmt.Sprintf("**Oraculo**\n> %s\n\n%s", response.Question, response.Answer)
+		if err := sendLongChannelMessage(s, channelID, message); err != nil {
+			log.Printf("erro ao enviar resposta /oracle para canal %s: %v", channelID, err)
+		}
 	}()
 }
 
@@ -831,7 +846,7 @@ func guessHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 	lines := []string{
 		"**Quem disse isto?**",
-		"> " + truncateDiscordMessageAt(guess.Quote, 900),
+		"> " + guess.Quote,
 	}
 	if len(guess.Options) > 0 {
 		optionLines := make([]string, 0, len(guess.Options))
@@ -845,7 +860,7 @@ func guessHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		lines = append(lines, fmt.Sprintf("_Canal: %s_", strings.TrimSpace(*guess.ChannelName)))
 	}
 
-	respondText(s, i, truncateDiscordMessage(strings.Join(lines, "\n")))
+	respondLongText(s, i, strings.Join(lines, "\n"))
 }
 
 func recapSessionID(i *discordgo.InteractionCreate) int64 {
@@ -949,6 +964,104 @@ func respondText(s *discordgo.Session, i *discordgo.InteractionCreate, content s
 	})
 }
 
+func respondLongText(s *discordgo.Session, i *discordgo.InteractionCreate, content string) {
+	chunks := splitDiscordMessage(content)
+	if len(chunks) == 0 {
+		respondText(s, i, "")
+		return
+	}
+	respondText(s, i, chunks[0])
+	for _, chunk := range chunks[1:] {
+		if _, err := s.ChannelMessageSend(i.ChannelID, chunk); err != nil {
+			log.Printf("erro ao enviar continuacao para canal %s: %v", i.ChannelID, err)
+			return
+		}
+	}
+}
+
+func sendLongChannelMessage(s *discordgo.Session, channelID string, content string) error {
+	for _, chunk := range splitDiscordMessage(content) {
+		if _, err := s.ChannelMessageSend(channelID, chunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func splitDiscordMessage(value string) []string {
+	return splitDiscordMessageAt(value, discordMessageChunkLimit)
+}
+
+func splitDiscordMessageAt(value string, limit int) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return []string{""}
+	}
+	if limit <= 0 {
+		return []string{value}
+	}
+
+	chunks := []string{}
+	for len(value) > limit {
+		split := bestDiscordSplit(value, limit)
+		chunk := strings.TrimSpace(value[:split])
+		if chunk != "" {
+			chunks = append(chunks, chunk)
+		}
+		value = strings.TrimSpace(value[split:])
+	}
+	if value != "" {
+		chunks = append(chunks, value)
+	}
+	return chunks
+}
+
+func bestDiscordSplit(value string, limit int) int {
+	safeLimit := safeByteLimit(value, limit)
+	if safeLimit <= 0 {
+		return len(value)
+	}
+	window := value[:safeLimit]
+	minUsefulSplit := safeLimit / 2
+	for _, separator := range []string{"\n\n", "\n", ". ", "; ", ", ", " "} {
+		if index := strings.LastIndex(window, separator); index >= minUsefulSplit {
+			if strings.TrimSpace(window[:index]) != "" {
+				return index + separatorLenToKeep(separator)
+			}
+		}
+	}
+	return safeLimit
+}
+
+func separatorLenToKeep(separator string) int {
+	if strings.TrimSpace(separator) == "" || strings.Contains(separator, "\n") {
+		return 0
+	}
+	return len(separator)
+}
+
+func safeByteLimit(value string, limit int) int {
+	if len(value) <= limit {
+		return len(value)
+	}
+	safe := 0
+	for index := range value {
+		if index > limit {
+			break
+		}
+		safe = index
+	}
+	if safe == 0 {
+		for index := range value {
+			if index > 0 {
+				return index
+			}
+		}
+		return len(value)
+	}
+	return safe
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {
@@ -963,20 +1076,6 @@ func truncateDiscordField(value string) string {
 		return value
 	}
 	return value[:997] + "..."
-}
-
-func truncateDiscordMessage(value string) string {
-	return truncateDiscordMessageAt(value, 1900)
-}
-
-func truncateDiscordMessageAt(value string, limit int) string {
-	if limit <= 3 {
-		return value[:min(len(value), limit)]
-	}
-	if len(value) <= limit {
-		return value
-	}
-	return value[:limit-3] + "..."
 }
 
 func main() {
