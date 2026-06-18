@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -18,6 +19,8 @@ var APP_ID string
 var botAPIClient *TranscriptionClient
 
 const modelSelectCustomID = "llm-model-select"
+const modelPageCustomIDPrefix = "llm-models-page:"
+const modelPageSize = 25
 
 func registerCommands(dg *discordgo.Session, appID string) error {
 	dg.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -179,8 +182,13 @@ func handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 }
 
 func handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if i.MessageComponentData().CustomID == modelSelectCustomID {
+	customID := i.MessageComponentData().CustomID
+	if customID == modelSelectCustomID {
 		modelSelectHook(s, i)
+		return
+	}
+	if strings.HasPrefix(customID, modelPageCustomIDPrefix) {
+		modelsPageHook(s, i, customID)
 	}
 }
 
@@ -347,11 +355,49 @@ func modelsHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		return
 	}
 
-	displayedModels := modelMenuItems(models.Models, models.CurrentModel, 25)
-	if len(displayedModels) == 0 {
+	response := modelsResponse(models, 0)
+	if response == nil {
 		respondText(s, i, "Os IDs dos modelos devolvidos excedem o limite suportado pelo menu do Discord.")
 		return
 	}
+	_ = s.InteractionRespond(i.Interaction, response)
+}
+
+func modelsPageHook(s *discordgo.Session, i *discordgo.InteractionCreate, customID string) {
+	page, ok := parseModelPage(customID)
+	if !ok {
+		respondText(s, i, "Pagina de modelos invalida.")
+		return
+	}
+
+	client := botAPIClient
+	if client == nil {
+		client = NewTranscriptionClientFromEnv()
+	}
+	models, err := client.GetLLMModels(context.Background())
+	if err != nil {
+		respondText(s, i, fmt.Sprintf("Nao consegui listar os modelos: %v", err))
+		return
+	}
+	response := modelsResponse(models, page)
+	if response == nil {
+		respondText(s, i, "Os IDs dos modelos devolvidos excedem o limite suportado pelo menu do Discord.")
+		return
+	}
+	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseUpdateMessage,
+		Data: response.Data,
+	})
+}
+
+func modelsResponse(models *LLMModelsResponse, page int) *discordgo.InteractionResponse {
+	eligibleModels := selectableModels(models.Models)
+	if len(eligibleModels) == 0 {
+		return nil
+	}
+	pageCount := modelPageCount(eligibleModels, modelPageSize)
+	page = clampModelPage(page, pageCount)
+	displayedModels := modelMenuPageItems(eligibleModels, page, modelPageSize)
 	options := make([]discordgo.SelectMenuOption, 0, len(displayedModels))
 	for _, model := range displayedModels {
 		options = append(options, discordgo.SelectMenuOption{
@@ -361,30 +407,57 @@ func modelsHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			Description: modelDescription(model, models.CurrentModel),
 		})
 	}
-	content := fmt.Sprintf("Provider: **%s**\nModelo atual: **%s**\nEscolhe um modelo para o testar com `Ola!` e ativar.", models.Provider, models.CurrentModel)
-	if len(models.Models) > len(displayedModels) {
-		content += fmt.Sprintf("\nA mostrar %d de %d modelos.", len(displayedModels), len(models.Models))
+	content := fmt.Sprintf(
+		"Provider: **%s**\nModelo atual: **%s**\nEscolhe um modelo para o testar com `Ola!` e ativar.\nPagina %d/%d. A mostrar %d de %d modelos selecionaveis.",
+		models.Provider,
+		models.CurrentModel,
+		page+1,
+		pageCount,
+		len(displayedModels),
+		len(eligibleModels),
+	)
+	if skipped := len(models.Models) - len(eligibleModels); skipped > 0 {
+		content += fmt.Sprintf("\n%d modelos foram omitidos porque excedem o limite de 100 caracteres do Discord.", skipped)
 	}
-	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: content,
+	components := []discordgo.MessageComponent{
+		discordgo.ActionsRow{
 			Components: []discordgo.MessageComponent{
-				discordgo.ActionsRow{
-					Components: []discordgo.MessageComponent{
-						discordgo.SelectMenu{
-							MenuType:    discordgo.StringSelectMenu,
-							CustomID:    modelSelectCustomID,
-							Placeholder: "Seleciona o modelo LLM",
-							MinValues:   intPointer(1),
-							MaxValues:   1,
-							Options:     options,
-						},
-					},
+				discordgo.SelectMenu{
+					MenuType:    discordgo.StringSelectMenu,
+					CustomID:    modelSelectCustomID,
+					Placeholder: "Seleciona o modelo LLM",
+					MinValues:   intPointer(1),
+					MaxValues:   1,
+					Options:     options,
 				},
 			},
 		},
-	})
+	}
+	if pageCount > 1 {
+		components = append(components, discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.Button{
+					Label:    "Anterior",
+					Style:    discordgo.SecondaryButton,
+					CustomID: modelPageCustomID(page - 1),
+					Disabled: page == 0,
+				},
+				discordgo.Button{
+					Label:    "Seguinte",
+					Style:    discordgo.SecondaryButton,
+					CustomID: modelPageCustomID(page + 1),
+					Disabled: page >= pageCount-1,
+				},
+			},
+		})
+	}
+	return &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content:    content,
+			Components: components,
+		},
+	}
 }
 
 func modelSelectHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -432,12 +505,7 @@ func modelMenuItems(models []string, current string, limit int) []string {
 	if limit <= 0 {
 		return nil
 	}
-	eligible := make([]string, 0, len(models))
-	for _, model := range models {
-		if len(model) <= 100 {
-			eligible = append(eligible, model)
-		}
-	}
+	eligible := selectableModels(models)
 	if len(eligible) <= limit {
 		return eligible
 	}
@@ -454,6 +522,66 @@ func modelMenuItems(models []string, current string, limit int) []string {
 		}
 	}
 	return items
+}
+
+func selectableModels(models []string) []string {
+	eligible := make([]string, 0, len(models))
+	for _, model := range models {
+		if len(model) <= 100 {
+			eligible = append(eligible, model)
+		}
+	}
+	return eligible
+}
+
+func modelMenuPageItems(models []string, page int, pageSize int) []string {
+	if pageSize <= 0 {
+		return nil
+	}
+	pageCount := modelPageCount(models, pageSize)
+	if pageCount == 0 {
+		return nil
+	}
+	page = clampModelPage(page, pageCount)
+	start := page * pageSize
+	end := start + pageSize
+	if end > len(models) {
+		end = len(models)
+	}
+	return append([]string(nil), models[start:end]...)
+}
+
+func modelPageCount(models []string, pageSize int) int {
+	if pageSize <= 0 || len(models) == 0 {
+		return 0
+	}
+	return (len(models) + pageSize - 1) / pageSize
+}
+
+func clampModelPage(page int, pageCount int) int {
+	if page <= 0 || pageCount <= 0 {
+		return 0
+	}
+	if page >= pageCount {
+		return pageCount - 1
+	}
+	return page
+}
+
+func modelPageCustomID(page int) string {
+	return fmt.Sprintf("%s%d", modelPageCustomIDPrefix, page)
+}
+
+func parseModelPage(customID string) (int, bool) {
+	raw := strings.TrimPrefix(customID, modelPageCustomIDPrefix)
+	if raw == customID || raw == "" {
+		return 0, false
+	}
+	page, err := strconv.Atoi(raw)
+	if err != nil || page < 0 {
+		return 0, false
+	}
+	return page, true
 }
 
 func truncateDiscordOption(value string) string {

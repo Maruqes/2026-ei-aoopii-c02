@@ -48,6 +48,7 @@ services:
       GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
+      LLM_MODEL_SELECTION_FILE: /app/.tmp/state/llm_model_selection.json
       PROFILE_DOCS_PROVIDER: ${PROFILE_DOCS_PROVIDER:-local}
       LOCAL_PROFILE_DIR: ${LOCAL_PROFILE_DIR:-/app/profiles}
       TEXT_PROFILE_SYNC_ENABLED: ${TEXT_PROFILE_SYNC_ENABLED:-true}
@@ -59,6 +60,7 @@ services:
       - ./discord_bot/recordings:/app/recordings
       - ./profiles:/app/profiles
       - api_uploads:/app/.tmp/uploads
+      - api_state:/app/.tmp/state
       - whisper_cache:/root/.cache/whisper
     depends_on:
       postgres:
@@ -85,4 +87,5 @@ services:
 volumes:
   postgres_data:
   api_uploads:
+  api_state:
   whisper_cache:

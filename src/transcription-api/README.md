@@ -107,7 +107,9 @@ OPENAI_MODEL=gpt-4o-mini
 
 The Discord `/models` command lists models from the configured provider. Selecting one sends a
 small `Ola!` test prompt and only activates the model if that request succeeds. The selection is
-kept in memory; restarting the API restores the model configured in the environment.
+persisted in `LLM_MODEL_SELECTION_FILE` (default `.tmp/llm_model_selection.json`) and overrides
+the model configured in the environment after restart. If no model has been persisted yet, the
+environment model is used.
 
 For Groq, set `OPENAI_BASE_URL=https://api.groq.com/openai/v1` and choose a Groq model such as
 `llama-3.3-70b-versatile`. The legacy `LLM_PROVIDER=groq` and `GROQ_*` environment variables are

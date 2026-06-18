@@ -36,3 +36,33 @@ func TestModelMenuItemsExcludesValuesTooLongForDiscord(t *testing.T) {
 		t.Fatalf("modelMenuItems() = %v, want %v", got, want)
 	}
 }
+
+func TestModelMenuPageItemsReturnsRequestedPage(t *testing.T) {
+	models := []string{"a", "b", "c", "d", "e"}
+
+	got := modelMenuPageItems(models, 1, 2)
+	want := []string{"c", "d"}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("modelMenuPageItems() = %v, want %v", got, want)
+	}
+}
+
+func TestModelMenuPageItemsClampsToLastPage(t *testing.T) {
+	models := []string{"a", "b", "c", "d", "e"}
+
+	got := modelMenuPageItems(models, 99, 2)
+	want := []string{"e"}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("modelMenuPageItems() = %v, want %v", got, want)
+	}
+}
+
+func TestParseModelPage(t *testing.T) {
+	page, ok := parseModelPage(modelPageCustomID(12))
+
+	if !ok || page != 12 {
+		t.Fatalf("parseModelPage() = %d, %v; want 12, true", page, ok)
+	}
+}

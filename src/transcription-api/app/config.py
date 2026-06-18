@@ -59,6 +59,7 @@ class Settings:
     groq_model: str = "llama-3.3-70b-versatile"
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3.5:2b"
+    llm_model_selection_file: Path = Path(".tmp/llm_model_selection.json")
     profile_docs_provider: str = "local"
     local_profile_dir: Path = Path("profiles")
     text_profile_sync_enabled: bool = True
@@ -100,6 +101,7 @@ class Settings:
             groq_model=env_str("GROQ_MODEL", "llama-3.3-70b-versatile"),
             ollama_base_url=env_str("OLLAMA_BASE_URL", "http://localhost:11434"),
             ollama_model=env_str("OLLAMA_MODEL", "qwen3.5:2b"),
+            llm_model_selection_file=Path(env_str("LLM_MODEL_SELECTION_FILE", ".tmp/llm_model_selection.json")),
             profile_docs_provider=env_str("PROFILE_DOCS_PROVIDER", "local").lower(),
             local_profile_dir=Path(env_str("LOCAL_PROFILE_DIR", "profiles")),
             text_profile_sync_enabled=env_bool("TEXT_PROFILE_SYNC_ENABLED", True),

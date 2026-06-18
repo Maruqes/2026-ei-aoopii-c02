@@ -270,7 +270,7 @@ def create_app() -> FastAPI:
                 detail=f"Model test failed: {exc}",
             ) from exc
 
-        select_model(settings.llm_provider, model)
+        select_model(settings.llm_provider, model, settings.llm_model_selection_file)
         logger.info("modelo LLM alterado provider=%s model=%s", settings.llm_provider, model)
         return SelectLLMModelResponse(
             provider=settings.llm_provider,
