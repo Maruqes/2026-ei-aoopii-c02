@@ -460,6 +460,11 @@ def get_transcriber(settings: Settings = Depends(get_settings)) -> WhisperTransc
         hallucination_silence_threshold=settings.whisper_hallucination_silence_threshold,
         max_no_speech_prob=settings.whisper_max_no_speech_prob,
         num_threads=settings.whisper_num_threads,
+        vad_enabled=settings.whisper_vad_enabled,
+        vad_aggressiveness=settings.whisper_vad_aggressiveness,
+        vad_frame_ms=settings.whisper_vad_frame_ms,
+        vad_padding_ms=settings.whisper_vad_padding_ms,
+        vad_min_speech_ms=settings.whisper_vad_min_speech_ms,
     )
 
 

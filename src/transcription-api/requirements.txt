@@ -3,6 +3,7 @@ uvicorn
 python-multipart
 psycopg2-binary
 openai-whisper
+webrtcvad-wheels
 openai
 pytest
 httpx

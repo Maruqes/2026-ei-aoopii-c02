@@ -247,10 +247,6 @@ func closeAndTranscribeRecording(recording *userAudioRecording, info voiceUserIn
 		user = recording.user.withFallbacks()
 	}
 
-	if err := recording.padToElapsed(time.Now().UTC()); err != nil {
-		log.Printf("erro ao preencher silêncio final do WAV de user=%s: %v", user.DiscordID, err)
-	}
-
 	log.Printf(
 		"a finalizar WAV user=%s username=%s channel=%s file=%s data_bytes=%d started_at=%s",
 		user.DiscordID,

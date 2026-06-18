@@ -52,4 +52,5 @@ api:
 	$(COMPOSE_CMD) up --build api
 
 test:
-	$(COMPOSE_CMD) run --rm api python -m pytest src/transcription-api/tests
+	$(COMPOSE_CMD) build api
+	$(COMPOSE_CMD) run --rm api env PYTHONPATH=/app/src:/app/src/transcription-api python -m pytest --import-mode=importlib src/transcription-api/tests

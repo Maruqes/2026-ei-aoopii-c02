@@ -57,13 +57,20 @@ WHISPER_CARRY_INITIAL_PROMPT=true
 WHISPER_CONDITION_ON_PREVIOUS_TEXT=false
 WHISPER_HALLUCINATION_SILENCE_THRESHOLD=2.0
 WHISPER_MAX_NO_SPEECH_PROB=0.8
+WHISPER_VAD_ENABLED=true
+WHISPER_VAD_AGGRESSIVENESS=3
+WHISPER_VAD_FRAME_MS=30
+WHISPER_VAD_PADDING_MS=300
+WHISPER_VAD_MIN_SPEECH_MS=250
 ```
 
 Set `WHISPER_LANGUAGE=auto` only when recordings are genuinely multilingual or the
 fixed language is wrong. Keeping `WHISPER_CONDITION_ON_PREVIOUS_TEXT=false` reduces
 repeated incorrect phrases in long recordings. The hallucination silence threshold
 helps skip invented speech around silent regions; set it to `0` to disable it.
-Segments that exceed `WHISPER_MAX_NO_SPEECH_PROB` are also discarded.
+Segments that exceed `WHISPER_MAX_NO_SPEECH_PROB` are also discarded. VAD runs
+before Whisper, skips fully silent files, and transcribes only speech regions while
+preserving the original timestamps.
 
 Transcribe an audio file:
 

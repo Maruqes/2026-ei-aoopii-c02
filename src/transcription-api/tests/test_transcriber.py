@@ -1,6 +1,9 @@
 import os
+import sys
 import threading
 import time
+import types
+import wave
 from pathlib import Path
 
 from app.transcriber import WhisperTranscriber, configure_cpu_threads
@@ -67,6 +70,55 @@ def test_segments_that_are_probably_silence_are_discarded() -> None:
     assert [segment.text for segment in result.segments] == ["frase valida"]
 
 
+def test_vad_skips_silent_recordings_without_loading_model(monkeypatch, tmp_path) -> None:
+    wav_path = tmp_path / "silence.wav"
+    write_silence_wav(wav_path, seconds=1.0)
+
+    class SilentVad:
+        def __init__(self, _aggressiveness: int) -> None:
+            pass
+
+        def is_speech(self, _pcm: bytes, _sample_rate: int) -> bool:
+            return False
+
+    monkeypatch.setitem(sys.modules, "webrtcvad", types.SimpleNamespace(Vad=SilentVad))
+    transcriber = WhisperTranscriber("turbo", vad_enabled=True)
+
+    result = transcriber.transcribe(wav_path)
+
+    assert result.text == ""
+    assert result.segments == []
+    assert transcriber._model is None
+
+
+def test_vad_transcribes_only_speech_regions_with_original_offsets(monkeypatch, tmp_path) -> None:
+    wav_path = tmp_path / "speech.wav"
+    write_silence_wav(wav_path, seconds=2.0)
+
+    class WindowVad:
+        def __init__(self, _aggressiveness: int) -> None:
+            self.calls = 0
+
+        def is_speech(self, _pcm: bytes, _sample_rate: int) -> bool:
+            self.calls += 1
+            return 20 <= self.calls < 30
+
+    monkeypatch.setitem(sys.modules, "webrtcvad", types.SimpleNamespace(Vad=WindowVad))
+    model = FakeModel()
+    model.transcribe = lambda *_args, **_options: {
+        "segments": [{"start": 0.1, "end": 0.2, "text": " fala ", "no_speech_prob": 0.1}],
+    }
+    transcriber = WhisperTranscriber("turbo", vad_enabled=True)
+    transcriber._model = model
+
+    result = transcriber.transcribe(wav_path)
+
+    assert result.text == "fala"
+    assert len(result.segments) == 1
+    assert round(result.segments[0].start, 2) == 0.37
+    assert round(result.segments[0].end, 2) == 0.47
+
+
 def test_whisper_transcriptions_run_one_at_a_time() -> None:
     state_lock = threading.Lock()
     first_started = threading.Event()
@@ -117,3 +169,12 @@ def test_whisper_transcriptions_run_one_at_a_time() -> None:
     assert max_active_calls == 1
     assert call_order == ["first.wav", "second.wav"]
     assert results == {"first": "first.wav", "second": "second.wav"}
+
+
+def write_silence_wav(path: Path, *, seconds: float, sample_rate: int = 16000) -> None:
+    frames = int(seconds * sample_rate)
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(b"\x00\x00" * frames)
