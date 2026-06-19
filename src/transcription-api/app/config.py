@@ -34,9 +34,15 @@ def env_float(name: str, default: float) -> float:
     return float(value)
 
 
+def env_csv(name: str) -> tuple[str, ...]:
+    value = os.getenv(name, "")
+    return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
 @dataclass(frozen=True)
 class Settings:
     database_url: str
+    transcription_provider: str = "whisper"
     whisper_model: str = "large-v3"
     whisper_device: str = "auto"
     whisper_language: str = "pt"
@@ -56,6 +62,14 @@ class Settings:
     whisper_vad_frame_ms: int = 30
     whisper_vad_padding_ms: int = 500
     whisper_vad_min_speech_ms: int = 400
+    speechmatics_api_key: str | None = None
+    speechmatics_batch_url: str = "https://eu1.asr.api.speechmatics.com/v2"
+    speechmatics_language: str = "multi"
+    speechmatics_model: str = "melia-1"
+    speechmatics_polling_interval_seconds: float = 2.0
+    speechmatics_timeout_seconds: float = 600.0
+    speechmatics_segment_gap_seconds: float = 1.5
+    speechmatics_additional_vocab: tuple[str, ...] = ()
     upload_tmp_dir: Path = Path(".tmp/uploads")
     recordings_dir: Path = Path("discord_bot/recordings")
     keep_uploads: bool = False
@@ -82,6 +96,7 @@ class Settings:
 
         return cls(
             database_url=database_url,
+            transcription_provider=env_str("TRANSCRIPTION_PROVIDER", "whisper").lower(),
             whisper_model=os.getenv("WHISPER_MODEL", "large-v3"),
             whisper_device=os.getenv("WHISPER_DEVICE", "auto").strip().lower(),
             whisper_language=env_str("WHISPER_LANGUAGE", "pt"),
@@ -104,6 +119,23 @@ class Settings:
             whisper_vad_frame_ms=env_int("WHISPER_VAD_FRAME_MS", 30),
             whisper_vad_padding_ms=env_int("WHISPER_VAD_PADDING_MS", 500),
             whisper_vad_min_speech_ms=env_int("WHISPER_VAD_MIN_SPEECH_MS", 400),
+            speechmatics_api_key=env_str("SPEECHMATICS_API_KEY"),
+            speechmatics_batch_url=env_str(
+                "SPEECHMATICS_BATCH_URL",
+                "https://eu1.asr.api.speechmatics.com/v2",
+            ),
+            speechmatics_language=env_str("SPEECHMATICS_LANGUAGE", "multi"),
+            speechmatics_model=env_str("SPEECHMATICS_MODEL", "melia-1").lower(),
+            speechmatics_polling_interval_seconds=env_float(
+                "SPEECHMATICS_POLLING_INTERVAL_SECONDS",
+                2.0,
+            ),
+            speechmatics_timeout_seconds=env_float("SPEECHMATICS_TIMEOUT_SECONDS", 600.0),
+            speechmatics_segment_gap_seconds=env_float(
+                "SPEECHMATICS_SEGMENT_GAP_SECONDS",
+                1.5,
+            ),
+            speechmatics_additional_vocab=env_csv("SPEECHMATICS_ADDITIONAL_VOCAB"),
             upload_tmp_dir=Path(os.getenv("UPLOAD_TMP_DIR", ".tmp/uploads")),
             recordings_dir=Path(os.getenv("RECORDINGS_DIR", "discord_bot/recordings")),
             keep_uploads=env_bool("KEEP_UPLOADS", False),

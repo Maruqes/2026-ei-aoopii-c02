@@ -50,7 +50,12 @@ from .schemas import (
     UserProfileResponse,
     VoiceSessionResponse,
 )
-from .transcriber import WhisperResult, WhisperTranscriber
+from .transcriber import (
+    SpeechmaticsTranscriber,
+    Transcriber,
+    TranscriptionResult,
+    WhisperTranscriber,
+)
 
 
 SUPPORTED_EXTENSIONS = {
@@ -119,7 +124,7 @@ def create_app() -> FastAPI:
         display_name: str | None = Form(None),
         settings: Settings = Depends(get_settings),
         repository: DataRepository = Depends(get_repository),
-        transcriber: WhisperTranscriber = Depends(get_transcriber),
+        transcriber: Transcriber = Depends(get_transcriber),
         llm: LLMClient = Depends(get_llm_client),
         docs: LocalMarkdownProfileClient = Depends(get_docs_client),
     ) -> TranscriptionAcceptedResponse:
@@ -448,27 +453,43 @@ def get_repository(settings: Settings = Depends(get_settings)) -> DataRepository
 
 
 @lru_cache
-def get_transcriber(settings: Settings = Depends(get_settings)) -> WhisperTranscriber:
-    return WhisperTranscriber(
-        settings.whisper_model,
-        settings.whisper_device,
-        language=settings.whisper_language,
-        beam_size=settings.whisper_beam_size,
-        fp16=settings.whisper_fp16,
-        initial_prompt=settings.whisper_initial_prompt,
-        carry_initial_prompt=settings.whisper_carry_initial_prompt,
-        condition_on_previous_text=settings.whisper_condition_on_previous_text,
-        hallucination_silence_threshold=settings.whisper_hallucination_silence_threshold,
-        max_no_speech_prob=settings.whisper_max_no_speech_prob,
-        no_speech_threshold=settings.whisper_no_speech_threshold,
-        logprob_threshold=settings.whisper_logprob_threshold,
-        compression_ratio_threshold=settings.whisper_compression_ratio_threshold,
-        num_threads=settings.whisper_num_threads,
-        vad_enabled=settings.whisper_vad_enabled,
-        vad_aggressiveness=settings.whisper_vad_aggressiveness,
-        vad_frame_ms=settings.whisper_vad_frame_ms,
-        vad_padding_ms=settings.whisper_vad_padding_ms,
-        vad_min_speech_ms=settings.whisper_vad_min_speech_ms,
+def get_transcriber(settings: Settings = Depends(get_settings)) -> Transcriber:
+    if settings.transcription_provider == "whisper":
+        return WhisperTranscriber(
+            settings.whisper_model,
+            settings.whisper_device,
+            language=settings.whisper_language,
+            beam_size=settings.whisper_beam_size,
+            fp16=settings.whisper_fp16,
+            initial_prompt=settings.whisper_initial_prompt,
+            carry_initial_prompt=settings.whisper_carry_initial_prompt,
+            condition_on_previous_text=settings.whisper_condition_on_previous_text,
+            hallucination_silence_threshold=settings.whisper_hallucination_silence_threshold,
+            max_no_speech_prob=settings.whisper_max_no_speech_prob,
+            no_speech_threshold=settings.whisper_no_speech_threshold,
+            logprob_threshold=settings.whisper_logprob_threshold,
+            compression_ratio_threshold=settings.whisper_compression_ratio_threshold,
+            num_threads=settings.whisper_num_threads,
+            vad_enabled=settings.whisper_vad_enabled,
+            vad_aggressiveness=settings.whisper_vad_aggressiveness,
+            vad_frame_ms=settings.whisper_vad_frame_ms,
+            vad_padding_ms=settings.whisper_vad_padding_ms,
+            vad_min_speech_ms=settings.whisper_vad_min_speech_ms,
+        )
+    if settings.transcription_provider == "speechmatics":
+        return SpeechmaticsTranscriber(
+            settings.speechmatics_api_key or "",
+            batch_url=settings.speechmatics_batch_url,
+            language=settings.speechmatics_language,
+            model=settings.speechmatics_model,
+            polling_interval_seconds=settings.speechmatics_polling_interval_seconds,
+            timeout_seconds=settings.speechmatics_timeout_seconds,
+            segment_gap_seconds=settings.speechmatics_segment_gap_seconds,
+            additional_vocab=settings.speechmatics_additional_vocab,
+        )
+    raise RuntimeError(
+        f"Unsupported TRANSCRIPTION_PROVIDER: {settings.transcription_provider}. "
+        "Use 'whisper' or 'speechmatics'."
     )
 
 
@@ -598,7 +619,7 @@ def schedule_transcription_job(
     recording_started_at: datetime,
     settings: Settings,
     repository: DataRepository,
-    transcriber: WhisperTranscriber,
+    transcriber: Transcriber,
     llm: LLMClient,
     docs: LocalMarkdownProfileClient,
 ) -> None:
@@ -643,29 +664,31 @@ def process_recording_file(
     recording_started_at: datetime,
     settings: Settings,
     repository: DataRepository,
-    transcriber: WhisperTranscriber,
+    transcriber: Transcriber,
     llm: LLMClient | None = None,
     docs: LocalMarkdownProfileClient | None = None,
 ) -> None:
     started = time.perf_counter()
     try:
         logger.info(
-            "job transcricao inicio file=%s bytes=%d model=%s discord_id=%s",
+            "job transcricao inicio file=%s bytes=%d provider=%s model=%s discord_id=%s",
             recording_path,
             recording_path.stat().st_size,
-            settings.whisper_model,
+            transcriber.provider_name,
+            transcriber.model_name,
             discord_id,
         )
-        whisper_result = transcriber.transcribe(recording_path)
+        transcription_result = transcriber.transcribe(recording_path)
         logger.info(
-            "job whisper concluido file=%s discord_id=%s segmentos=%d texto_chars=%d",
+            "job transcricao concluido file=%s provider=%s discord_id=%s segmentos=%d texto_chars=%d",
             recording_path,
+            transcriber.provider_name,
             discord_id,
-            len(whisper_result.segments),
-            len(whisper_result.text),
+            len(transcription_result.segments),
+            len(transcription_result.text),
         )
 
-        messages = messages_from_segments(recording_started_at, whisper_result)
+        messages = messages_from_segments(recording_started_at, transcription_result)
         logger.info(
             "job escrita DB inicio file=%s discord_id=%s username=%s channel=%s mensagens=%d",
             recording_path,
@@ -706,7 +729,7 @@ def process_recording_file(
             maybe_schedule_session_agent(session_id, repository, llm, docs)
 
 
-def messages_from_segments(recording_started_at: datetime, result: WhisperResult) -> list[MessageInsert]:
+def messages_from_segments(recording_started_at: datetime, result: TranscriptionResult) -> list[MessageInsert]:
     started_at = normalize_datetime(recording_started_at)
     return [
         MessageInsert(

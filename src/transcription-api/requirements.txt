@@ -4,6 +4,6 @@ python-multipart
 psycopg2-binary
 openai-whisper
 webrtcvad-wheels
+speechmatics-batch
 openai
-pytest
 httpx

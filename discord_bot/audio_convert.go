@@ -19,11 +19,13 @@ sudo dnf install opus opus-devel opusfile opusfile-devel pkgconf-pkg-config
 */
 
 const (
-	sampleRate     = 48000
-	channels       = 2
-	bitsPerSample  = 16
-	maxFrameMs     = 120
-	minRTPGapPadMs = 150
+	sampleRate              = 48000
+	channels                = 2
+	bitsPerSample           = 16
+	maxFrameMs              = 120
+	defaultOpusFrameMs      = 20
+	maxConcealedOpusPackets = 6
+	defaultOpusFrameSamples = sampleRate * defaultOpusFrameMs / 1000
 )
 
 type WAVWriter struct {
@@ -42,13 +44,22 @@ type userAudioRecording struct {
 	channel          string
 	sessionID        int64
 	ssrc             uint32
+	nextRTPSequence  uint16
 	nextRTPTimestamp uint32
+	hasRTPSequence   bool
 	hasRTPTimestamp  bool
 }
 
 type discordOpusDecoder struct {
-	decoder *opus.Decoder
-	pcm     []int16
+	decoder          *opus.Decoder
+	pcm              []int16
+	lastPacketFrames int
+}
+
+type rtpPacketPlan struct {
+	stale              bool
+	missingPackets     int
+	timestampGapFrames int
 }
 
 func newDiscordOpusDecoder() (*discordOpusDecoder, error) {
@@ -59,8 +70,9 @@ func newDiscordOpusDecoder() (*discordOpusDecoder, error) {
 
 	maxSamplesPerChannel := maxFrameMs * sampleRate / 1000
 	return &discordOpusDecoder{
-		decoder: decoder,
-		pcm:     make([]int16, maxSamplesPerChannel*channels),
+		decoder:          decoder,
+		pcm:              make([]int16, maxSamplesPerChannel*channels),
+		lastPacketFrames: defaultOpusFrameSamples,
 	}, nil
 }
 
@@ -73,7 +85,47 @@ func (d *discordOpusDecoder) Decode(opusPacket []byte) ([]int16, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
+	d.lastPacketFrames = frames
 	return d.pcm[:frames*channels], frames, nil
+}
+
+func (d *discordOpusDecoder) DecodeFEC(opusPacket []byte, frames int) ([]int16, error) {
+	if d == nil || d.decoder == nil {
+		return nil, fmt.Errorf("decoder Opus do Discord nao configurado")
+	}
+	if frames <= 0 {
+		return nil, nil
+	}
+
+	pcm := make([]int16, frames*channels)
+	if err := d.decoder.DecodeFEC(opusPacket, pcm); err != nil {
+		return nil, err
+	}
+	d.lastPacketFrames = frames
+	return pcm, nil
+}
+
+func (d *discordOpusDecoder) DecodePLC(frames int) ([]int16, error) {
+	if d == nil || d.decoder == nil {
+		return nil, fmt.Errorf("decoder Opus do Discord nao configurado")
+	}
+	if frames <= 0 {
+		return nil, nil
+	}
+
+	pcm := make([]int16, frames*channels)
+	if err := d.decoder.DecodePLC(pcm); err != nil {
+		return nil, err
+	}
+	d.lastPacketFrames = frames
+	return pcm, nil
+}
+
+func (d *discordOpusDecoder) packetFrames() int {
+	if d == nil || d.lastPacketFrames <= 0 {
+		return defaultOpusFrameSamples
+	}
+	return d.lastPacketFrames
 }
 
 func NewWAVWriter(path string, sampleRate uint32, channels uint16, bitDepth uint16) (*WAVWriter, error) {
@@ -391,9 +443,52 @@ func ListenAndWriteOpusToWAV(
 
 			packetAt := time.Now().UTC()
 			recording := userRecordings[discordID]
+			plan := rtpPacketPlan{}
 			if recording != nil {
-				if _, ok := recording.rtpGapFrames(packet.SSRC, packet.Timestamp); !ok {
+				plan = recording.planRTPPacket(packet.SSRC, packet.Sequence, packet.Timestamp)
+				if plan.stale {
+					log.Printf(
+						"pacote RTP atrasado/duplicado ignorado user=%s ssrc=%d sequence=%d expected=%d",
+						discordID,
+						packet.SSRC,
+						packet.Sequence,
+						recording.nextRTPSequence,
+					)
 					continue
+				}
+			}
+
+			recoveredPCM := []int16(nil)
+			silenceFrames := plan.timestampGapFrames
+			if recording != nil && plan.missingPackets > 0 && plan.timestampGapFrames > 0 {
+				recoveredPCM, silenceFrames, err = recoverMissingOpusAudio(
+					dec,
+					packet.Opus,
+					plan.missingPackets,
+					plan.timestampGapFrames,
+				)
+				if err != nil {
+					log.Printf(
+						"erro a recuperar perda RTP user=%s ssrc=%d sequence=%d missing=%d gap_frames=%d: %v",
+						discordID,
+						packet.SSRC,
+						packet.Sequence,
+						plan.missingPackets,
+						plan.timestampGapFrames,
+						err,
+					)
+					recoveredPCM = nil
+					silenceFrames = plan.timestampGapFrames
+				} else if len(recoveredPCM) > 0 {
+					log.Printf(
+						"perda RTP recuperada user=%s ssrc=%d sequence=%d missing=%d recovered_frames=%d silence_frames=%d",
+						discordID,
+						packet.SSRC,
+						packet.Sequence,
+						plan.missingPackets,
+						len(recoveredPCM)/channels,
+						silenceFrames,
+					)
 				}
 			}
 
@@ -421,30 +516,99 @@ func ListenAndWriteOpusToWAV(
 				log.Printf("a gravar user=%s para %s", discordID, outPath)
 			}
 
-			if err := recording.writeTimedPCM(packet.SSRC, packet.Timestamp, pcm, frames); err != nil {
+			if err := recording.writeRTPPacket(
+				packet.SSRC,
+				packet.Sequence,
+				packet.Timestamp,
+				silenceFrames,
+				recoveredPCM,
+				pcm,
+				frames,
+			); err != nil {
 				return err
 			}
 		}
 	}
 }
 
-func (recording *userAudioRecording) rtpGapFrames(ssrc uint32, timestamp uint32) (int, bool) {
-	if recording == nil || !recording.hasRTPTimestamp || recording.ssrc != ssrc {
-		return 0, true
+func (recording *userAudioRecording) planRTPPacket(
+	ssrc uint32,
+	sequence uint16,
+	timestamp uint32,
+) rtpPacketPlan {
+	if recording == nil ||
+		recording.ssrc != ssrc ||
+		!recording.hasRTPSequence ||
+		!recording.hasRTPTimestamp {
+		return rtpPacketPlan{}
 	}
 
-	gap := int32(timestamp - recording.nextRTPTimestamp)
-	if gap < 0 {
-		recording.hasRTPTimestamp = false
-		return 0, true
+	sequenceDelta := int16(sequence - recording.nextRTPSequence)
+	if sequenceDelta < 0 {
+		return rtpPacketPlan{stale: true}
 	}
-	if gap < int32(sampleRate*minRTPGapPadMs/1000) {
-		return 0, true
+
+	timestampDelta := int32(timestamp - recording.nextRTPTimestamp)
+	if timestampDelta < 0 {
+		return rtpPacketPlan{stale: true}
 	}
-	return int(gap), true
+
+	return rtpPacketPlan{
+		missingPackets:     int(sequenceDelta),
+		timestampGapFrames: int(timestampDelta),
+	}
 }
 
-func (recording *userAudioRecording) writeTimedPCM(ssrc uint32, timestamp uint32, pcm []int16, frames int) error {
+func recoverMissingOpusAudio(
+	decoder *discordOpusDecoder,
+	nextOpusPacket []byte,
+	missingPackets int,
+	timestampGapFrames int,
+) ([]int16, int, error) {
+	if decoder == nil || missingPackets <= 0 || timestampGapFrames <= 0 {
+		return nil, max(0, timestampGapFrames), nil
+	}
+
+	packetFrames := decoder.packetFrames()
+	if packetFrames <= 0 {
+		packetFrames = defaultOpusFrameSamples
+	}
+
+	recoverablePackets := min(missingPackets, timestampGapFrames/packetFrames)
+	if recoverablePackets <= 0 || recoverablePackets > maxConcealedOpusPackets {
+		return nil, timestampGapFrames, nil
+	}
+
+	recovered := make([]int16, 0, recoverablePackets*packetFrames*channels)
+	for packetIndex := 0; packetIndex < recoverablePackets; packetIndex++ {
+		var (
+			pcm []int16
+			err error
+		)
+		if packetIndex == recoverablePackets-1 {
+			pcm, err = decoder.DecodeFEC(nextOpusPacket, packetFrames)
+		} else {
+			pcm, err = decoder.DecodePLC(packetFrames)
+		}
+		if err != nil {
+			return nil, timestampGapFrames, err
+		}
+		recovered = append(recovered, pcm...)
+	}
+
+	recoveredFrames := len(recovered) / channels
+	return recovered, max(0, timestampGapFrames-recoveredFrames), nil
+}
+
+func (recording *userAudioRecording) writeRTPPacket(
+	ssrc uint32,
+	sequence uint16,
+	timestamp uint32,
+	silenceFrames int,
+	recoveredPCM []int16,
+	pcm []int16,
+	frames int,
+) error {
 	if recording == nil || recording.wav == nil || frames <= 0 {
 		return nil
 	}
@@ -453,11 +617,10 @@ func (recording *userAudioRecording) writeTimedPCM(ssrc uint32, timestamp uint32
 		return fmt.Errorf("WAV PCM incompleto: frames=%d channels=%d samples=%d", frames, recording.wav.channels, len(pcm))
 	}
 
-	gapFrames, ok := recording.rtpGapFrames(ssrc, timestamp)
-	if !ok {
-		return nil
+	if err := recording.wav.WriteSilence(silenceFrames); err != nil {
+		return err
 	}
-	if err := recording.wav.WriteSilence(gapFrames); err != nil {
+	if err := recording.wav.WritePCM(recoveredPCM); err != nil {
 		return err
 	}
 	if err := recording.wav.WritePCM(pcm[:samples]); err != nil {
@@ -465,7 +628,9 @@ func (recording *userAudioRecording) writeTimedPCM(ssrc uint32, timestamp uint32
 	}
 
 	recording.ssrc = ssrc
+	recording.nextRTPSequence = sequence + 1
 	recording.nextRTPTimestamp = timestamp + uint32(frames)
+	recording.hasRTPSequence = true
 	recording.hasRTPTimestamp = true
 	return nil
 }

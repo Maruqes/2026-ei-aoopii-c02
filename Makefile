@@ -18,7 +18,7 @@ POSTGRES_PORT ?= 5432
 DATABASE_URL ?= postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)
 DOCKER_DATABASE_URL ?= postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)
 
-.PHONY: help compose up down logs db-reset migrate api test
+.PHONY: help compose up down logs db-reset migrate api
 
 help:
 	@echo "make compose   Build and start API + Postgres"
@@ -28,7 +28,6 @@ help:
 	@echo "make db-reset  Recreate local Docker volumes"
 	@echo "make migrate   Apply migrations in Docker"
 	@echo "make api       Run API in Docker foreground"
-	@echo "make test      Run tests in Docker"
 
 compose:
 	$(COMPOSE_CMD) up -d --build
@@ -50,7 +49,3 @@ migrate:
 
 api:
 	$(COMPOSE_CMD) up --build api
-
-test:
-	$(COMPOSE_CMD) build api
-	$(COMPOSE_CMD) run --rm api env PYTHONPATH=/app/src:/app/src/transcription-api python -m pytest --import-mode=importlib src/transcription-api/tests

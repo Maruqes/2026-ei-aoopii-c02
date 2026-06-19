@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import tempfile
@@ -7,16 +8,38 @@ import wave
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Protocol
 
 logger = logging.getLogger("uvicorn.error")
 
+_ATTACH_TO_PREVIOUS = frozenset(",.;:!?%)]}»”’")
+_ATTACH_TO_NEXT = frozenset("([{«“‘")
 _THREAD_ENV_VARS = (
     "OMP_NUM_THREADS",
     "MKL_NUM_THREADS",
     "OPENBLAS_NUM_THREADS",
     "NUMEXPR_NUM_THREADS",
 )
+
+
+@dataclass(frozen=True)
+class TranscriptionSegment:
+    start: float
+    end: float
+    text: str
+
+
+@dataclass(frozen=True)
+class TranscriptionResult:
+    text: str
+    segments: list[TranscriptionSegment]
+
+
+class Transcriber(Protocol):
+    provider_name: str
+    model_name: str
+
+    def transcribe(self, audio_path: Path) -> TranscriptionResult: ...
 
 
 def configure_cpu_threads(num_threads: int = 0) -> int:
@@ -33,25 +56,17 @@ def configure_cpu_threads(num_threads: int = 0) -> int:
 
 
 @dataclass(frozen=True)
-class WhisperSegment:
-    start: float
-    end: float
-    text: str
-
-
-@dataclass(frozen=True)
-class WhisperResult:
-    text: str
-    segments: list[WhisperSegment]
-
-
-@dataclass(frozen=True)
 class SpeechRegion:
     start: float
     end: float
 
 
+WhisperSegment = TranscriptionSegment
+WhisperResult = TranscriptionResult
+
+
 class WhisperTranscriber:
+    provider_name = "whisper"
     _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="whisper")
 
     def __init__(
@@ -99,17 +114,17 @@ class WhisperTranscriber:
         self._model: Any | None = None
         self._loaded_device: str | None = None
 
-    def transcribe(self, audio_path: Path) -> WhisperResult:
+    def transcribe(self, audio_path: Path) -> TranscriptionResult:
         logger.info("whisper transcription queued file=%s", audio_path)
         future = self._executor.submit(self._transcribe, audio_path)
         return future.result()
 
-    def _transcribe(self, audio_path: Path) -> WhisperResult:
+    def _transcribe(self, audio_path: Path) -> TranscriptionResult:
         logger.info("whisper transcription started file=%s", audio_path)
         speech_regions = self._speech_regions(audio_path)
         if speech_regions == []:
             logger.info("vad found no speech file=%s", audio_path)
-            return WhisperResult(text="", segments=[])
+            return TranscriptionResult(text="", segments=[])
 
         model = self._load_model()
         if speech_regions is None:
@@ -117,7 +132,7 @@ class WhisperTranscriber:
         else:
             segments = self._transcribe_speech_regions(model, audio_path, speech_regions)
 
-        return WhisperResult(
+        return TranscriptionResult(
             text=" ".join(segment.text for segment in segments),
             segments=segments,
         )
@@ -128,7 +143,7 @@ class WhisperTranscriber:
         audio_path: Path,
         *,
         offset_seconds: float = 0.0,
-    ) -> list[WhisperSegment]:
+    ) -> list[TranscriptionSegment]:
         options: dict[str, Any] = {
             "beam_size": self.beam_size if self.beam_size > 0 else None,
             "condition_on_previous_text": self.condition_on_previous_text,
@@ -145,12 +160,9 @@ class WhisperTranscriber:
             options["initial_prompt"] = self.initial_prompt.strip()
             options["carry_initial_prompt"] = self.carry_initial_prompt
 
-        result = model.transcribe(
-            str(audio_path),
-            **options,
-        )
+        result = model.transcribe(str(audio_path), **options)
         return [
-            WhisperSegment(
+            TranscriptionSegment(
                 start=float(segment.get("start", 0)) + offset_seconds,
                 end=float(segment.get("end", 0)) + offset_seconds,
                 text=str(segment.get("text", "")).strip(),
@@ -176,8 +188,8 @@ class WhisperTranscriber:
         model: Any,
         audio_path: Path,
         speech_regions: list[SpeechRegion],
-    ) -> list[WhisperSegment]:
-        segments: list[WhisperSegment] = []
+    ) -> list[TranscriptionSegment]:
+        segments: list[TranscriptionSegment] = []
         with tempfile.TemporaryDirectory(prefix="whisper-vad-") as tmp_dir:
             for index, region in enumerate(speech_regions):
                 chunk_path = Path(tmp_dir) / f"speech-{index}.wav"
@@ -308,3 +320,142 @@ class WhisperTranscriber:
 
     def _use_fp16(self) -> bool:
         return self.fp16 and self._loaded_device == "cuda"
+
+
+class SpeechmaticsTranscriber:
+    provider_name = "speechmatics"
+
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        batch_url: str = "https://eu1.asr.api.speechmatics.com/v2",
+        language: str = "multi",
+        model: str = "melia-1",
+        polling_interval_seconds: float = 2.0,
+        timeout_seconds: float = 600.0,
+        segment_gap_seconds: float = 1.5,
+        additional_vocab: tuple[str, ...] = (),
+        client_factory: Callable[..., Any] | None = None,
+    ):
+        self.api_key = api_key.strip()
+        self.batch_url = batch_url.rstrip("/")
+        self.language = language.strip() or "multi"
+        self.model_name = model.strip().lower() or "melia-1"
+        self.polling_interval_seconds = max(0.1, polling_interval_seconds)
+        self.timeout_seconds = max(1.0, timeout_seconds)
+        self.segment_gap_seconds = max(0.0, segment_gap_seconds)
+        self.additional_vocab = tuple(term.strip() for term in additional_vocab if term.strip())
+        self._client_factory = client_factory
+
+        if not self.api_key:
+            raise RuntimeError("SPEECHMATICS_API_KEY is required")
+        if self.model_name not in {"standard", "enhanced", "melia-1"}:
+            raise RuntimeError(
+                "Unsupported SPEECHMATICS_MODEL. Use 'standard', 'enhanced', or 'melia-1'."
+            )
+        if self.model_name == "melia-1" and self.language != "multi":
+            raise RuntimeError("SPEECHMATICS_LANGUAGE must be 'multi' when SPEECHMATICS_MODEL=melia-1")
+        if self.model_name == "melia-1" and self.additional_vocab:
+            raise RuntimeError("SPEECHMATICS_ADDITIONAL_VOCAB is not supported by SPEECHMATICS_MODEL=melia-1")
+
+    def transcribe(self, audio_path: Path) -> TranscriptionResult:
+        logger.info(
+            "speechmatics transcription started file=%s model=%s language=%s",
+            audio_path,
+            self.model_name,
+            self.language,
+        )
+        return asyncio.run(self._transcribe(audio_path))
+
+    async def _transcribe(self, audio_path: Path) -> TranscriptionResult:
+        from speechmatics.batch import AsyncClient, Transcript, TranscriptionConfig
+
+        client_factory = self._client_factory or AsyncClient
+        config = TranscriptionConfig(
+            language=self.language,
+            model=self.model_name,
+            additional_vocab=[{"content": term} for term in self.additional_vocab] or None,
+        )
+
+        async with client_factory(api_key=self.api_key, url=self.batch_url) as client:
+            transcript = await client.transcribe(
+                str(audio_path),
+                transcription_config=config,
+                polling_interval=self.polling_interval_seconds,
+                timeout=self.timeout_seconds,
+            )
+
+        if not isinstance(transcript, Transcript):
+            raise RuntimeError("Speechmatics returned an unexpected non-JSON transcript")
+
+        segments = self._segments_from_results(transcript.results)
+        return TranscriptionResult(
+            text=" ".join(segment.text for segment in segments),
+            segments=segments,
+        )
+
+    def _segments_from_results(self, results: list[Any]) -> list[TranscriptionSegment]:
+        segments: list[TranscriptionSegment] = []
+        text = ""
+        start: float | None = None
+        end: float | None = None
+
+        def flush() -> None:
+            nonlocal text, start, end
+            normalized = text.strip()
+            if normalized and start is not None and end is not None:
+                segments.append(TranscriptionSegment(start=start, end=end, text=normalized))
+            text = ""
+            start = None
+            end = None
+
+        for item in results:
+            alternatives = getattr(item, "alternatives", None) or []
+            if not alternatives:
+                continue
+
+            content = str(getattr(alternatives[0], "content", "")).strip()
+            if not content:
+                continue
+
+            item_type = str(getattr(item, "type", ""))
+            item_start = float(getattr(item, "start_time", 0.0))
+            item_end = float(getattr(item, "end_time", item_start))
+
+            if (
+                item_type == "word"
+                and text
+                and end is not None
+                and self.segment_gap_seconds > 0
+                and item_start - end >= self.segment_gap_seconds
+            ):
+                flush()
+
+            if start is None and item_type == "word":
+                start = item_start
+            if start is None:
+                start = item_start
+
+            text = _append_token(
+                text,
+                content,
+                attaches_to=getattr(item, "attaches_to", None),
+            )
+            end = max(end or item_end, item_end)
+
+            if bool(getattr(item, "is_eos", False)):
+                flush()
+
+        flush()
+        return segments
+
+
+def _append_token(text: str, token: str, *, attaches_to: str | None) -> str:
+    if not text:
+        return token
+    if attaches_to == "previous" or token[0] in _ATTACH_TO_PREVIOUS:
+        return text + token
+    if text[-1] in _ATTACH_TO_NEXT:
+        return text + token
+    return f"{text} {token}"

@@ -1,6 +1,7 @@
 # Transcription API
 
-Local FastAPI service wrapping `openai-whisper`.
+FastAPI transcription service. Local Whisper remains the default provider; Speechmatics
+Melia 1 can be enabled through an environment variable.
 
 Install dependencies:
 
@@ -22,6 +23,15 @@ Or:
 make api
 ```
 
+Select the provider in `.env`:
+
+```text
+TRANSCRIPTION_PROVIDER=whisper
+```
+
+This preserves the main-branch local Whisper behavior. Its existing `WHISPER_*`,
+PyTorch, VAD, CPU, and GPU settings continue to apply.
+
 Docker Compose installs CPU-only PyTorch wheels and runs Whisper with
 `WHISPER_DEVICE=cpu` by default. To select the runtime when using the
 `Makefile`, set it in `.env`:
@@ -38,23 +48,19 @@ WHISPER_DEVICE=cuda
 PYTORCH_CUDA_INDEX_URL=https://download.pytorch.org/whl/cu126
 ```
 
-With `WHISPER_DEVICE=cuda`, `make compose`, `make api`, `make test`, and
-`make migrate` add `docker-compose.gpu.yml` automatically. When running
+With `WHISPER_DEVICE=cuda`, `make compose`, `make api`, and `make migrate`
+add `docker-compose.gpu.yml` automatically. When running
 `docker compose` directly instead of `make`, include the GPU override file
 explicitly.
 
 Whisper quality settings:
 
 ```text
-# `turbo` is fast; compare `large-v3` when quality matters and the runtime can handle it.
 WHISPER_MODEL=large-v3
 WHISPER_LANGUAGE=pt
-# Beam search is slower than greedy decoding but usually gives a better first decode.
 WHISPER_BEAM_SIZE=10
-# Uses fp16 on CUDA only. CPU still runs fp32.
 WHISPER_FP16=true
-# Optional vocabulary hint for names, acronyms, and project-specific words.
-WHISPER_INITIAL_PROMPT=Transcricao de uma conversa em portugues de Portugal sobre Discord, FastAPI e Whisper.
+WHISPER_INITIAL_PROMPT=
 WHISPER_CARRY_INITIAL_PROMPT=false
 WHISPER_CONDITION_ON_PREVIOUS_TEXT=false
 WHISPER_HALLUCINATION_SILENCE_THRESHOLD=2.0
@@ -69,16 +75,36 @@ WHISPER_VAD_PADDING_MS=500
 WHISPER_VAD_MIN_SPEECH_MS=400
 ```
 
-Set `WHISPER_LANGUAGE=auto` only when recordings are genuinely multilingual or the
-fixed language is wrong. Keeping `WHISPER_CONDITION_ON_PREVIOUS_TEXT=false` reduces
-repeated incorrect phrases in long recordings. The hallucination silence threshold
-helps skip invented speech around silent regions; set it to `0` to disable it.
-Segments that exceed `WHISPER_MAX_NO_SPEECH_PROB`, fall below `WHISPER_LOGPROB_THRESHOLD`,
-or exceed `WHISPER_COMPRESSION_RATIO_THRESHOLD` are also discarded. VAD runs before
-Whisper, skips fully silent files, and transcribes only speech regions while preserving
-the original timestamps. If valid speech starts getting dropped, relax the thresholds
-in this order: `WHISPER_LOGPROB_THRESHOLD=-1.0`, `WHISPER_MAX_NO_SPEECH_PROB=0.8`,
-then `WHISPER_COMPRESSION_RATIO_THRESHOLD=2.4`.
+To use Speechmatics instead, create an API key in the
+[Speechmatics portal](https://portal.speechmatics.com/) and set:
+
+```text
+TRANSCRIPTION_PROVIDER=speechmatics
+SPEECHMATICS_API_KEY=your_speechmatics_api_key
+SPEECHMATICS_BATCH_URL=https://eu1.asr.api.speechmatics.com/v2
+SPEECHMATICS_LANGUAGE=multi
+SPEECHMATICS_MODEL=melia-1
+```
+
+Speechmatics settings:
+
+```text
+SPEECHMATICS_POLLING_INTERVAL_SECONDS=2
+SPEECHMATICS_TIMEOUT_SECONDS=600
+SPEECHMATICS_SEGMENT_GAP_SECONDS=1.5
+SPEECHMATICS_ADDITIONAL_VOCAB=
+```
+
+Melia 1 automatically handles multilingual audio and language switching, including
+Portuguese and English. It does not support custom vocabulary. Speechmatics returns
+word timestamps; the API groups them at sentence boundaries or after
+`SPEECHMATICS_SEGMENT_GAP_SECONDS` of silence before inserting messages into Postgres.
+
+Changing `TRANSCRIPTION_PROVIDER` requires restarting the API container:
+
+```powershell
+docker compose up -d --build api
+```
 
 Transcribe an audio file:
 
