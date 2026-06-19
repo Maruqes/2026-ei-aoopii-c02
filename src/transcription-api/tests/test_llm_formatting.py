@@ -8,15 +8,27 @@ repository_module = types.ModuleType("data.repository")
 repository_module.UserProfile = type("UserProfile", (), {})
 data_module = types.ModuleType("data")
 data_module.repository = repository_module
-sys.modules.setdefault("data", data_module)
-sys.modules.setdefault("data.repository", repository_module)
+original_data_module = sys.modules.get("data")
+original_repository_module = sys.modules.get("data.repository")
+sys.modules["data"] = data_module
+sys.modules["data.repository"] = repository_module
 
 llm_path = Path(__file__).resolve().parents[1] / "app" / "llm.py"
 spec = importlib.util.spec_from_file_location("llm_under_test", llm_path)
 assert spec is not None and spec.loader is not None
 llm = importlib.util.module_from_spec(spec)
 sys.modules["llm_under_test"] = llm
-spec.loader.exec_module(llm)
+try:
+    spec.loader.exec_module(llm)
+finally:
+    if original_data_module is None:
+        sys.modules.pop("data", None)
+    else:
+        sys.modules["data"] = original_data_module
+    if original_repository_module is None:
+        sys.modules.pop("data.repository", None)
+    else:
+        sys.modules["data.repository"] = original_repository_module
 
 clean_answer = llm.clean_answer
 guild_oracle_system = llm.guild_oracle_system

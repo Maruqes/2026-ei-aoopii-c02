@@ -51,26 +51,34 @@ WHISPER_MODEL=large-v3
 WHISPER_LANGUAGE=pt
 # Beam search is slower than greedy decoding but usually gives a better first decode.
 WHISPER_BEAM_SIZE=10
+# Uses fp16 on CUDA only. CPU still runs fp32.
+WHISPER_FP16=true
 # Optional vocabulary hint for names, acronyms, and project-specific words.
 WHISPER_INITIAL_PROMPT=Transcricao de uma conversa em portugues de Portugal sobre Discord, FastAPI e Whisper.
-WHISPER_CARRY_INITIAL_PROMPT=true
+WHISPER_CARRY_INITIAL_PROMPT=false
 WHISPER_CONDITION_ON_PREVIOUS_TEXT=false
 WHISPER_HALLUCINATION_SILENCE_THRESHOLD=2.0
-WHISPER_MAX_NO_SPEECH_PROB=0.8
+WHISPER_MAX_NO_SPEECH_PROB=0.6
+WHISPER_NO_SPEECH_THRESHOLD=0.6
+WHISPER_LOGPROB_THRESHOLD=-0.8
+WHISPER_COMPRESSION_RATIO_THRESHOLD=2.0
 WHISPER_VAD_ENABLED=true
 WHISPER_VAD_AGGRESSIVENESS=3
 WHISPER_VAD_FRAME_MS=30
-WHISPER_VAD_PADDING_MS=300
-WHISPER_VAD_MIN_SPEECH_MS=250
+WHISPER_VAD_PADDING_MS=500
+WHISPER_VAD_MIN_SPEECH_MS=400
 ```
 
 Set `WHISPER_LANGUAGE=auto` only when recordings are genuinely multilingual or the
 fixed language is wrong. Keeping `WHISPER_CONDITION_ON_PREVIOUS_TEXT=false` reduces
 repeated incorrect phrases in long recordings. The hallucination silence threshold
 helps skip invented speech around silent regions; set it to `0` to disable it.
-Segments that exceed `WHISPER_MAX_NO_SPEECH_PROB` are also discarded. VAD runs
-before Whisper, skips fully silent files, and transcribes only speech regions while
-preserving the original timestamps.
+Segments that exceed `WHISPER_MAX_NO_SPEECH_PROB`, fall below `WHISPER_LOGPROB_THRESHOLD`,
+or exceed `WHISPER_COMPRESSION_RATIO_THRESHOLD` are also discarded. VAD runs before
+Whisper, skips fully silent files, and transcribes only speech regions while preserving
+the original timestamps. If valid speech starts getting dropped, relax the thresholds
+in this order: `WHISPER_LOGPROB_THRESHOLD=-1.0`, `WHISPER_MAX_NO_SPEECH_PROB=0.8`,
+then `WHISPER_COMPRESSION_RATIO_THRESHOLD=2.4`.
 
 Transcribe an audio file:
 

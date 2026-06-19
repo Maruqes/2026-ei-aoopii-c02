@@ -61,34 +61,43 @@ class WhisperTranscriber:
         *,
         language: str = "pt",
         beam_size: int = 5,
+        fp16: bool = True,
         initial_prompt: str = "",
         carry_initial_prompt: bool = False,
         condition_on_previous_text: bool = False,
         hallucination_silence_threshold: float = 2.0,
-        max_no_speech_prob: float = 0.8,
+        max_no_speech_prob: float = 0.6,
+        no_speech_threshold: float = 0.6,
+        logprob_threshold: float = -0.8,
+        compression_ratio_threshold: float = 2.0,
         num_threads: int = 0,
         vad_enabled: bool = True,
         vad_aggressiveness: int = 3,
         vad_frame_ms: int = 30,
-        vad_padding_ms: int = 300,
-        vad_min_speech_ms: int = 250,
+        vad_padding_ms: int = 500,
+        vad_min_speech_ms: int = 400,
     ):
         self.model_name = model_name
         self.device = device
         self.num_threads = num_threads
         self.language = language
         self.beam_size = beam_size
+        self.fp16 = fp16
         self.initial_prompt = initial_prompt
         self.carry_initial_prompt = carry_initial_prompt
         self.condition_on_previous_text = condition_on_previous_text
         self.hallucination_silence_threshold = hallucination_silence_threshold
         self.max_no_speech_prob = max_no_speech_prob
+        self.no_speech_threshold = no_speech_threshold
+        self.logprob_threshold = logprob_threshold
+        self.compression_ratio_threshold = compression_ratio_threshold
         self.vad_enabled = vad_enabled
         self.vad_aggressiveness = min(3, max(0, vad_aggressiveness))
         self.vad_frame_ms = vad_frame_ms if vad_frame_ms in {10, 20, 30} else 30
         self.vad_padding_ms = max(0, vad_padding_ms)
         self.vad_min_speech_ms = max(0, vad_min_speech_ms)
         self._model: Any | None = None
+        self._loaded_device: str | None = None
 
     def transcribe(self, audio_path: Path) -> WhisperResult:
         logger.info("whisper transcription queued file=%s", audio_path)
@@ -123,8 +132,11 @@ class WhisperTranscriber:
         options: dict[str, Any] = {
             "beam_size": self.beam_size if self.beam_size > 0 else None,
             "condition_on_previous_text": self.condition_on_previous_text,
-            "fp16": False,
+            "compression_ratio_threshold": self.compression_ratio_threshold,
+            "fp16": self._use_fp16(),
             "language": self._language_option(),
+            "logprob_threshold": self.logprob_threshold,
+            "no_speech_threshold": self.no_speech_threshold,
             "temperature": 0.0,
         }
         if self.hallucination_silence_threshold > 0:
@@ -144,9 +156,20 @@ class WhisperTranscriber:
                 text=str(segment.get("text", "")).strip(),
             )
             for segment in result.get("segments", [])
-            if str(segment.get("text", "")).strip()
-            and float(segment.get("no_speech_prob", 0.0)) < self.max_no_speech_prob
+            if self._keep_segment(segment)
         ]
+
+    def _keep_segment(self, segment: dict[str, Any]) -> bool:
+        text = str(segment.get("text", "")).strip()
+        if not text:
+            return False
+        if float(segment.get("no_speech_prob", 0.0)) >= self.max_no_speech_prob:
+            return False
+        if float(segment.get("avg_logprob", 0.0)) < self.logprob_threshold:
+            return False
+        if float(segment.get("compression_ratio", 0.0)) > self.compression_ratio_threshold:
+            return False
+        return True
 
     def _transcribe_speech_regions(
         self,
@@ -265,6 +288,7 @@ class WhisperTranscriber:
             device = self._resolve_device(torch)
             logger.info("loading whisper model=%s device=%s", self.model_name, device)
             self._model = whisper.load_model(self.model_name, device=device)
+            self._loaded_device = device
         return self._model
 
     def _resolve_device(self, torch: Any) -> str:
@@ -281,3 +305,6 @@ class WhisperTranscriber:
         if language.lower() in {"", "auto", "detect"}:
             return None
         return language
+
+    def _use_fp16(self) -> bool:
+        return self.fp16 and self._loaded_device == "cuda"

@@ -41,17 +41,21 @@ class Settings:
     whisper_device: str = "auto"
     whisper_language: str = "pt"
     whisper_beam_size: int = 10
+    whisper_fp16: bool = True
     whisper_initial_prompt: str = ""
     whisper_carry_initial_prompt: bool = False
     whisper_condition_on_previous_text: bool = False
     whisper_hallucination_silence_threshold: float = 2.0
-    whisper_max_no_speech_prob: float = 0.8
+    whisper_max_no_speech_prob: float = 0.6
+    whisper_no_speech_threshold: float = 0.6
+    whisper_logprob_threshold: float = -0.8
+    whisper_compression_ratio_threshold: float = 2.0
     whisper_num_threads: int = 0
     whisper_vad_enabled: bool = True
     whisper_vad_aggressiveness: int = 3
     whisper_vad_frame_ms: int = 30
-    whisper_vad_padding_ms: int = 300
-    whisper_vad_min_speech_ms: int = 250
+    whisper_vad_padding_ms: int = 500
+    whisper_vad_min_speech_ms: int = 400
     upload_tmp_dir: Path = Path(".tmp/uploads")
     recordings_dir: Path = Path("discord_bot/recordings")
     keep_uploads: bool = False
@@ -82,6 +86,7 @@ class Settings:
             whisper_device=os.getenv("WHISPER_DEVICE", "auto").strip().lower(),
             whisper_language=env_str("WHISPER_LANGUAGE", "pt"),
             whisper_beam_size=env_int("WHISPER_BEAM_SIZE", 10),
+            whisper_fp16=env_bool("WHISPER_FP16", True),
             whisper_initial_prompt=env_str("WHISPER_INITIAL_PROMPT"),
             whisper_carry_initial_prompt=env_bool("WHISPER_CARRY_INITIAL_PROMPT", False),
             whisper_condition_on_previous_text=env_bool("WHISPER_CONDITION_ON_PREVIOUS_TEXT", False),
@@ -89,13 +94,16 @@ class Settings:
                 "WHISPER_HALLUCINATION_SILENCE_THRESHOLD",
                 2.0,
             ),
-            whisper_max_no_speech_prob=env_float("WHISPER_MAX_NO_SPEECH_PROB", 0.8),
+            whisper_max_no_speech_prob=env_float("WHISPER_MAX_NO_SPEECH_PROB", 0.6),
+            whisper_no_speech_threshold=env_float("WHISPER_NO_SPEECH_THRESHOLD", 0.6),
+            whisper_logprob_threshold=env_float("WHISPER_LOGPROB_THRESHOLD", -0.8),
+            whisper_compression_ratio_threshold=env_float("WHISPER_COMPRESSION_RATIO_THRESHOLD", 2.0),
             whisper_num_threads=env_int("WHISPER_NUM_THREADS", 0),
             whisper_vad_enabled=env_bool("WHISPER_VAD_ENABLED", True),
             whisper_vad_aggressiveness=env_int("WHISPER_VAD_AGGRESSIVENESS", 3),
             whisper_vad_frame_ms=env_int("WHISPER_VAD_FRAME_MS", 30),
-            whisper_vad_padding_ms=env_int("WHISPER_VAD_PADDING_MS", 300),
-            whisper_vad_min_speech_ms=env_int("WHISPER_VAD_MIN_SPEECH_MS", 250),
+            whisper_vad_padding_ms=env_int("WHISPER_VAD_PADDING_MS", 500),
+            whisper_vad_min_speech_ms=env_int("WHISPER_VAD_MIN_SPEECH_MS", 400),
             upload_tmp_dir=Path(os.getenv("UPLOAD_TMP_DIR", ".tmp/uploads")),
             recordings_dir=Path(os.getenv("RECORDINGS_DIR", "discord_bot/recordings")),
             keep_uploads=env_bool("KEEP_UPLOADS", False),

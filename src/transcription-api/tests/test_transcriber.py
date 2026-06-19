@@ -39,7 +39,11 @@ def test_transcriber_uses_anti_hallucination_options() -> None:
     assert result.text == "texto"
     assert result.segments[0].text == "texto"
     assert model.options["condition_on_previous_text"] is False
+    assert model.options["compression_ratio_threshold"] == 2.0
+    assert model.options["fp16"] is False
     assert model.options["hallucination_silence_threshold"] == 2.0
+    assert model.options["logprob_threshold"] == -0.8
+    assert model.options["no_speech_threshold"] == 0.6
 
 
 def test_hallucination_silence_threshold_can_be_disabled() -> None:
@@ -52,15 +56,29 @@ def test_hallucination_silence_threshold_can_be_disabled() -> None:
     assert "hallucination_silence_threshold" not in model.options
 
 
-def test_segments_that_are_probably_silence_are_discarded() -> None:
+def test_segments_that_are_probably_unreliable_are_discarded() -> None:
     model = FakeModel()
-    transcriber = WhisperTranscriber("large-v3", max_no_speech_prob=0.8)
+    transcriber = WhisperTranscriber(
+        "large-v3",
+        max_no_speech_prob=0.6,
+        logprob_threshold=-0.8,
+        compression_ratio_threshold=2.0,
+    )
     transcriber._model = model
     model.transcribe = lambda *_args, **_options: {
-        "text": "Tchau. frase valida",
+        "text": "Tchau. repetida frase valida baixa confianca",
         "segments": [
             {"start": 0.0, "end": 1.0, "text": "Tchau.", "no_speech_prob": 0.95},
-            {"start": 1.0, "end": 2.0, "text": "frase valida", "no_speech_prob": 0.1},
+            {"start": 1.0, "end": 2.0, "text": "repetida", "compression_ratio": 2.5},
+            {"start": 2.0, "end": 3.0, "text": "baixa confianca", "avg_logprob": -1.2},
+            {
+                "start": 3.0,
+                "end": 4.0,
+                "text": "frase valida",
+                "no_speech_prob": 0.1,
+                "avg_logprob": -0.2,
+                "compression_ratio": 1.4,
+            },
         ],
     }
 
@@ -68,6 +86,17 @@ def test_segments_that_are_probably_silence_are_discarded() -> None:
 
     assert result.text == "frase valida"
     assert [segment.text for segment in result.segments] == ["frase valida"]
+
+
+def test_fp16_is_used_only_after_loading_on_cuda() -> None:
+    model = FakeModel()
+    transcriber = WhisperTranscriber("large-v3", fp16=True)
+    transcriber._model = model
+    transcriber._loaded_device = "cuda"
+
+    transcriber.transcribe(Path("recording.wav"))
+
+    assert model.options["fp16"] is True
 
 
 def test_vad_skips_silent_recordings_without_loading_model(monkeypatch, tmp_path) -> None:
@@ -101,7 +130,7 @@ def test_vad_transcribes_only_speech_regions_with_original_offsets(monkeypatch, 
 
         def is_speech(self, _pcm: bytes, _sample_rate: int) -> bool:
             self.calls += 1
-            return 20 <= self.calls < 30
+            return 20 <= self.calls < 35
 
     monkeypatch.setitem(sys.modules, "webrtcvad", types.SimpleNamespace(Vad=WindowVad))
     model = FakeModel()
@@ -115,8 +144,8 @@ def test_vad_transcribes_only_speech_regions_with_original_offsets(monkeypatch, 
 
     assert result.text == "fala"
     assert len(result.segments) == 1
-    assert round(result.segments[0].start, 2) == 0.37
-    assert round(result.segments[0].end, 2) == 0.47
+    assert round(result.segments[0].start, 2) == 0.17
+    assert round(result.segments[0].end, 2) == 0.27
 
 
 def test_whisper_transcriptions_run_one_at_a_time() -> None:
