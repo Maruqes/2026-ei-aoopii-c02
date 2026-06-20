@@ -24,6 +24,9 @@ services:
         PYTORCH_INDEX_URL: ${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
     container_name: discord-anthropologist-api
     restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-discord}:${POSTGRES_PASSWORD:-discord}@postgres:5432/${POSTGRES_DB:-discord_anthropologist}
       TRANSCRIPTION_PROVIDER: ${TRANSCRIPTION_PROVIDER:-whisper}
@@ -54,6 +57,7 @@ services:
       SPEECHMATICS_TIMEOUT_SECONDS: ${SPEECHMATICS_TIMEOUT_SECONDS:-600}
       SPEECHMATICS_SEGMENT_GAP_SECONDS: ${SPEECHMATICS_SEGMENT_GAP_SECONDS:-1.5}
       SPEECHMATICS_ADDITIONAL_VOCAB: ${SPEECHMATICS_ADDITIONAL_VOCAB:-}
+      SPEECHMATICS_USAGE_LIMIT_HOURS: ${SPEECHMATICS_USAGE_LIMIT_HOURS:-50}
       UPLOAD_TMP_DIR: ${UPLOAD_TMP_DIR:-.tmp/uploads}
       RECORDINGS_DIR: /app/recordings
       KEEP_UPLOADS: ${KEEP_UPLOADS:-false}

@@ -144,6 +144,24 @@ class HealthResponse(BaseModel):
     last_recording_at: datetime | None
 
 
+class SpeechmaticsKeyUsageResponse(BaseModel):
+    name: str
+    used_hours: float | None
+    limit_hours: float
+    percent_used: float | None
+    job_count: int | None
+    since: str | None
+    until: str | None
+    error: str | None
+
+
+class SpeechmaticsKeysResponse(BaseModel):
+    provider: str
+    limit_hours: float
+    selected_key: str | None
+    keys: list[SpeechmaticsKeyUsageResponse]
+
+
 class ForgetUserResponse(BaseModel):
     status: str
     discord_id: str

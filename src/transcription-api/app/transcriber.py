@@ -10,6 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from .speechmatics_usage import (
+    SpeechmaticsAPIKey,
+    format_speechmatics_key_usage,
+    select_speechmatics_api_key,
+)
+
 logger = logging.getLogger("uvicorn.error")
 
 _ATTACH_TO_PREVIOUS = frozenset(",.;:!?%)]}»”’")
@@ -329,26 +335,29 @@ class SpeechmaticsTranscriber:
         self,
         api_key: str,
         *,
+        api_keys: tuple[SpeechmaticsAPIKey, ...] = (),
         batch_url: str = "https://eu1.asr.api.speechmatics.com/v2",
         language: str = "multi",
         model: str = "melia-1",
+        usage_limit_hours: float = 50.0,
         polling_interval_seconds: float = 2.0,
         timeout_seconds: float = 600.0,
         segment_gap_seconds: float = 1.5,
         additional_vocab: tuple[str, ...] = (),
         client_factory: Callable[..., Any] | None = None,
     ):
-        self.api_key = api_key.strip()
+        self.api_keys = api_keys or _speechmatics_api_keys_from_single(api_key)
         self.batch_url = batch_url.rstrip("/")
         self.language = language.strip() or "multi"
         self.model_name = model.strip().lower() or "melia-1"
+        self.usage_limit_hours = max(0.0, usage_limit_hours)
         self.polling_interval_seconds = max(0.1, polling_interval_seconds)
         self.timeout_seconds = max(1.0, timeout_seconds)
         self.segment_gap_seconds = max(0.0, segment_gap_seconds)
         self.additional_vocab = tuple(term.strip() for term in additional_vocab if term.strip())
         self._client_factory = client_factory
 
-        if not self.api_key:
+        if not self.api_keys:
             raise RuntimeError("SPEECHMATICS_API_KEY is required")
         if self.model_name not in {"standard", "enhanced", "melia-1"}:
             raise RuntimeError(
@@ -366,9 +375,23 @@ class SpeechmaticsTranscriber:
             self.model_name,
             self.language,
         )
-        return asyncio.run(self._transcribe(audio_path))
+        selected_key = self._select_api_key()
+        return asyncio.run(self._transcribe(audio_path, selected_key.value))
 
-    async def _transcribe(self, audio_path: Path) -> TranscriptionResult:
+    def _select_api_key(self) -> SpeechmaticsAPIKey:
+        if len(self.api_keys) == 1:
+            return self.api_keys[0]
+
+        selected = select_speechmatics_api_key(
+            api_keys=self.api_keys,
+            batch_url=self.batch_url,
+            limit_hours=self.usage_limit_hours,
+            timeout_seconds=10.0,
+        )
+        logger.info("speechmatics api key selected %s", format_speechmatics_key_usage(selected))
+        return selected.key
+
+    async def _transcribe(self, audio_path: Path, api_key: str) -> TranscriptionResult:
         from speechmatics.batch import AsyncClient, Transcript, TranscriptionConfig
 
         client_factory = self._client_factory or AsyncClient
@@ -378,7 +401,7 @@ class SpeechmaticsTranscriber:
             additional_vocab=[{"content": term} for term in self.additional_vocab] or None,
         )
 
-        async with client_factory(api_key=self.api_key, url=self.batch_url) as client:
+        async with client_factory(api_key=api_key, url=self.batch_url) as client:
             transcript = await client.transcribe(
                 str(audio_path),
                 transcription_config=config,
@@ -459,3 +482,10 @@ def _append_token(text: str, token: str, *, attaches_to: str | None) -> str:
     if text[-1] in _ATTACH_TO_NEXT:
         return text + token
     return f"{text} {token}"
+
+
+def _speechmatics_api_keys_from_single(api_key: str) -> tuple[SpeechmaticsAPIKey, ...]:
+    api_key = api_key.strip()
+    if not api_key:
+        return ()
+    return (SpeechmaticsAPIKey(name="SPEECHMATICS_API_KEY", value=api_key),)

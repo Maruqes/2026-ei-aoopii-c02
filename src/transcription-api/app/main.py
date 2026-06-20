@@ -43,12 +43,20 @@ from .schemas import (
     SelectLLMModelResponse,
     SessionRecapResponse,
     SessionSummaryResponse,
+    SpeechmaticsKeysResponse,
+    SpeechmaticsKeyUsageResponse,
     TextMessageRequest,
     TextMessageResponse,
     TextProfileSyncResponse,
     TranscriptionAcceptedResponse,
     UserProfileResponse,
     VoiceSessionResponse,
+)
+from .speechmatics_usage import (
+    SpeechmaticsAPIKey,
+    SpeechmaticsKeyUsage,
+    fetch_speechmatics_key_usages,
+    format_speechmatics_key_usage,
 )
 from .transcriber import (
     SpeechmaticsTranscriber,
@@ -82,6 +90,7 @@ def create_app() -> FastAPI:
     @service.on_event("startup")
     def start_profile_sync() -> None:
         settings = get_settings()
+        log_speechmatics_usage(settings)
         if not settings.text_profile_sync_enabled:
             return
         start_text_profile_sync_loop(
@@ -111,6 +120,29 @@ def create_app() -> FastAPI:
             last_recording_status=details["last_recording_status"],
             last_recording_filename=details["last_recording_filename"],
             last_recording_at=details["last_recording_at"],
+        )
+
+    @service.get("/v1/speechmatics/keys", response_model=SpeechmaticsKeysResponse)
+    def speechmatics_keys(settings: Settings = Depends(get_settings)) -> SpeechmaticsKeysResponse:
+        if settings.transcription_provider != "speechmatics":
+            return SpeechmaticsKeysResponse(
+                provider=settings.transcription_provider,
+                limit_hours=settings.speechmatics_usage_limit_hours,
+                selected_key=None,
+                keys=[],
+            )
+
+        rows = get_speechmatics_key_usages(settings)
+        selected_key = None
+        available_rows = [row for row in rows if row.available]
+        if available_rows:
+            selected_key = min(available_rows, key=speechmatics_key_usage_score).key.name
+
+        return SpeechmaticsKeysResponse(
+            provider=settings.transcription_provider,
+            limit_hours=settings.speechmatics_usage_limit_hours,
+            selected_key=selected_key,
+            keys=[speechmatics_key_usage_response(row) for row in rows],
         )
 
     @service.post("/v1/transcriptions", response_model=TranscriptionAcceptedResponse)
@@ -479,9 +511,11 @@ def get_transcriber(settings: Settings = Depends(get_settings)) -> Transcriber:
     if settings.transcription_provider == "speechmatics":
         return SpeechmaticsTranscriber(
             settings.speechmatics_api_key or "",
+            api_keys=configured_speechmatics_api_keys(settings),
             batch_url=settings.speechmatics_batch_url,
             language=settings.speechmatics_language,
             model=settings.speechmatics_model,
+            usage_limit_hours=settings.speechmatics_usage_limit_hours,
             polling_interval_seconds=settings.speechmatics_polling_interval_seconds,
             timeout_seconds=settings.speechmatics_timeout_seconds,
             segment_gap_seconds=settings.speechmatics_segment_gap_seconds,
@@ -491,6 +525,88 @@ def get_transcriber(settings: Settings = Depends(get_settings)) -> Transcriber:
         f"Unsupported TRANSCRIPTION_PROVIDER: {settings.transcription_provider}. "
         "Use 'whisper' or 'speechmatics'."
     )
+
+
+def log_speechmatics_usage(settings: Settings) -> None:
+    if settings.transcription_provider != "speechmatics":
+        return
+    api_keys = configured_speechmatics_api_keys(settings)
+    if not api_keys:
+        logger.warning("speechmatics usage skipped: no SPEECHMATICS_API_KEY configured")
+        return
+
+    try:
+        rows = fetch_speechmatics_key_usages(
+            api_keys=api_keys,
+            batch_url=settings.speechmatics_batch_url,
+            limit_hours=settings.speechmatics_usage_limit_hours,
+        )
+    except Exception as exc:
+        logger.warning("speechmatics usage unavailable: %s", exc)
+        return
+
+    for row in rows:
+        logger.info("speechmatics usage %s", format_speechmatics_key_usage(row))
+
+    available_rows = [row for row in rows if row.available]
+    if not available_rows:
+        logger.warning("speechmatics usage selected_key unavailable: no key usage available")
+        return
+    selected = min(available_rows, key=speechmatics_key_usage_score)
+    logger.info("speechmatics usage selected_key=%s", selected.key.name)
+
+
+def configured_speechmatics_api_keys(settings: Settings) -> tuple[SpeechmaticsAPIKey, ...]:
+    keys = [
+        SpeechmaticsAPIKey(name=name, value=value.strip())
+        for name, value in settings.speechmatics_api_keys
+        if value.strip()
+    ]
+    if not keys and settings.speechmatics_api_key:
+        keys.append(SpeechmaticsAPIKey(name="SPEECHMATICS_API_KEY", value=settings.speechmatics_api_key.strip()))
+    return tuple(keys)
+
+
+def get_speechmatics_key_usages(settings: Settings) -> list[SpeechmaticsKeyUsage]:
+    api_keys = configured_speechmatics_api_keys(settings)
+    if not api_keys:
+        return []
+    return fetch_speechmatics_key_usages(
+        api_keys=api_keys,
+        batch_url=settings.speechmatics_batch_url,
+        limit_hours=settings.speechmatics_usage_limit_hours,
+    )
+
+
+def speechmatics_key_usage_response(row: SpeechmaticsKeyUsage) -> SpeechmaticsKeyUsageResponse:
+    if row.usage is None:
+        return SpeechmaticsKeyUsageResponse(
+            name=row.key.name,
+            used_hours=None,
+            limit_hours=0,
+            percent_used=None,
+            job_count=None,
+            since=None,
+            until=None,
+            error=row.error or "usage unavailable",
+        )
+    return SpeechmaticsKeyUsageResponse(
+        name=row.key.name,
+        used_hours=row.usage.used_hours,
+        limit_hours=row.usage.limit_hours,
+        percent_used=row.usage.percent_used,
+        job_count=row.usage.job_count,
+        since=row.usage.since or None,
+        until=row.usage.until or None,
+        error=row.error,
+    )
+
+
+def speechmatics_key_usage_score(row: SpeechmaticsKeyUsage) -> tuple[float, float, str]:
+    if row.usage is None:
+        return (float("inf"), float("inf"), row.key.name)
+    percent = row.usage.percent_used if row.usage.percent_used is not None else row.usage.used_hours
+    return (percent, row.usage.used_hours, row.key.name)
 
 
 def get_llm_client(settings: Settings = Depends(get_settings)) -> LLMClient:

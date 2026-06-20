@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/signal"
 	"strconv"
@@ -89,6 +90,10 @@ func registerCommands(dg *discordgo.Session, appID string) error {
 			Description: "Verifica API, Postgres e estado das transcricoes.",
 		},
 		{
+			Name:        "keys",
+			Description: "Mostra usage das API keys Speechmatics.",
+		},
+		{
 			Name:        "forget",
 			Description: "Apaga mensagens, perfil e lore de um utilizador.",
 			Options: []*discordgo.ApplicationCommandOption{
@@ -169,6 +174,8 @@ func handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		modelsHook(s, i)
 	case "health":
 		healthHook(s, i)
+	case "keys":
+		keysHook(s, i)
 	case "forget":
 		forgetHook(s, i)
 	case "timeout":
@@ -651,6 +658,73 @@ func healthHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	respondText(s, i, strings.Join(lines, "\n"))
 }
 
+func keysHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	client := botAPIClient
+	if client == nil {
+		client = NewTranscriptionClientFromEnv()
+	}
+
+	keys, err := client.GetSpeechmaticsKeys(context.Background())
+	if err != nil {
+		respondText(s, i, fmt.Sprintf("Nao consegui consultar as keys Speechmatics: %v", err))
+		return
+	}
+	if keys.Provider != "speechmatics" {
+		respondText(s, i, fmt.Sprintf("Speechmatics nao esta ativo. Provider atual: %s", keys.Provider))
+		return
+	}
+	if len(keys.Keys) == 0 {
+		respondText(s, i, "Nao ha API keys Speechmatics configuradas.")
+		return
+	}
+
+	lines := []string{
+		fmt.Sprintf("**Speechmatics keys** limite=%s", formatAPIHoursMinutes(keys.LimitHours)),
+	}
+	if keys.SelectedKey != nil && strings.TrimSpace(*keys.SelectedKey) != "" {
+		lines = append(lines, fmt.Sprintf("**A usar agora:** %s", *keys.SelectedKey))
+	}
+	for _, key := range keys.Keys {
+		lines = append(lines, formatSpeechmaticsKeyLine(key))
+	}
+	respondLongText(s, i, strings.Join(lines, "\n"))
+}
+
+func formatSpeechmaticsKeyLine(key SpeechmaticsKeyUsageResponse) string {
+	if key.Error != nil && strings.TrimSpace(*key.Error) != "" {
+		return fmt.Sprintf("**%s:** erro: %s", key.Name, *key.Error)
+	}
+
+	used := "?"
+	if key.UsedHours != nil {
+		used = formatAPIHoursMinutes(*key.UsedHours)
+	}
+	limit := formatAPIHoursMinutes(key.LimitHours)
+	percent := "?"
+	if key.PercentUsed != nil {
+		percent = formatPercent(*key.PercentUsed)
+	}
+	jobs := "?"
+	if key.JobCount != nil {
+		jobs = strconv.Itoa(*key.JobCount)
+	}
+	return fmt.Sprintf("**%s:** %s %s/%s (%s jobs)", key.Name, percent, used, limit, jobs)
+}
+
+func formatAPIHoursMinutes(hours float64) string {
+	if hours < 0 {
+		hours = 0
+	}
+	totalMinutes := int(math.Round(hours * 60))
+	h := totalMinutes / 60
+	m := totalMinutes % 60
+	return fmt.Sprintf("%dh %02dm", h, m)
+}
+
+func formatPercent(value float64) string {
+	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.1f", value), "0"), ".") + "%"
+}
+
 func formatBotLeaveMinutes(minutes int) string {
 	if minutes == 0 {
 		return "desativado (0)"
@@ -1114,7 +1188,7 @@ func main() {
 	}
 	defer dg.Close()
 
-	fmt.Println("Bot online. Comandos: /ping /start /stop /profile /prompt /sync /models /health /forget /timeout /recap /oracle /guess")
+	fmt.Println("Bot online. Comandos: /ping /start /stop /profile /prompt /sync /models /health /keys /forget /timeout /recap /oracle /guess")
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop

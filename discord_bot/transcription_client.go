@@ -139,6 +139,24 @@ type HealthResponse struct {
 	LastRecordingAt         *time.Time `json:"last_recording_at"`
 }
 
+type SpeechmaticsKeyUsageResponse struct {
+	Name        string   `json:"name"`
+	UsedHours   *float64 `json:"used_hours"`
+	LimitHours  float64  `json:"limit_hours"`
+	PercentUsed *float64 `json:"percent_used"`
+	JobCount    *int     `json:"job_count"`
+	Since       *string  `json:"since"`
+	Until       *string  `json:"until"`
+	Error       *string  `json:"error"`
+}
+
+type SpeechmaticsKeysResponse struct {
+	Provider    string                         `json:"provider"`
+	LimitHours  float64                        `json:"limit_hours"`
+	SelectedKey *string                        `json:"selected_key"`
+	Keys        []SpeechmaticsKeyUsageResponse `json:"keys"`
+}
+
 type ForgetUserResponse struct {
 	Status           string `json:"status"`
 	DiscordID        string `json:"discord_id"`
@@ -346,6 +364,14 @@ func (c *TranscriptionClient) FinishSessionAndWait(ctx context.Context, sessionI
 func (c *TranscriptionClient) GetHealth(ctx context.Context) (*HealthResponse, error) {
 	var response HealthResponse
 	if err := c.getJSON(ctx, "/health", &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *TranscriptionClient) GetSpeechmaticsKeys(ctx context.Context) (*SpeechmaticsKeysResponse, error) {
+	var response SpeechmaticsKeysResponse
+	if err := c.getJSON(ctx, "/v1/speechmatics/keys", &response); err != nil {
 		return nil, err
 	}
 	return &response, nil

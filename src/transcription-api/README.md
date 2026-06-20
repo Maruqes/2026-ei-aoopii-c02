@@ -81,6 +81,9 @@ To use Speechmatics instead, create an API key in the
 ```text
 TRANSCRIPTION_PROVIDER=speechmatics
 SPEECHMATICS_API_KEY=your_speechmatics_api_key
+SPEECHMATICS_API_KEY_01=
+SPEECHMATICS_API_KEY_02=
+SPEECHMATICS_API_KEY_03=
 SPEECHMATICS_BATCH_URL=https://eu1.asr.api.speechmatics.com/v2
 SPEECHMATICS_LANGUAGE=multi
 SPEECHMATICS_MODEL=melia-1
@@ -93,12 +96,29 @@ SPEECHMATICS_POLLING_INTERVAL_SECONDS=2
 SPEECHMATICS_TIMEOUT_SECONDS=600
 SPEECHMATICS_SEGMENT_GAP_SECONDS=1.5
 SPEECHMATICS_ADDITIONAL_VOCAB=
+SPEECHMATICS_USAGE_LIMIT_HOURS=50
 ```
+
+Multiple Speechmatics API keys can be configured with numbered or named suffixes:
+
+```text
+SPEECHMATICS_API_KEY_01=...
+SPEECHMATICS_API_KEY_02=...
+SPEECHMATICS_API_KEY_03=...
+```
+
+When multiple keys are present, each transcription checks Batch `/usage` for all
+configured keys and uses the key with the lowest percentage of
+`SPEECHMATICS_USAGE_LIMIT_HOURS`. The Discord `/keys` command shows usage for
+each configured key.
 
 Melia 1 automatically handles multilingual audio and language switching, including
 Portuguese and English. It does not support custom vocabulary. Speechmatics returns
 word timestamps; the API groups them at sentence boundaries or after
 `SPEECHMATICS_SEGMENT_GAP_SECONDS` of silence before inserting messages into Postgres.
+When Speechmatics is enabled, the API logs current Batch `/usage` on startup.
+`SPEECHMATICS_USAGE_LIMIT_HOURS` is the local maximum used to calculate the
+percentage, for example `speechmatics usage 20% 10h/50h jobs=5`.
 
 Changing `TRANSCRIPTION_PROVIDER` requires restarting the API container:
 

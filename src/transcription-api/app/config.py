@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,6 +40,31 @@ def env_csv(name: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
+def env_speechmatics_api_keys() -> tuple[tuple[str, str], ...]:
+    keys: list[tuple[str, str]] = []
+    base_key = env_str("SPEECHMATICS_API_KEY")
+    if base_key:
+        keys.append(("SPEECHMATICS_API_KEY", base_key))
+
+    for name, value in os.environ.items():
+        if not re.fullmatch(r"SPEECHMATICS_API_KEY_.+", name):
+            continue
+        value = value.strip()
+        if value:
+            keys.append((name, value))
+
+    return tuple(sorted(keys, key=lambda item: _speechmatics_key_sort(item[0])))
+
+
+def _speechmatics_key_sort(name: str) -> tuple[int, int, str]:
+    if name == "SPEECHMATICS_API_KEY":
+        return (0, 0, name)
+    suffix = name.removeprefix("SPEECHMATICS_API_KEY_")
+    if suffix.isdigit():
+        return (1, int(suffix), name)
+    return (2, 0, name)
+
+
 @dataclass(frozen=True)
 class Settings:
     database_url: str
@@ -70,6 +96,8 @@ class Settings:
     speechmatics_timeout_seconds: float = 600.0
     speechmatics_segment_gap_seconds: float = 1.5
     speechmatics_additional_vocab: tuple[str, ...] = ()
+    speechmatics_usage_limit_hours: float = 50.0
+    speechmatics_api_keys: tuple[tuple[str, str], ...] = ()
     upload_tmp_dir: Path = Path(".tmp/uploads")
     recordings_dir: Path = Path("discord_bot/recordings")
     keep_uploads: bool = False
@@ -136,6 +164,8 @@ class Settings:
                 1.5,
             ),
             speechmatics_additional_vocab=env_csv("SPEECHMATICS_ADDITIONAL_VOCAB"),
+            speechmatics_usage_limit_hours=env_float("SPEECHMATICS_USAGE_LIMIT_HOURS", 50.0),
+            speechmatics_api_keys=env_speechmatics_api_keys(),
             upload_tmp_dir=Path(os.getenv("UPLOAD_TMP_DIR", ".tmp/uploads")),
             recordings_dir=Path(os.getenv("RECORDINGS_DIR", "discord_bot/recordings")),
             keep_uploads=env_bool("KEEP_UPLOADS", False),
