@@ -34,121 +34,11 @@ func registerCommands(dg *discordgo.Session, appID string) error {
 		}
 	})
 
-	_, err := dg.ApplicationCommandBulkOverwrite(appID, "", []*discordgo.ApplicationCommand{
-		{
-			Name:        "ping",
-			Description: "Responde com PONG!",
-		},
-		{
-			Name:        "start",
-			Description: "Reativa o comportamento normal do bot.",
-		},
-		{
-			Name:        "stop",
-			Description: "Pausa o bot, derruba as calls e bloqueia novas entradas.",
-		},
-		{
-			Name:        "profile",
-			Description: "Mostra o perfil gerado de um utilizador.",
-			Options: []*discordgo.ApplicationCommandOption{
-				{
-					Type:        discordgo.ApplicationCommandOptionUser,
-					Name:        "user",
-					Description: "Utilizador a consultar. Se vazio, usa quem chamou o comando.",
-					Required:    false,
-				},
-			},
-		},
-		{
-			Name:        "prompt",
-			Description: "Faz uma pergunta ao antropologo sobre a lore de um utilizador.",
-			Options: []*discordgo.ApplicationCommandOption{
-				{
-					Type:        discordgo.ApplicationCommandOptionUser,
-					Name:        "user",
-					Description: "Utilizador cuja lore deve ser consultada.",
-					Required:    true,
-				},
-				{
-					Type:        discordgo.ApplicationCommandOptionString,
-					Name:        "question",
-					Description: "Pergunta a responder com base no ficheiro de lore do utilizador.",
-					Required:    true,
-				},
-			},
-		},
-		{
-			Name:        "sync",
-			Description: "Forca a sincronizacao dos perfis com as mensagens de texto guardadas.",
-		},
-		{
-			Name:        "models",
-			Description: "Lista e permite alterar o modelo LLM ativo.",
-		},
-		{
-			Name:        "health",
-			Description: "Verifica API, Postgres e estado das transcricoes.",
-		},
-		{
-			Name:        "keys",
-			Description: "Mostra usage das API keys Speechmatics.",
-		},
-		{
-			Name:        "forget",
-			Description: "Apaga mensagens, perfil e lore de um utilizador.",
-			Options: []*discordgo.ApplicationCommandOption{
-				{
-					Type:        discordgo.ApplicationCommandOptionUser,
-					Name:        "user",
-					Description: "Utilizador a apagar da base de dados.",
-					Required:    true,
-				},
-			},
-		},
-		{
-			Name:        "timeout",
-			Description: "Configura minutos antes de sair da call (BOT_LEAVE). 0 desativa.",
-			Options: []*discordgo.ApplicationCommandOption{
-				{
-					Type:        discordgo.ApplicationCommandOptionInteger,
-					Name:        "minutes",
-					Description: "Minutos na call antes de sair e processar. 0 = sem limite.",
-					Required:    true,
-					MinValue:    float64Pointer(0),
-					MaxValue:    24 * 60,
-				},
-			},
-		},
-		{
-			Name:        "recap",
-			Description: "Mostra o resumo da ultima sessao de voz do servidor.",
-			Options: []*discordgo.ApplicationCommandOption{
-				{
-					Type:        discordgo.ApplicationCommandOptionInteger,
-					Name:        "session",
-					Description: "ID da sessao. Se vazio, usa a mais recente.",
-					Required:    false,
-					MinValue:    float64Pointer(1),
-				},
-			},
-		},
-		{
-			Name:        "oracle",
-			Description: "Pergunta ao antropologo sobre a historia do grupo.",
-			Options: []*discordgo.ApplicationCommandOption{
-				{
-					Type:        discordgo.ApplicationCommandOptionString,
-					Name:        "question",
-					Description: "Pergunta sobre decisoes, topicos ou lore do servidor.",
-					Required:    true,
-				},
-			},
-		},
-		{
-			Name:        "guess",
-			Description: "Mini-jogo: adivinha quem disse uma frase da call.",
-		},
-	})
+	return overwriteCommands(dg, appID)
+}
+
+func overwriteCommands(dg *discordgo.Session, appID string) error {
+	_, err := dg.ApplicationCommandBulkOverwrite(appID, "", buildApplicationCommands(currentBotLanguage()))
 	if err != nil {
 		return err
 	}
@@ -157,35 +47,38 @@ func registerCommands(dg *discordgo.Session, appID string) error {
 
 func handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	data := i.ApplicationCommandData()
-	switch strings.ToLower(data.Name) {
-	case "ping":
+	name := strings.ToLower(data.Name)
+	switch {
+	case commandMatches(name, "ping"):
 		pingHook(s, i)
-	case "start":
+	case commandMatches(name, "start"):
 		startHook(s, i)
-	case "stop":
+	case commandMatches(name, "stop"):
 		stopHook(s, i)
-	case "profile":
+	case commandMatches(name, "profile"):
 		profileHook(s, i)
-	case "prompt":
+	case commandMatches(name, "prompt"):
 		promptHook(s, i)
-	case "sync":
+	case commandMatches(name, "sync"):
 		syncHook(s, i)
-	case "models":
+	case commandMatches(name, "models"):
 		modelsHook(s, i)
-	case "health":
+	case commandMatches(name, "health"):
 		healthHook(s, i)
-	case "keys":
+	case commandMatches(name, "keys"):
 		keysHook(s, i)
-	case "forget":
+	case commandMatches(name, "forget"):
 		forgetHook(s, i)
-	case "timeout":
+	case commandMatches(name, "timeout"):
 		timeoutHook(s, i)
-	case "recap":
+	case commandMatches(name, "recap"):
 		recapHook(s, i)
-	case "oracle":
+	case commandMatches(name, "oracle"):
 		oracleHook(s, i)
-	case "guess":
+	case commandMatches(name, "guess"):
 		guessHook(s, i)
+	case commandMatches(name, "language"):
+		languageHook(s, i)
 	}
 }
 
@@ -203,13 +96,16 @@ func handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 func pingHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{Content: "PONGGG!"},
+		Data: &discordgo.InteractionResponseData{Content: botText("PONGGG!", "PONGGG!")},
 	})
 }
 
 func startHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	setBotEnabled(true)
-	respondText(s, i, "Bot reativado. Vou voltar a entrar nas calls normalmente.")
+	respondText(s, i, botText(
+		"Bot reativado. Vou voltar a entrar nas calls normalmente.",
+		"Bot reactivated. I will join calls normally again.",
+	))
 	go rejoinActiveVoiceChannels(s)
 }
 
@@ -250,13 +146,16 @@ func rejoinActiveVoiceChannels(s *discordgo.Session) {
 func stopHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	setBotEnabled(false)
 	stopAllVoiceConnections()
-	respondText(s, i, "Bot pausado. Sai de todas as calls e nao vai entrar em novas calls até /start.")
+	respondText(s, i, botText(
+		"Bot pausado. Sai de todas as calls e nao vou entrar em novas calls ate /comecar.",
+		"Bot paused. I left all calls and will not join new calls until /start.",
+	))
 }
 
 func profileHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	targetID, targetName := profileTarget(s, i)
 	if targetID == "" {
-		respondText(s, i, "Nao consegui identificar o utilizador.")
+		respondText(s, i, botText("Nao consegui identificar o utilizador.", "I could not identify the user."))
 		return
 	}
 
@@ -267,14 +166,14 @@ func profileHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	profile, err := client.GetUserProfile(context.Background(), targetID)
 	if err != nil {
 		if strings.Contains(err.Error(), "404") {
-			respondText(s, i, fmt.Sprintf("Ainda nao ha perfil para %s.", targetName))
+			respondText(s, i, fmt.Sprintf(botText("Ainda nao ha perfil para %s.", "There is no profile for %s yet."), targetName))
 			return
 		}
-		respondText(s, i, fmt.Sprintf("Erro ao consultar perfil de %s: %v", targetName, err))
+		respondText(s, i, fmt.Sprintf(botText("Erro ao consultar perfil de %s: %v", "Error fetching profile for %s: %v"), targetName, err))
 		return
 	}
 	if strings.TrimSpace(profile.Summary+profile.Interests+profile.CommunicationStyle+profile.PersonaNotes+profile.RecentUpdates) == "" {
-		respondText(s, i, fmt.Sprintf("Ainda nao ha perfil gerado para %s.", displayProfileName(profile, targetName)))
+		respondText(s, i, fmt.Sprintf(botText("Ainda nao ha perfil gerado para %s.", "There is no generated profile for %s yet."), displayProfileName(profile, targetName)))
 		return
 	}
 
@@ -286,7 +185,8 @@ func profileHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 }
 
 func syncHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	respondText(s, i, "Sincronizacao de texto iniciada. Aviso aqui quando terminar.")
+	lang := currentBotLanguage()
+	respondText(s, i, textForLanguage(lang, "Sincronizacao de texto iniciada. Aviso aqui quando terminar.", "Text synchronization started. I will report back here when it finishes."))
 
 	client := botAPIClient
 	if client == nil {
@@ -297,13 +197,13 @@ func syncHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	go func() {
 		result, err := client.ForceTextProfileSync(context.Background())
 		if err != nil {
-			_, _ = s.ChannelMessageSend(channelID, fmt.Sprintf("Sincronizacao de texto falhou: %v", err))
+			_, _ = s.ChannelMessageSend(channelID, fmt.Sprintf(textForLanguage(lang, "Sincronizacao de texto falhou: %v", "Text synchronization failed: %v"), err))
 			return
 		}
 		_, _ = s.ChannelMessageSend(
 			channelID,
 			fmt.Sprintf(
-				"Sincronizacao de texto concluida: %d perfis atualizados em %.1fs.",
+				textForLanguage(lang, "Sincronizacao de texto concluida: %d perfis atualizados em %.1fs.", "Text synchronization complete: %d profiles updated in %.1fs."),
 				result.UpdatedProfiles,
 				float64(result.ProcessingMS)/1000,
 			),
@@ -314,16 +214,17 @@ func syncHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 func promptHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	targetID, targetName := promptTarget(s, i)
 	question := promptQuestion(i)
+	lang := currentBotLanguage()
 	if targetID == "" {
-		respondText(s, i, "Nao consegui identificar o utilizador.")
+		respondText(s, i, textForLanguage(lang, "Nao consegui identificar o utilizador.", "I could not identify the user."))
 		return
 	}
 	if strings.TrimSpace(question) == "" {
-		respondText(s, i, "Escreve uma pergunta para eu fazer ao antropologo.")
+		respondText(s, i, textForLanguage(lang, "Escreve uma pergunta para eu fazer ao antropologo.", "Write a question for me to ask the anthropologist."))
 		return
 	}
 
-	respondText(s, i, fmt.Sprintf("A consultar a lore de %s...", targetName))
+	respondText(s, i, fmt.Sprintf(textForLanguage(lang, "A consultar a lore de %s...", "Consulting %s's lore..."), targetName))
 
 	client := botAPIClient
 	if client == nil {
@@ -332,9 +233,9 @@ func promptHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	channelID := i.ChannelID
 
 	go func() {
-		response, err := client.PromptUserProfile(context.Background(), targetID, question)
+		response, err := client.PromptUserProfile(context.Background(), targetID, question, lang.apiValue())
 		if err != nil {
-			_, _ = s.ChannelMessageSend(channelID, fmt.Sprintf("Nao consegui consultar a lore de %s: %v", targetName, err))
+			_, _ = s.ChannelMessageSend(channelID, fmt.Sprintf(textForLanguage(lang, "Nao consegui consultar a lore de %s: %v", "I could not consult %s's lore: %v"), targetName, err))
 			return
 		}
 		name := firstNonEmpty(stringValue(response.DisplayName), response.Username, targetName, response.DiscordID)
@@ -357,17 +258,17 @@ func modelsHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}
 	models, err := client.GetLLMModels(context.Background())
 	if err != nil {
-		respondText(s, i, fmt.Sprintf("Nao consegui listar os modelos: %v", err))
+		respondText(s, i, fmt.Sprintf(botText("Nao consegui listar os modelos: %v", "I could not list the models: %v"), err))
 		return
 	}
 	if len(models.Models) == 0 {
-		respondText(s, i, "O provider nao devolveu modelos disponiveis.")
+		respondText(s, i, botText("O provider nao devolveu modelos disponiveis.", "The provider returned no available models."))
 		return
 	}
 
 	response := modelsResponse(models, 0)
 	if response == nil {
-		respondText(s, i, "Os IDs dos modelos devolvidos excedem o limite suportado pelo menu do Discord.")
+		respondText(s, i, botText("Os IDs dos modelos devolvidos excedem o limite suportado pelo menu do Discord.", "The returned model IDs exceed Discord menu limits."))
 		return
 	}
 	_ = s.InteractionRespond(i.Interaction, response)
@@ -376,7 +277,7 @@ func modelsHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 func modelsPageHook(s *discordgo.Session, i *discordgo.InteractionCreate, customID string) {
 	page, ok := parseModelPage(customID)
 	if !ok {
-		respondText(s, i, "Pagina de modelos invalida.")
+		respondText(s, i, botText("Pagina de modelos invalida.", "Invalid model page."))
 		return
 	}
 
@@ -386,12 +287,12 @@ func modelsPageHook(s *discordgo.Session, i *discordgo.InteractionCreate, custom
 	}
 	models, err := client.GetLLMModels(context.Background())
 	if err != nil {
-		respondText(s, i, fmt.Sprintf("Nao consegui listar os modelos: %v", err))
+		respondText(s, i, fmt.Sprintf(botText("Nao consegui listar os modelos: %v", "I could not list the models: %v"), err))
 		return
 	}
 	response := modelsResponse(models, page)
 	if response == nil {
-		respondText(s, i, "Os IDs dos modelos devolvidos excedem o limite suportado pelo menu do Discord.")
+		respondText(s, i, botText("Os IDs dos modelos devolvidos excedem o limite suportado pelo menu do Discord.", "The returned model IDs exceed Discord menu limits."))
 		return
 	}
 	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
@@ -401,6 +302,7 @@ func modelsPageHook(s *discordgo.Session, i *discordgo.InteractionCreate, custom
 }
 
 func modelsResponse(models *LLMModelsResponse, page int) *discordgo.InteractionResponse {
+	lang := currentBotLanguage()
 	eligibleModels := selectableModels(models.Models)
 	if len(eligibleModels) == 0 {
 		return nil
@@ -414,11 +316,15 @@ func modelsResponse(models *LLMModelsResponse, page int) *discordgo.InteractionR
 			Label:       truncateDiscordOption(model),
 			Value:       model,
 			Default:     model == models.CurrentModel,
-			Description: modelDescription(model, models.CurrentModel),
+			Description: modelDescription(model, models.CurrentModel, lang),
 		})
 	}
 	content := fmt.Sprintf(
-		"Provider: **%s**\nModelo atual: **%s**\nEscolhe um modelo para o testar com `Ola!` e ativar.\nPagina %d/%d. A mostrar %d de %d modelos selecionaveis.",
+		textForLanguage(
+			lang,
+			"Provider: **%s**\nModelo atual: **%s**\nEscolhe um modelo para o testar com `Ola!` e ativar.\nPagina %d/%d. A mostrar %d de %d modelos selecionaveis.",
+			"Provider: **%s**\nCurrent model: **%s**\nChoose a model to test it with `Hello!` and activate it.\nPage %d/%d. Showing %d of %d selectable models.",
+		),
 		models.Provider,
 		models.CurrentModel,
 		page+1,
@@ -427,7 +333,11 @@ func modelsResponse(models *LLMModelsResponse, page int) *discordgo.InteractionR
 		len(eligibleModels),
 	)
 	if skipped := len(models.Models) - len(eligibleModels); skipped > 0 {
-		content += fmt.Sprintf("\n%d modelos foram omitidos porque excedem o limite de 100 caracteres do Discord.", skipped)
+		content += fmt.Sprintf(textForLanguage(
+			lang,
+			"\n%d modelos foram omitidos porque excedem o limite de 100 caracteres do Discord.",
+			"\n%d models were omitted because they exceed Discord's 100-character limit.",
+		), skipped)
 	}
 	components := []discordgo.MessageComponent{
 		discordgo.ActionsRow{
@@ -435,7 +345,7 @@ func modelsResponse(models *LLMModelsResponse, page int) *discordgo.InteractionR
 				discordgo.SelectMenu{
 					MenuType:    discordgo.StringSelectMenu,
 					CustomID:    modelSelectCustomID,
-					Placeholder: "Seleciona o modelo LLM",
+					Placeholder: textForLanguage(lang, "Seleciona o modelo LLM", "Select the LLM model"),
 					MinValues:   intPointer(1),
 					MaxValues:   1,
 					Options:     options,
@@ -447,13 +357,13 @@ func modelsResponse(models *LLMModelsResponse, page int) *discordgo.InteractionR
 		components = append(components, discordgo.ActionsRow{
 			Components: []discordgo.MessageComponent{
 				discordgo.Button{
-					Label:    "Anterior",
+					Label:    textForLanguage(lang, "Anterior", "Previous"),
 					Style:    discordgo.SecondaryButton,
 					CustomID: modelPageCustomID(page - 1),
 					Disabled: page == 0,
 				},
 				discordgo.Button{
-					Label:    "Seguinte",
+					Label:    textForLanguage(lang, "Seguinte", "Next"),
 					Style:    discordgo.SecondaryButton,
 					CustomID: modelPageCustomID(page + 1),
 					Disabled: page >= pageCount-1,
@@ -471,9 +381,10 @@ func modelsResponse(models *LLMModelsResponse, page int) *discordgo.InteractionR
 }
 
 func modelSelectHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	lang := currentBotLanguage()
 	data := i.MessageComponentData()
 	if len(data.Values) != 1 {
-		respondText(s, i, "Seleciona exatamente um modelo.")
+		respondText(s, i, textForLanguage(lang, "Seleciona exatamente um modelo.", "Select exactly one model."))
 		return
 	}
 	model := data.Values[0]
@@ -489,10 +400,10 @@ func modelSelectHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	content := ""
 	extraChunks := []string{}
 	if err != nil {
-		content = fmt.Sprintf("O modelo **%s** falhou o teste e nao foi ativado: %v", model, err)
+		content = fmt.Sprintf(textForLanguage(lang, "O modelo **%s** falhou o teste e nao foi ativado: %v", "Model **%s** failed the test and was not activated: %v"), model, err)
 	} else {
 		message := fmt.Sprintf(
-			"Modelo ativo: **%s** (`%s`).\nTeste com `Ola!`:\n%s",
+			textForLanguage(lang, "Modelo ativo: **%s** (`%s`).\nTeste com `Ola!`:\n%s", "Active model: **%s** (`%s`).\nTest with `Hello!`:\n%s"),
 			result.Model,
 			result.Provider,
 			result.TestResponse,
@@ -514,9 +425,9 @@ func modelSelectHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}
 }
 
-func modelDescription(model string, current string) string {
+func modelDescription(model string, current string, lang botLanguage) string {
 	if model == current {
-		return "Modelo ativo"
+		return textForLanguage(lang, "Modelo ativo", "Active model")
 	}
 	return ""
 }
@@ -620,6 +531,7 @@ func float64Pointer(value float64) *float64 {
 }
 
 func healthHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	lang := currentBotLanguage()
 	client := botAPIClient
 	if client == nil {
 		client = NewTranscriptionClientFromEnv()
@@ -627,17 +539,17 @@ func healthHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 	health, err := client.GetHealth(context.Background())
 	if err != nil {
-		respondText(s, i, fmt.Sprintf("API indisponivel: %v", err))
+		respondText(s, i, fmt.Sprintf(textForLanguage(lang, "API indisponivel: %v", "API unavailable: %v"), err))
 		return
 	}
 
 	lines := []string{
 		fmt.Sprintf("**API:** %s", health.Status),
 		fmt.Sprintf("**Postgres:** %s", health.Database),
-		fmt.Sprintf("**Bot:** %s", voiceConnectionStatus()),
-		fmt.Sprintf("**BOT_LEAVE:** %s", formatBotLeaveMinutes(botLeaveMinutes())),
+		fmt.Sprintf("**Bot:** %s", voiceConnectionStatusForLanguage(lang)),
+		fmt.Sprintf("**BOT_LEAVE:** %s", formatBotLeaveMinutes(botLeaveMinutes(), lang)),
 		fmt.Sprintf(
-			"**Transcricoes:** %d em curso, %d falhadas, %d concluidas",
+			textForLanguage(lang, "**Transcricoes:** %d em curso, %d falhadas, %d concluidas", "**Transcriptions:** %d running, %d failed, %d completed"),
 			health.RecordingsTranscribing,
 			health.RecordingsFailed,
 			health.RecordingsCompleted,
@@ -645,7 +557,7 @@ func healthHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}
 
 	if health.LastRecordingStatus != nil && strings.TrimSpace(*health.LastRecordingStatus) != "" {
-		lastLine := fmt.Sprintf("**Ultima transcricao:** %s", *health.LastRecordingStatus)
+		lastLine := fmt.Sprintf(textForLanguage(lang, "**Ultima transcricao:** %s", "**Latest transcription:** %s"), *health.LastRecordingStatus)
 		if health.LastRecordingFilename != nil && strings.TrimSpace(*health.LastRecordingFilename) != "" {
 			lastLine += " (" + *health.LastRecordingFilename + ")"
 		}
@@ -659,6 +571,7 @@ func healthHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 }
 
 func keysHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	lang := currentBotLanguage()
 	client := botAPIClient
 	if client == nil {
 		client = NewTranscriptionClientFromEnv()
@@ -666,33 +579,33 @@ func keysHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 	keys, err := client.GetSpeechmaticsKeys(context.Background())
 	if err != nil {
-		respondText(s, i, fmt.Sprintf("Nao consegui consultar as keys Speechmatics: %v", err))
+		respondText(s, i, fmt.Sprintf(textForLanguage(lang, "Nao consegui consultar as chaves Speechmatics: %v", "I could not fetch Speechmatics keys: %v"), err))
 		return
 	}
 	if keys.Provider != "speechmatics" {
-		respondText(s, i, fmt.Sprintf("Speechmatics nao esta ativo. Provider atual: %s", keys.Provider))
+		respondText(s, i, fmt.Sprintf(textForLanguage(lang, "Speechmatics nao esta ativo. Provider atual: %s", "Speechmatics is not active. Current provider: %s"), keys.Provider))
 		return
 	}
 	if len(keys.Keys) == 0 {
-		respondText(s, i, "Nao ha API keys Speechmatics configuradas.")
+		respondText(s, i, textForLanguage(lang, "Nao ha chaves API Speechmatics configuradas.", "No Speechmatics API keys are configured."))
 		return
 	}
 
 	lines := []string{
-		fmt.Sprintf("**Speechmatics keys** limite=%s", formatAPIHoursMinutes(keys.LimitHours)),
+		fmt.Sprintf(textForLanguage(lang, "**Chaves Speechmatics** limite=%s", "**Speechmatics keys** limit=%s"), formatAPIHoursMinutes(keys.LimitHours)),
 	}
 	if keys.SelectedKey != nil && strings.TrimSpace(*keys.SelectedKey) != "" {
-		lines = append(lines, fmt.Sprintf("**A usar agora:** %s", *keys.SelectedKey))
+		lines = append(lines, fmt.Sprintf(textForLanguage(lang, "**A usar agora:** %s", "**Currently using:** %s"), *keys.SelectedKey))
 	}
 	for _, key := range keys.Keys {
-		lines = append(lines, formatSpeechmaticsKeyLine(key))
+		lines = append(lines, formatSpeechmaticsKeyLine(key, lang))
 	}
 	respondLongText(s, i, strings.Join(lines, "\n"))
 }
 
-func formatSpeechmaticsKeyLine(key SpeechmaticsKeyUsageResponse) string {
+func formatSpeechmaticsKeyLine(key SpeechmaticsKeyUsageResponse, lang botLanguage) string {
 	if key.Error != nil && strings.TrimSpace(*key.Error) != "" {
-		return fmt.Sprintf("**%s:** erro: %s", key.Name, *key.Error)
+		return fmt.Sprintf(textForLanguage(lang, "**%s:** erro: %s", "**%s:** error: %s"), key.Name, *key.Error)
 	}
 
 	used := "?"
@@ -708,7 +621,7 @@ func formatSpeechmaticsKeyLine(key SpeechmaticsKeyUsageResponse) string {
 	if key.JobCount != nil {
 		jobs = strconv.Itoa(*key.JobCount)
 	}
-	return fmt.Sprintf("**%s:** %s %s/%s (%s jobs)", key.Name, percent, used, limit, jobs)
+	return fmt.Sprintf(textForLanguage(lang, "**%s:** %s %s/%s (%s tarefas)", "**%s:** %s %s/%s (%s jobs)"), key.Name, percent, used, limit, jobs)
 }
 
 func formatAPIHoursMinutes(hours float64) string {
@@ -725,17 +638,18 @@ func formatPercent(value float64) string {
 	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.1f", value), "0"), ".") + "%"
 }
 
-func formatBotLeaveMinutes(minutes int) string {
+func formatBotLeaveMinutes(minutes int, lang botLanguage) string {
 	if minutes == 0 {
-		return "desativado (0)"
+		return textForLanguage(lang, "desativado (0)", "disabled (0)")
 	}
 	return fmt.Sprintf("%d min", minutes)
 }
 
 func forgetHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	lang := currentBotLanguage()
 	targetID, targetName := forgetTarget(s, i)
 	if targetID == "" {
-		respondText(s, i, "Nao consegui identificar o utilizador.")
+		respondText(s, i, textForLanguage(lang, "Nao consegui identificar o utilizador.", "I could not identify the user."))
 		return
 	}
 
@@ -747,22 +661,22 @@ func forgetHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	result, err := client.ForgetUser(context.Background(), targetID)
 	if err != nil {
 		if strings.Contains(err.Error(), "404") {
-			respondText(s, i, fmt.Sprintf("Nao ha dados guardados para %s.", targetName))
+			respondText(s, i, fmt.Sprintf(textForLanguage(lang, "Nao ha dados guardados para %s.", "There is no stored data for %s."), targetName))
 			return
 		}
-		respondText(s, i, fmt.Sprintf("Erro ao apagar dados de %s: %v", targetName, err))
+		respondText(s, i, fmt.Sprintf(textForLanguage(lang, "Erro ao apagar dados de %s: %v", "Error deleting data for %s: %v"), targetName, err))
 		return
 	}
 
-	loreNote := "lore removida"
+	loreNote := textForLanguage(lang, "lore removida", "lore removed")
 	if !result.LoreFileDeleted {
-		loreNote = "sem ficheiro de lore"
+		loreNote = textForLanguage(lang, "sem ficheiro de lore", "no lore file")
 	}
 	respondText(
 		s,
 		i,
 		fmt.Sprintf(
-			"Dados de **%s** apagados: %d mensagens, perfil e %s.",
+			textForLanguage(lang, "Dados de **%s** apagados: %d mensagens, perfil e %s.", "Deleted data for **%s**: %d messages, profile, and %s."),
 			targetName,
 			result.MessagesDeleted,
 			loreNote,
@@ -771,24 +685,25 @@ func forgetHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 }
 
 func timeoutHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	lang := currentBotLanguage()
 	minutes := timeoutMinutes(i)
 	if minutes < 0 {
-		respondText(s, i, "Indica minutos validos (0 para desativar).")
+		respondText(s, i, textForLanguage(lang, "Indica minutos validos (0 para desativar).", "Provide valid minutes (0 to disable)."))
 		return
 	}
 
 	setBotLeaveMinutes(minutes)
 	if minutes == 0 {
-		respondText(s, i, "BOT_LEAVE desativado. O bot so sai quando a call fica vazia.")
+		respondText(s, i, textForLanguage(lang, "BOT_LEAVE desativado. O bot so sai quando a call fica vazia.", "BOT_LEAVE disabled. The bot only leaves when the call is empty."))
 		return
 	}
-	respondText(s, i, fmt.Sprintf("BOT_LEAVE configurado para %d min. Timer reiniciado nas calls ativas.", minutes))
+	respondText(s, i, fmt.Sprintf(textForLanguage(lang, "BOT_LEAVE configurado para %d min. Timer reiniciado nas calls ativas.", "BOT_LEAVE set to %d min. Timer restarted in active calls."), minutes))
 }
 
 func forgetTarget(s *discordgo.Session, i *discordgo.InteractionCreate) (string, string) {
 	data := i.ApplicationCommandData()
 	for _, option := range data.Options {
-		if option.Name == "user" {
+		if optionMatches(option.Name, "user") {
 			user := option.UserValue(s)
 			return user.ID, firstNonEmpty(user.GlobalName, user.Username, user.ID)
 		}
@@ -799,7 +714,7 @@ func forgetTarget(s *discordgo.Session, i *discordgo.InteractionCreate) (string,
 func timeoutMinutes(i *discordgo.InteractionCreate) int {
 	data := i.ApplicationCommandData()
 	for _, option := range data.Options {
-		if option.Name == "minutes" {
+		if optionMatches(option.Name, "minutes") {
 			return int(option.IntValue())
 		}
 	}
@@ -807,9 +722,10 @@ func timeoutMinutes(i *discordgo.InteractionCreate) int {
 }
 
 func recapHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	lang := currentBotLanguage()
 	guildID := i.GuildID
 	if guildID == "" {
-		respondText(s, i, "Este comando so funciona em um servidor.")
+		respondText(s, i, textForLanguage(lang, "Este comando so funciona em um servidor.", "This command only works in a server."))
 		return
 	}
 
@@ -821,25 +737,25 @@ func recapHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	recap, err := client.GetGuildRecap(context.Background(), guildID, recapSessionID(i))
 	if err != nil {
 		if strings.Contains(err.Error(), "404") {
-			respondText(s, i, "Ainda nao ha sessoes de voz guardadas neste servidor.")
+			respondText(s, i, textForLanguage(lang, "Ainda nao ha sessoes de voz guardadas neste servidor.", "There are no stored voice sessions in this server yet."))
 			return
 		}
-		respondText(s, i, fmt.Sprintf("Nao consegui obter o recap: %v", err))
+		respondText(s, i, fmt.Sprintf(textForLanguage(lang, "Nao consegui obter o resumo: %v", "I could not fetch the recap: %v"), err))
 		return
 	}
 
 	header := fmt.Sprintf(
-		"**Recap** sessao #%d — %s",
+		textForLanguage(lang, "**Resumo** sessao #%d — %s", "**Recap** session #%d — %s"),
 		recap.SessionID,
 		recap.ChannelName,
 	)
 	if recap.EndedAt != nil {
 		header += fmt.Sprintf(" (%s → %s)", recap.StartedAt.UTC().Format("2006-01-02 15:04"), recap.EndedAt.UTC().Format("15:04"))
 	} else {
-		header += fmt.Sprintf(" (inicio %s)", recap.StartedAt.UTC().Format("2006-01-02 15:04"))
+		header += fmt.Sprintf(textForLanguage(lang, " (inicio %s)", " (started %s)"), recap.StartedAt.UTC().Format("2006-01-02 15:04"))
 	}
 	if recap.RecapSource == "error" {
-		respondLongText(s, i, header+"\nResumo falhou: "+recap.Recap)
+		respondLongText(s, i, header+"\n"+textForLanguage(lang, "Resumo falhou: ", "Recap failed: ")+recap.Recap)
 		return
 	}
 	if recap.RecapSource == "pending" {
@@ -850,28 +766,29 @@ func recapHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	sourceNote := ""
 	switch recap.RecapSource {
 	case "transcript":
-		sourceNote = "_transcricao bruta_"
+		sourceNote = textForLanguage(lang, "_transcricao bruta_", "_raw transcript_")
 	case "summary":
-		sourceNote = "_resumo LLM_"
+		sourceNote = textForLanguage(lang, "_resumo LLM_", "_LLM summary_")
 	}
 	message := fmt.Sprintf("%s %s\n\n%s", header, sourceNote, recap.Recap)
 	respondLongText(s, i, message)
 }
 
 func oracleHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	lang := currentBotLanguage()
 	guildID := i.GuildID
 	if guildID == "" {
-		respondText(s, i, "Este comando so funciona em um servidor.")
+		respondText(s, i, textForLanguage(lang, "Este comando so funciona em um servidor.", "This command only works in a server."))
 		return
 	}
 
 	question := oracleQuestion(i)
 	if strings.TrimSpace(question) == "" {
-		respondText(s, i, "Escreve uma pergunta para o oraculo.")
+		respondText(s, i, textForLanguage(lang, "Escreve uma pergunta para o oraculo.", "Write a question for the oracle."))
 		return
 	}
 
-	respondText(s, i, "A consultar a memoria do grupo...")
+	respondText(s, i, textForLanguage(lang, "A consultar a memoria do grupo...", "Consulting the group's memory..."))
 
 	client := botAPIClient
 	if client == nil {
@@ -880,16 +797,16 @@ func oracleHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	channelID := i.ChannelID
 
 	go func() {
-		response, err := client.AskGuildOracle(context.Background(), guildID, question)
+		response, err := client.AskGuildOracle(context.Background(), guildID, question, lang.apiValue())
 		if err != nil {
 			if strings.Contains(err.Error(), "404") {
-				_, _ = s.ChannelMessageSend(channelID, "Ainda nao ha contexto guardado neste servidor para responder.")
+				_, _ = s.ChannelMessageSend(channelID, textForLanguage(lang, "Ainda nao ha contexto guardado neste servidor para responder.", "There is no stored context in this server to answer yet."))
 				return
 			}
-			_, _ = s.ChannelMessageSend(channelID, fmt.Sprintf("O oraculo nao respondeu: %v", err))
+			_, _ = s.ChannelMessageSend(channelID, fmt.Sprintf(textForLanguage(lang, "O oraculo nao respondeu: %v", "The oracle did not answer: %v"), err))
 			return
 		}
-		message := fmt.Sprintf("**Oraculo**\n> %s\n\n%s", response.Question, response.Answer)
+		message := fmt.Sprintf(textForLanguage(lang, "**Oraculo**\n> %s\n\n%s", "**Oracle**\n> %s\n\n%s"), response.Question, response.Answer)
 		if err := sendLongChannelMessage(s, channelID, message); err != nil {
 			log.Printf("erro ao enviar resposta /oracle para canal %s: %v", channelID, err)
 		}
@@ -897,9 +814,10 @@ func oracleHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 }
 
 func guessHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	lang := currentBotLanguage()
 	guildID := i.GuildID
 	if guildID == "" {
-		respondText(s, i, "Este comando so funciona em um servidor.")
+		respondText(s, i, textForLanguage(lang, "Este comando so funciona em um servidor.", "This command only works in a server."))
 		return
 	}
 
@@ -911,15 +829,15 @@ func guessHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	guess, err := client.GetGuildGuess(context.Background(), guildID)
 	if err != nil {
 		if strings.Contains(err.Error(), "404") {
-			respondText(s, i, "Ainda nao ha frases de voz suficientes para o jogo neste servidor.")
+			respondText(s, i, textForLanguage(lang, "Ainda nao ha frases de voz suficientes para o jogo neste servidor.", "There are not enough voice quotes for the game in this server yet."))
 			return
 		}
-		respondText(s, i, fmt.Sprintf("Nao consegui preparar o jogo: %v", err))
+		respondText(s, i, fmt.Sprintf(textForLanguage(lang, "Nao consegui preparar o jogo: %v", "I could not prepare the game: %v"), err))
 		return
 	}
 
 	lines := []string{
-		"**Quem disse isto?**",
+		textForLanguage(lang, "**Quem disse isto?**", "**Who said this?**"),
 		"> " + guess.Quote,
 	}
 	if len(guess.Options) > 0 {
@@ -929,9 +847,9 @@ func guessHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 		lines = append(lines, "", strings.Join(optionLines, "\n"))
 	}
-	lines = append(lines, "", fmt.Sprintf("||Resposta: %s||", guess.CorrectDisplayName))
+	lines = append(lines, "", fmt.Sprintf(textForLanguage(lang, "||Resposta: %s||", "||Answer: %s||"), guess.CorrectDisplayName))
 	if guess.ChannelName != nil && strings.TrimSpace(*guess.ChannelName) != "" {
-		lines = append(lines, fmt.Sprintf("_Canal: %s_", strings.TrimSpace(*guess.ChannelName)))
+		lines = append(lines, fmt.Sprintf(textForLanguage(lang, "_Canal: %s_", "_Channel: %s_"), strings.TrimSpace(*guess.ChannelName)))
 	}
 
 	respondLongText(s, i, strings.Join(lines, "\n"))
@@ -940,7 +858,7 @@ func guessHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 func recapSessionID(i *discordgo.InteractionCreate) int64 {
 	data := i.ApplicationCommandData()
 	for _, option := range data.Options {
-		if option.Name == "session" {
+		if optionMatches(option.Name, "session") {
 			return option.IntValue()
 		}
 	}
@@ -950,7 +868,7 @@ func recapSessionID(i *discordgo.InteractionCreate) int64 {
 func oracleQuestion(i *discordgo.InteractionCreate) string {
 	data := i.ApplicationCommandData()
 	for _, option := range data.Options {
-		if option.Name == "question" {
+		if optionMatches(option.Name, "question") {
 			return strings.TrimSpace(option.StringValue())
 		}
 	}
@@ -960,7 +878,7 @@ func oracleQuestion(i *discordgo.InteractionCreate) string {
 func profileTarget(s *discordgo.Session, i *discordgo.InteractionCreate) (string, string) {
 	data := i.ApplicationCommandData()
 	for _, option := range data.Options {
-		if option.Name == "user" {
+		if optionMatches(option.Name, "user") {
 			user := option.UserValue(s)
 			return user.ID, firstNonEmpty(user.GlobalName, user.Username, user.ID)
 		}
@@ -977,7 +895,7 @@ func profileTarget(s *discordgo.Session, i *discordgo.InteractionCreate) (string
 func promptTarget(s *discordgo.Session, i *discordgo.InteractionCreate) (string, string) {
 	data := i.ApplicationCommandData()
 	for _, option := range data.Options {
-		if option.Name == "user" {
+		if optionMatches(option.Name, "user") {
 			user := option.UserValue(s)
 			return user.ID, firstNonEmpty(user.GlobalName, user.Username, user.ID)
 		}
@@ -988,34 +906,75 @@ func promptTarget(s *discordgo.Session, i *discordgo.InteractionCreate) (string,
 func promptQuestion(i *discordgo.InteractionCreate) string {
 	data := i.ApplicationCommandData()
 	for _, option := range data.Options {
-		if option.Name == "question" {
+		if optionMatches(option.Name, "question") {
 			return strings.TrimSpace(option.StringValue())
 		}
 	}
 	return ""
 }
 
+func languageHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	lang, ok := selectedLanguage(i)
+	if !ok {
+		respondText(s, i, botText("Escolhe `pt` ou `en`.", "Choose `pt` or `en`."))
+		return
+	}
+
+	setBotLanguage(lang)
+	if APP_ID != "" {
+		if err := overwriteCommands(s, APP_ID); err != nil {
+			respondText(
+				s,
+				i,
+				fmt.Sprintf(
+					textForLanguage(lang, "Lingua alterada para **%s**, mas nao consegui atualizar a lista de comandos: %v", "Language changed to **%s**, but I could not update the command list: %v"),
+					lang.label(),
+					err,
+				),
+			)
+			return
+		}
+	}
+
+	respondText(
+		s,
+		i,
+		fmt.Sprintf(textForLanguage(lang, "Lingua alterada para **%s**.", "Language changed to **%s**."), lang.label()),
+	)
+}
+
+func selectedLanguage(i *discordgo.InteractionCreate) (botLanguage, bool) {
+	data := i.ApplicationCommandData()
+	for _, option := range data.Options {
+		if optionMatches(option.Name, "language") {
+			return parseBotLanguage(option.StringValue())
+		}
+	}
+	return "", false
+}
+
 func profileEmbed(profile *UserProfileResponse, fallbackName string) *discordgo.MessageEmbed {
+	lang := currentBotLanguage()
 	name := displayProfileName(profile, fallbackName)
 	fields := []*discordgo.MessageEmbedField{
-		profileField("Title", profile.AnthropologistTitle),
-		profileField("Field Impression", profile.Summary),
-		profileField("Interests and Artifacts", profile.Interests),
-		profileField("Native Dialect", profile.CommunicationStyle),
-		profileField("Social Role and Group Dynamics", profile.PersonaNotes),
-		profileField("Current Pattern Notes", profile.RecentUpdates),
+		profileField(textForLanguage(lang, "Titulo", "Title"), profile.AnthropologistTitle, lang),
+		profileField(textForLanguage(lang, "Impressao de campo", "Field Impression"), profile.Summary, lang),
+		profileField(textForLanguage(lang, "Interesses e artefactos", "Interests and Artifacts"), profile.Interests, lang),
+		profileField(textForLanguage(lang, "Dialeto nativo", "Native Dialect"), profile.CommunicationStyle, lang),
+		profileField(textForLanguage(lang, "Papel social e dinamicas de grupo", "Social Role and Group Dynamics"), profile.PersonaNotes, lang),
+		profileField(textForLanguage(lang, "Notas de padrao atual", "Current Pattern Notes"), profile.RecentUpdates, lang),
 	}
 	return &discordgo.MessageEmbed{
-		Title:  "Profile: " + name,
+		Title:  textForLanguage(lang, "Perfil: ", "Profile: ") + name,
 		Color:  0x2F80ED,
 		Fields: fields,
 	}
 }
 
-func profileField(name string, value string) *discordgo.MessageEmbedField {
+func profileField(name string, value string, lang botLanguage) *discordgo.MessageEmbedField {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		value = "No observations yet."
+		value = textForLanguage(lang, "Ainda sem observacoes.", "No observations yet.")
 	}
 	return &discordgo.MessageEmbedField{
 		Name:   name,
@@ -1154,6 +1113,7 @@ func truncateDiscordField(value string) string {
 
 func main() {
 	_ = godotenv.Load("../.env", ".env")
+	initBotLanguageFromEnv()
 
 	token := strings.TrimSpace(os.Getenv("DISCORD_TOKEN"))
 	appID := strings.TrimSpace(os.Getenv("DISCORD_APP_ID"))
@@ -1163,6 +1123,7 @@ func main() {
 	if appID == "" {
 		log.Fatal("DISCORD_APP_ID nao definido")
 	}
+	APP_ID = appID
 
 	dg, err := discordgo.New("Bot " + token)
 	if err != nil {
@@ -1188,7 +1149,7 @@ func main() {
 	}
 	defer dg.Close()
 
-	fmt.Println("Bot online. Comandos: /ping /start /stop /profile /prompt /sync /models /health /keys /forget /timeout /recap /oracle /guess")
+	fmt.Printf("%s %s\n", botText("Bot online. Lingua:", "Bot online. Language:"), currentBotLanguage().label())
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop

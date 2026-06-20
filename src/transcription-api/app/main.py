@@ -341,7 +341,7 @@ def create_app() -> FastAPI:
         session = repository.finish_voice_session(session_id, request.ended_at or datetime.now(timezone.utc))
         if session is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
-        maybe_schedule_session_agent(session_id, repository, llm, docs)
+        maybe_schedule_session_agent(session_id, repository, llm, docs, language=request.language or "pt")
         return voice_session_response(session)
 
     @service.get("/v1/sessions/{session_id}/summary", response_model=SessionSummaryResponse)
@@ -411,6 +411,7 @@ def create_app() -> FastAPI:
             username=username,
             profile_doc_text=profile_doc_text,
             question=question,
+            language=request.language or "pt",
         )
         return ProfilePromptResponse(
             discord_id=profile.discord_id,
@@ -469,7 +470,11 @@ def create_app() -> FastAPI:
                 detail="No guild context available yet",
             )
 
-        answer = llm.answer_guild_question(guild_context=guild_context, question=question)
+        answer = llm.answer_guild_question(
+            guild_context=guild_context,
+            question=question,
+            language=request.language or "pt",
+        )
         return GuildOracleResponse(guild_id=guild_id.strip(), question=question, answer=answer)
 
     return service
@@ -868,6 +873,7 @@ def maybe_schedule_session_agent(
     repository: DataRepository,
     llm: LLMClient,
     docs: LocalMarkdownProfileClient,
+    language: str = "pt",
 ) -> None:
     with _session_agent_lock:
         if session_id in _session_agent_pending:
@@ -881,6 +887,7 @@ def maybe_schedule_session_agent(
                 repository=repository,
                 llm=llm,
                 docs=docs,
+                language=language,
             )
         finally:
             with _session_agent_lock:
@@ -895,12 +902,13 @@ def process_session_agent(
     repository: DataRepository,
     llm: LLMClient,
     docs: LocalMarkdownProfileClient,
+    language: str = "pt",
 ) -> None:
     try:
         if not repository.claim_session_agent_run(session_id):
             return
         agent = SessionAgent(repository=repository, llm=llm, docs=docs)
-        summary = agent.run_for_session(session_id)
+        summary = agent.run_for_session(session_id, language=language)
         logger.info("agent concluido session_id=%s summary=%s", session_id, summary)
     except Exception as exc:
         repository.mark_session_agent_failed(session_id, str(exc))

@@ -77,6 +77,7 @@ class SelectLLMModelResponse(BaseModel):
 
 class ProfilePromptRequest(BaseModel):
     question: str
+    language: str | None = None
 
 
 class ProfilePromptResponse(BaseModel):
@@ -111,6 +112,7 @@ class VoiceSessionResponse(BaseModel):
 
 class FinishSessionRequest(BaseModel):
     ended_at: datetime | None = None
+    language: str | None = None
 
 
 class SessionSummaryResponse(BaseModel):
@@ -171,6 +173,7 @@ class ForgetUserResponse(BaseModel):
 
 class GuildOracleRequest(BaseModel):
     question: str
+    language: str | None = None
 
 
 class GuildOracleResponse(BaseModel):

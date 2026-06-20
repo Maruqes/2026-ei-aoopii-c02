@@ -42,11 +42,11 @@ func TestFinishSessionAndWaitContinuesUntilSummaryIsReady(t *testing.T) {
 	defer server.Close()
 
 	client := &TranscriptionClient{
-		baseURL: server.URL,
+		baseURL:    server.URL,
 		httpClient: &http.Client{},
 	}
 
-	summary, err := client.FinishSessionAndWait(t.Context(), 42)
+	summary, err := client.FinishSessionAndWait(t.Context(), 42, "pt")
 	if err != nil {
 		t.Fatal(err)
 	}

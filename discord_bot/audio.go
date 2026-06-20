@@ -353,21 +353,25 @@ func applyBotLeaveTimeoutToActiveConnections() {
 }
 
 func voiceConnectionStatus() string {
+	return voiceConnectionStatusForLanguage(currentBotLanguage())
+}
+
+func voiceConnectionStatusForLanguage(lang botLanguage) string {
 	if !isBotEnabled() {
-		return "pausado (/start para reativar)"
+		return textForLanguage(lang, "pausado (/comecar para reativar)", "paused (/start to reactivate)")
 	}
 
 	voiceMu.Lock()
 	defer voiceMu.Unlock()
 
 	if len(voiceConnections) == 0 {
-		return "fora de call"
+		return textForLanguage(lang, "fora de call", "not in a call")
 	}
 
 	parts := make([]string, 0, len(voiceConnections))
 	for guildID, state := range voiceConnections {
 		if state == nil || state.vc == nil {
-			parts = append(parts, guildID+": desconhecido")
+			parts = append(parts, guildID+": "+textForLanguage(lang, "desconhecido", "unknown"))
 			continue
 		}
 		channelName := state.currentChannelName()
@@ -377,7 +381,7 @@ func voiceConnectionStatus() string {
 		parts = append(parts, fmt.Sprintf("%s (%s)", channelName, guildID))
 	}
 	sort.Strings(parts)
-	return "em call: " + strings.Join(parts, ", ")
+	return textForLanguage(lang, "em call: ", "in call: ") + strings.Join(parts, ", ")
 }
 
 func (state *voiceConnectionState) startLeaveTimer(guildID string, duration time.Duration) {
@@ -838,7 +842,8 @@ func finishSessionAndPostSummary(s *discordgo.Session, state *voiceConnectionSta
 		return
 	}
 
-	summary, err := state.transcriptionClient.FinishSessionAndWait(context.Background(), state.sessionID)
+	lang := currentBotLanguage()
+	summary, err := state.transcriptionClient.FinishSessionAndWait(context.Background(), state.sessionID, lang.apiValue())
 	if err != nil {
 		log.Printf("erro ao finalizar sessao id=%d: %v", state.sessionID, err)
 	}
@@ -854,9 +859,9 @@ func finishSessionAndPostSummary(s *discordgo.Session, state *voiceConnectionSta
 	if summary.Status == "agent_failed" {
 		errText := strings.TrimSpace(stringValue(summary.AgentError))
 		if errText == "" {
-			errText = "erro desconhecido no agente de resumo"
+			errText = textForLanguage(lang, "erro desconhecido no agente de resumo", "unknown summary agent error")
 		}
-		if _, err := s.ChannelMessageSend(state.summaryChannelID, "Resumo da sessao falhou: "+errText); err != nil {
+		if _, err := s.ChannelMessageSend(state.summaryChannelID, textForLanguage(lang, "Resumo da sessao falhou: ", "Session summary failed: ")+errText); err != nil {
 			log.Printf("erro ao publicar falha da sessao id=%d no canal %s: %v", state.sessionID, state.summaryChannelID, err)
 		}
 		return

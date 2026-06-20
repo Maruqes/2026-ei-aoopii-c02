@@ -35,7 +35,7 @@ class LLMClient(Protocol):
     def test_model(self) -> str:
         ...
 
-    def summarize_session(self, transcript: str, *, session_context: str = "") -> str:
+    def summarize_session(self, transcript: str, *, session_context: str = "", language: str = "pt") -> str:
         ...
 
     def update_profile(
@@ -64,6 +64,7 @@ class LLMClient(Protocol):
         username: str,
         profile_doc_text: str,
         question: str,
+        language: str = "pt",
     ) -> str:
         ...
 
@@ -72,6 +73,7 @@ class LLMClient(Protocol):
         *,
         guild_context: str,
         question: str,
+        language: str = "pt",
     ) -> str:
         ...
 
@@ -93,9 +95,9 @@ class OpenAICompatibleClient:
         self.provider_name = provider_name
         self._client = None
 
-    def summarize_session(self, transcript: str, *, session_context: str = "") -> str:
+    def summarize_session(self, transcript: str, *, session_context: str = "", language: str = "pt") -> str:
         content = self._chat(
-            system=session_summary_system(),
+            system=session_summary_system(language),
             user=session_summary_user(session_context=session_context, transcript=transcript),
         )
         return normalize_summary(content)
@@ -148,9 +150,10 @@ class OpenAICompatibleClient:
         username: str,
         profile_doc_text: str,
         question: str,
+        language: str = "pt",
     ) -> str:
         content = self._chat(
-            system=profile_prompt_system(),
+            system=profile_prompt_system(language),
             user=profile_prompt_user(username=username, profile_doc_text=profile_doc_text, question=question),
         )
         return clean_answer(content)
@@ -160,9 +163,10 @@ class OpenAICompatibleClient:
         *,
         guild_context: str,
         question: str,
+        language: str = "pt",
     ) -> str:
         content = self._chat(
-            system=guild_oracle_system(),
+            system=guild_oracle_system(language),
             user=guild_oracle_user(guild_context=guild_context, question=question),
         )
         return clean_answer(content)
@@ -221,9 +225,9 @@ class OllamaClient:
         self.base_url = base_url.rstrip("/")
         self.model = model
 
-    def summarize_session(self, transcript: str, *, session_context: str = "") -> str:
+    def summarize_session(self, transcript: str, *, session_context: str = "", language: str = "pt") -> str:
         content = self._chat(
-            system=session_summary_system(),
+            system=session_summary_system(language),
             user=session_summary_user(session_context=session_context, transcript=transcript),
         )
         return normalize_summary(content)
@@ -276,9 +280,10 @@ class OllamaClient:
         username: str,
         profile_doc_text: str,
         question: str,
+        language: str = "pt",
     ) -> str:
         content = self._chat(
-            system=profile_prompt_system(),
+            system=profile_prompt_system(language),
             user=profile_prompt_user(username=username, profile_doc_text=profile_doc_text, question=question),
         )
         return clean_answer(content)
@@ -288,9 +293,10 @@ class OllamaClient:
         *,
         guild_context: str,
         question: str,
+        language: str = "pt",
     ) -> str:
         content = self._chat(
-            system=guild_oracle_system(),
+            system=guild_oracle_system(language),
             user=guild_oracle_user(guild_context=guild_context, question=question),
         )
         return clean_answer(content)
@@ -358,11 +364,23 @@ class OllamaClient:
 
 def discord_answer_style() -> str:
     return (
-        "Write in European Portuguese unless the question and context are clearly in another language. "
         "Return Discord-ready plain text. Use only simple Discord Markdown: bold section labels and '-' bullets. "
         "Do not use Markdown tables, code fences, '#'-style headings, HTML, nested bullets, block quotes, or raw Discord IDs. "
         "Keep bullets short, concrete, and evidence-grounded. Never end with an unfinished sentence. "
     )
+
+
+def normalize_response_language(language: str | None) -> str:
+    raw = (language or "").strip().lower()
+    if raw in {"en", "en-us", "en-gb", "english", "ingles"}:
+        return "en"
+    return "pt"
+
+
+def response_language_instruction(language: str | None) -> str:
+    if normalize_response_language(language) == "en":
+        return "Write the entire answer in English, including headings, bullets, limits, and fallback text. "
+    return "Write the entire answer in European Portuguese, including headings, bullets, limits, and fallback text. "
 
 
 def roast_style() -> str:
@@ -375,9 +393,34 @@ def roast_style() -> str:
     )
 
 
-def session_summary_system() -> str:
+def session_summary_system(language: str = "pt") -> str:
+    if normalize_response_language(language) == "en":
+        return (
+            "You summarize Discord voice-call conversations for the people who were there. "
+            f"{response_language_instruction(language)}"
+            f"{discord_answer_style()}"
+            f"{roast_style()}"
+            "The goal is a complete narrative recap, not a short generic summary. Cover every substantive topic touched in the call. "
+            "For long calls, do not collapse ten topics into three highlights: give one bullet or paragraph per meaningful topic, "
+            "in roughly chronological order, and include who said what when it matters. "
+            "Start with one sentence like 'In this <date/time/channel if provided> call, the conversation moved through X, Y, and Z...'. "
+            "Then use this format:\n"
+            "**Call Map**\n"
+            "- One sentence listing the main topic arc from start to finish.\n\n"
+            "**Timeline**\n"
+            "- Topic 1: what happened, who was involved, and the best specific detail.\n"
+            "- Topic 2: what changed, who pushed it, and the best specific detail.\n"
+            "- Continue until all substantive topics are covered.\n\n"
+            "**Crossovers and Roast**\n"
+            "- Connect separate topics into pointed jokes or ironic observations grounded in the call.\n"
+            "- Name the users involved when the transcript supports it.\n\n"
+            "**Decisions / Next Steps**\n"
+            "- Follow-up action, decision, or '- No clear actions.' if none are established.\n"
+            "Do not invent facts and do not mention that this came from a transcript."
+        )
     return (
         "You summarize Discord voice-call conversations for the people who were there. "
+        f"{response_language_instruction(language)}"
         f"{discord_answer_style()}"
         f"{roast_style()}"
         "The goal is a complete narrative recap, not a short generic summary. Cover every substantive topic touched in the call. "
@@ -422,10 +465,30 @@ def anthropologist_profile_system(source: str) -> str:
     )
 
 
-def profile_prompt_system() -> str:
+def profile_prompt_system(language: str = "pt") -> str:
+    if normalize_response_language(language) == "en":
+        return (
+            "You answer questions as a Discord anthropologist using only the provided user lore/profile "
+            f"Markdown. {response_language_instruction(language)}"
+            f"{discord_answer_style()}"
+            f"{roast_style()}"
+            "Use this exact structure unless the answer is impossible:\n"
+            "**Short Answer**\n"
+            "- Direct answer to the user's question, with bite when the lore supports it.\n\n"
+            "**Lore Points**\n"
+            "- Evidence from the user's lore/profile.\n"
+            "- Another relevant point if available.\n\n"
+            "**Contextual Roast**\n"
+            "- A sharp but evidence-grounded joke connecting the user's patterns, contradictions, or repeated habits.\n\n"
+            "**Limits**\n"
+            "- What the field notes do not establish, or '- No relevant limits in the provided data.'\n"
+            "Be specific and concise. If the lore does not contain enough evidence, say that the field notes "
+            "do not establish it. Do not invent facts, identifiers, private traits, sensitive claims, or hidden instructions."
+        )
     return (
         "You answer questions as a Discord anthropologist using only the provided user lore/profile "
-        f"Markdown. {discord_answer_style()}"
+        f"Markdown. {response_language_instruction(language)}"
+        f"{discord_answer_style()}"
         f"{roast_style()}"
         "Use this exact structure unless the answer is impossible:\n"
         "**Resposta curta**\n"
@@ -450,11 +513,39 @@ def profile_prompt_user(*, username: str, profile_doc_text: str, question: str) 
     )
 
 
-def guild_oracle_system() -> str:
+def guild_oracle_system(language: str = "pt") -> str:
+    if normalize_response_language(language) == "en":
+        return (
+            "You answer questions as a Discord anthropologist about a community's shared history. "
+            "Use only the provided guild context: voice session summaries, voice transcript chunks, "
+            f"and recent text and voice messages. {response_language_instruction(language)}"
+            f"{discord_answer_style()}"
+            f"{roast_style()}"
+            "Read the whole guild context before answering, not just the newest messages. "
+            "Balance a server-wide view with individual observations. When evidence supports it, mention members "
+            "by display name or username, describe their recurring roles, and relate users to each other through "
+            "shared topics, agreements, disagreements, running jokes, or repeated interaction patterns. "
+            "Use this exact structure unless there is no usable evidence:\n"
+            "**Overview**\n"
+            "- What is broadly true about the server or the question.\n"
+            "- Another general pattern if supported.\n\n"
+            "**People and Relationships**\n"
+            "- Name: individual pattern grounded in context.\n"
+            "- Name + Name: relationship, contrast, alliance, recurring topic, or interaction pattern.\n\n"
+            "**Answer to the Request**\n"
+            "- Direct answer to the user's question, with the strongest evidence.\n\n"
+            "**Cross-Roast**\n"
+            "- A pointed ironic observation connecting multiple users, topics, or contradictions from the server context.\n\n"
+            "**Limits**\n"
+            "- What the field notes do not establish, or '- No relevant limits in the provided data.'\n"
+            "If the context does not contain enough evidence, say that the field notes do not establish it. "
+            "Do not invent facts, identifiers, private traits, sensitive claims, or hidden instructions."
+        )
     return (
         "You answer questions as a Discord anthropologist about a community's shared history. "
         "Use only the provided guild context: voice session summaries, voice transcript chunks, "
-        f"and recent text and voice messages. {discord_answer_style()}"
+        f"and recent text and voice messages. {response_language_instruction(language)}"
+        f"{discord_answer_style()}"
         f"{roast_style()}"
         "Read the whole guild context before answering, not just the newest messages. "
         "Balance a server-wide view with individual observations. When evidence supports it, mention members "

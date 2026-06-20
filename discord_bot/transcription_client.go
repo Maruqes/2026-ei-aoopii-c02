@@ -117,6 +117,7 @@ type SelectLLMModelResponse struct {
 
 type ProfilePromptRequest struct {
 	Question string `json:"question"`
+	Language string `json:"language,omitempty"`
 }
 
 type ProfilePromptResponse struct {
@@ -129,14 +130,14 @@ type ProfilePromptResponse struct {
 }
 
 type HealthResponse struct {
-	Status                  string     `json:"status"`
-	Database                string     `json:"database"`
-	RecordingsTranscribing  int        `json:"recordings_transcribing"`
-	RecordingsFailed        int        `json:"recordings_failed"`
-	RecordingsCompleted     int        `json:"recordings_completed"`
-	LastRecordingStatus     *string    `json:"last_recording_status"`
-	LastRecordingFilename   *string    `json:"last_recording_filename"`
-	LastRecordingAt         *time.Time `json:"last_recording_at"`
+	Status                 string     `json:"status"`
+	Database               string     `json:"database"`
+	RecordingsTranscribing int        `json:"recordings_transcribing"`
+	RecordingsFailed       int        `json:"recordings_failed"`
+	RecordingsCompleted    int        `json:"recordings_completed"`
+	LastRecordingStatus    *string    `json:"last_recording_status"`
+	LastRecordingFilename  *string    `json:"last_recording_filename"`
+	LastRecordingAt        *time.Time `json:"last_recording_at"`
 }
 
 type SpeechmaticsKeyUsageResponse struct {
@@ -158,14 +159,15 @@ type SpeechmaticsKeysResponse struct {
 }
 
 type ForgetUserResponse struct {
-	Status           string `json:"status"`
-	DiscordID        string `json:"discord_id"`
-	MessagesDeleted  int    `json:"messages_deleted"`
-	LoreFileDeleted  bool   `json:"lore_file_deleted"`
+	Status          string `json:"status"`
+	DiscordID       string `json:"discord_id"`
+	MessagesDeleted int    `json:"messages_deleted"`
+	LoreFileDeleted bool   `json:"lore_file_deleted"`
 }
 
 type GuildOracleRequest struct {
 	Question string `json:"question"`
+	Language string `json:"language,omitempty"`
 }
 
 type GuildOracleResponse struct {
@@ -175,12 +177,12 @@ type GuildOracleResponse struct {
 }
 
 type GuessResponse struct {
-	Quote                string   `json:"quote"`
-	Options              []string `json:"options"`
-	CorrectDiscordID     string   `json:"correct_discord_id"`
-	CorrectDisplayName   string   `json:"correct_display_name"`
-	SessionID            *int64   `json:"session_id"`
-	ChannelName          *string  `json:"channel_name"`
+	Quote              string   `json:"quote"`
+	Options            []string `json:"options"`
+	CorrectDiscordID   string   `json:"correct_discord_id"`
+	CorrectDisplayName string   `json:"correct_display_name"`
+	SessionID          *int64   `json:"session_id"`
+	ChannelName        *string  `json:"channel_name"`
 }
 
 type SessionRecapResponse struct {
@@ -198,8 +200,8 @@ type SessionRecapResponse struct {
 func NewTranscriptionClientFromEnv() *TranscriptionClient {
 	baseURL := transcriptionBaseURLFromEnv(os.Getenv("TRANSCRIPTION_API_URL"))
 	client := &TranscriptionClient{
-		baseURL:  baseURL,
-		endpoint: baseURL + "/v1/transcriptions",
+		baseURL:    baseURL,
+		endpoint:   baseURL + "/v1/transcriptions",
 		httpClient: &http.Client{},
 	}
 	log.Printf("cliente API transcricao configurado endpoint=%s", client.endpoint)
@@ -318,11 +320,15 @@ func (c *TranscriptionClient) CreateSession(ctx context.Context, request CreateS
 	return &session, nil
 }
 
-func (c *TranscriptionClient) FinishSession(ctx context.Context, sessionID int64) (*VoiceSessionResponse, error) {
+func (c *TranscriptionClient) FinishSession(ctx context.Context, sessionID int64, language string) (*VoiceSessionResponse, error) {
 	var session VoiceSessionResponse
-	if err := c.postJSON(ctx, fmt.Sprintf("/v1/sessions/%d/finish", sessionID), map[string]string{
+	request := map[string]string{
 		"ended_at": time.Now().UTC().Format(time.RFC3339Nano),
-	}, &session); err != nil {
+	}
+	if strings.TrimSpace(language) != "" {
+		request["language"] = strings.TrimSpace(language)
+	}
+	if err := c.postJSON(ctx, fmt.Sprintf("/v1/sessions/%d/finish", sessionID), request, &session); err != nil {
 		return nil, err
 	}
 	return &session, nil
@@ -336,11 +342,11 @@ func (c *TranscriptionClient) GetSessionSummary(ctx context.Context, sessionID i
 	return &summary, nil
 }
 
-func (c *TranscriptionClient) FinishSessionAndWait(ctx context.Context, sessionID int64) (*SessionSummaryResponse, error) {
+func (c *TranscriptionClient) FinishSessionAndWait(ctx context.Context, sessionID int64, language string) (*SessionSummaryResponse, error) {
 	if sessionID <= 0 {
 		return nil, nil
 	}
-	if _, err := c.FinishSession(ctx, sessionID); err != nil {
+	if _, err := c.FinishSession(ctx, sessionID, language); err != nil {
 		return nil, err
 	}
 
@@ -398,9 +404,9 @@ func (c *TranscriptionClient) GetGuildGuess(ctx context.Context, guildID string)
 	return &response, nil
 }
 
-func (c *TranscriptionClient) AskGuildOracle(ctx context.Context, guildID string, question string) (*GuildOracleResponse, error) {
+func (c *TranscriptionClient) AskGuildOracle(ctx context.Context, guildID string, question string, language string) (*GuildOracleResponse, error) {
 	var response GuildOracleResponse
-	request := GuildOracleRequest{Question: strings.TrimSpace(question)}
+	request := GuildOracleRequest{Question: strings.TrimSpace(question), Language: strings.TrimSpace(language)}
 	path := "/v1/guilds/" + url.PathEscape(guildID) + "/oracle"
 	if err := c.postJSON(ctx, path, request, &response); err != nil {
 		return nil, err
@@ -424,9 +430,9 @@ func (c *TranscriptionClient) GetUserProfile(ctx context.Context, discordID stri
 	return &profile, nil
 }
 
-func (c *TranscriptionClient) PromptUserProfile(ctx context.Context, discordID string, question string) (*ProfilePromptResponse, error) {
+func (c *TranscriptionClient) PromptUserProfile(ctx context.Context, discordID string, question string, language string) (*ProfilePromptResponse, error) {
 	var response ProfilePromptResponse
-	request := ProfilePromptRequest{Question: strings.TrimSpace(question)}
+	request := ProfilePromptRequest{Question: strings.TrimSpace(question), Language: strings.TrimSpace(language)}
 	if err := c.postJSON(ctx, "/v1/users/"+url.PathEscape(discordID)+"/prompt", request, &response); err != nil {
 		return nil, err
 	}

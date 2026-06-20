@@ -23,7 +23,7 @@ class SessionAgent:
         self.llm = llm
         self.docs = docs
 
-    def run_for_session(self, session_id: int) -> str:
+    def run_for_session(self, session_id: int, *, language: str = "pt") -> str:
         session = self.repository.get_voice_session(session_id)
         observation_context = f"Voice session in {session.channel_name}" if session else "Voice session"
         messages = self.repository.get_session_messages(session_id)
@@ -33,7 +33,11 @@ class SessionAgent:
             self.repository.mark_session_agent_done(session_id, summary)
             return summary
 
-        summary = self.llm.summarize_session(transcript, session_context=format_session_context(session))
+        summary = self.llm.summarize_session(
+            transcript,
+            session_context=format_session_context(session),
+            language=language,
+        )
         participants = self.repository.get_session_participants(session_id)
         for participant in participants:
             try:
