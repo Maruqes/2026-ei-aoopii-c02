@@ -855,6 +855,8 @@ func finishSessionAndPostSummary(s *discordgo.Session, state *voiceConnectionSta
 		return
 	}
 
+	checkAndSendSpeechmaticsUsageAlerts(s, state.summaryChannelID, state.transcriptionClient, lang)
+
 	summaryText := strings.TrimSpace(stringValue(summary.Summary))
 	if summary.Status == "agent_failed" {
 		errText := strings.TrimSpace(stringValue(summary.AgentError))
