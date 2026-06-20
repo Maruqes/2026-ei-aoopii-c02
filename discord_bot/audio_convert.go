@@ -461,13 +461,14 @@ func ListenAndWriteOpusToWAV(
 			recoveredPCM := []int16(nil)
 			silenceFrames := plan.timestampGapFrames
 			if recording != nil && plan.missingPackets > 0 && plan.timestampGapFrames > 0 {
-				recoveredPCM, silenceFrames, err = recoverMissingOpusAudio(
+				var recoverErr error
+				recoveredPCM, silenceFrames, recoverErr = recoverMissingOpusAudio(
 					dec,
 					packet.Opus,
 					plan.missingPackets,
 					plan.timestampGapFrames,
 				)
-				if err != nil {
+				if recoverErr != nil {
 					log.Printf(
 						"erro a recuperar perda RTP user=%s ssrc=%d sequence=%d missing=%d gap_frames=%d: %v",
 						discordID,
@@ -475,7 +476,7 @@ func ListenAndWriteOpusToWAV(
 						packet.Sequence,
 						plan.missingPackets,
 						plan.timestampGapFrames,
-						err,
+						recoverErr,
 					)
 					recoveredPCM = nil
 					silenceFrames = plan.timestampGapFrames
