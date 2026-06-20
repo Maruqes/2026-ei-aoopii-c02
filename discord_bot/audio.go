@@ -358,7 +358,7 @@ func voiceConnectionStatus() string {
 
 func voiceConnectionStatusForLanguage(lang botLanguage) string {
 	if !isBotEnabled() {
-		return textForLanguage(lang, "pausado (/comecar para reativar)", "paused (/start to reactivate)")
+		return textForLanguage(lang, "pausado (/start para reativar)", "paused (/start to reactivate)")
 	}
 
 	voiceMu.Lock()

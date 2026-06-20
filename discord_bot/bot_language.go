@@ -76,28 +76,28 @@ func textForLanguage(lang botLanguage, pt string, en string) string {
 
 var commandNames = map[string]map[botLanguage]string{
 	"ping":     {botLanguagePT: "ping", botLanguageEN: "ping"},
-	"start":    {botLanguagePT: "comecar", botLanguageEN: "start"},
-	"stop":     {botLanguagePT: "parar", botLanguageEN: "stop"},
-	"profile":  {botLanguagePT: "perfil", botLanguageEN: "profile"},
-	"prompt":   {botLanguagePT: "perguntar", botLanguageEN: "prompt"},
-	"sync":     {botLanguagePT: "sincronizar", botLanguageEN: "sync"},
-	"models":   {botLanguagePT: "modelos", botLanguageEN: "models"},
-	"health":   {botLanguagePT: "estado", botLanguageEN: "health"},
-	"keys":     {botLanguagePT: "chaves", botLanguageEN: "keys"},
-	"forget":   {botLanguagePT: "esquecer", botLanguageEN: "forget"},
-	"timeout":  {botLanguagePT: "temporizador", botLanguageEN: "timeout"},
-	"recap":    {botLanguagePT: "resumo", botLanguageEN: "recap"},
-	"oracle":   {botLanguagePT: "oraculo", botLanguageEN: "oracle"},
-	"guess":    {botLanguagePT: "adivinhar", botLanguageEN: "guess"},
-	"language": {botLanguagePT: "idioma", botLanguageEN: "language"},
+	"start":    {botLanguagePT: "start", botLanguageEN: "start"},
+	"stop":     {botLanguagePT: "stop", botLanguageEN: "stop"},
+	"profile":  {botLanguagePT: "profile", botLanguageEN: "profile"},
+	"prompt":   {botLanguagePT: "prompt", botLanguageEN: "prompt"},
+	"sync":     {botLanguagePT: "sync", botLanguageEN: "sync"},
+	"models":   {botLanguagePT: "models", botLanguageEN: "models"},
+	"health":   {botLanguagePT: "health", botLanguageEN: "health"},
+	"keys":     {botLanguagePT: "keys", botLanguageEN: "keys"},
+	"forget":   {botLanguagePT: "forget", botLanguageEN: "forget"},
+	"timeout":  {botLanguagePT: "timeout", botLanguageEN: "timeout"},
+	"recap":    {botLanguagePT: "recap", botLanguageEN: "recap"},
+	"oracle":   {botLanguagePT: "oracle", botLanguageEN: "oracle"},
+	"guess":    {botLanguagePT: "guess", botLanguageEN: "guess"},
+	"language": {botLanguagePT: "language", botLanguageEN: "language"},
 }
 
 var optionNames = map[string]map[botLanguage]string{
-	"user":     {botLanguagePT: "utilizador", botLanguageEN: "user"},
-	"question": {botLanguagePT: "pergunta", botLanguageEN: "question"},
-	"minutes":  {botLanguagePT: "minutos", botLanguageEN: "minutes"},
-	"session":  {botLanguagePT: "sessao", botLanguageEN: "session"},
-	"language": {botLanguagePT: "idioma", botLanguageEN: "language"},
+	"user":     {botLanguagePT: "user", botLanguageEN: "user"},
+	"question": {botLanguagePT: "question", botLanguageEN: "question"},
+	"minutes":  {botLanguagePT: "minutes", botLanguageEN: "minutes"},
+	"session":  {botLanguagePT: "session", botLanguageEN: "session"},
+	"language": {botLanguagePT: "language", botLanguageEN: "language"},
 }
 
 func commandName(lang botLanguage, key string) string {
@@ -139,11 +139,11 @@ func optionMatches(name string, key string) bool {
 }
 
 func buildApplicationCommands(lang botLanguage) []*discordgo.ApplicationCommand {
-	opt := func(key string, optionType discordgo.ApplicationCommandOptionType, ptDescription string, enDescription string, required bool) *discordgo.ApplicationCommandOption {
+	opt := func(key string, optionType discordgo.ApplicationCommandOptionType, enDescription string, required bool) *discordgo.ApplicationCommandOption {
 		return &discordgo.ApplicationCommandOption{
 			Type:        optionType,
 			Name:        optionName(lang, key),
-			Description: textForLanguage(lang, ptDescription, enDescription),
+			Description: enDescription,
 			Required:    required,
 		}
 	}
@@ -151,62 +151,62 @@ func buildApplicationCommands(lang botLanguage) []*discordgo.ApplicationCommand 
 	return []*discordgo.ApplicationCommand{
 		{
 			Name:        commandName(lang, "ping"),
-			Description: textForLanguage(lang, "Responde com PONG!", "Replies with PONG!"),
+			Description: "Replies with PONG!",
 		},
 		{
 			Name:        commandName(lang, "start"),
-			Description: textForLanguage(lang, "Reativa o comportamento normal do bot.", "Restores the bot's normal behavior."),
+			Description: "Restores the bot's normal behavior.",
 		},
 		{
 			Name:        commandName(lang, "stop"),
-			Description: textForLanguage(lang, "Pausa o bot, sai das calls e bloqueia novas entradas.", "Pauses the bot, leaves calls, and blocks new joins."),
+			Description: "Pauses the bot, leaves calls, and blocks new joins.",
 		},
 		{
 			Name:        commandName(lang, "profile"),
-			Description: textForLanguage(lang, "Mostra o perfil gerado de um utilizador.", "Shows a generated user profile."),
+			Description: "Shows a generated user profile.",
 			Options: []*discordgo.ApplicationCommandOption{
-				opt("user", discordgo.ApplicationCommandOptionUser, "Utilizador a consultar. Se vazio, usa quem chamou o comando.", "User to inspect. If empty, uses the caller.", false),
+				opt("user", discordgo.ApplicationCommandOptionUser, "User to inspect. If empty, uses the caller.", false),
 			},
 		},
 		{
 			Name:        commandName(lang, "prompt"),
-			Description: textForLanguage(lang, "Faz uma pergunta ao antropologo sobre a lore de um utilizador.", "Asks the anthropologist about a user's lore."),
+			Description: "Asks the anthropologist about a user's lore.",
 			Options: []*discordgo.ApplicationCommandOption{
-				opt("user", discordgo.ApplicationCommandOptionUser, "Utilizador cuja lore deve ser consultada.", "User whose lore should be consulted.", true),
-				opt("question", discordgo.ApplicationCommandOptionString, "Pergunta a responder com base no ficheiro de lore do utilizador.", "Question to answer from the user's lore file.", true),
+				opt("user", discordgo.ApplicationCommandOptionUser, "User whose lore should be consulted.", true),
+				opt("question", discordgo.ApplicationCommandOptionString, "Question to answer from the user's lore file.", true),
 			},
 		},
 		{
 			Name:        commandName(lang, "sync"),
-			Description: textForLanguage(lang, "Forca a sincronizacao dos perfis com as mensagens de texto guardadas.", "Forces profile synchronization from stored text messages."),
+			Description: "Forces profile synchronization from stored text messages.",
 		},
 		{
 			Name:        commandName(lang, "models"),
-			Description: textForLanguage(lang, "Lista e permite alterar o modelo LLM ativo.", "Lists and changes the active LLM model."),
+			Description: "Lists and changes the active LLM model.",
 		},
 		{
 			Name:        commandName(lang, "health"),
-			Description: textForLanguage(lang, "Verifica API, Postgres e estado das transcricoes.", "Checks the API, Postgres, and transcription status."),
+			Description: "Checks the API, Postgres, and transcription status.",
 		},
 		{
 			Name:        commandName(lang, "keys"),
-			Description: textForLanguage(lang, "Mostra o uso das chaves API Speechmatics.", "Shows Speechmatics API key usage."),
+			Description: "Shows Speechmatics API key usage.",
 		},
 		{
 			Name:        commandName(lang, "forget"),
-			Description: textForLanguage(lang, "Apaga mensagens, perfil e lore de um utilizador.", "Deletes a user's messages, profile, and lore."),
+			Description: "Deletes a user's messages, profile, and lore.",
 			Options: []*discordgo.ApplicationCommandOption{
-				opt("user", discordgo.ApplicationCommandOptionUser, "Utilizador a apagar da base de dados.", "User to delete from the database.", true),
+				opt("user", discordgo.ApplicationCommandOptionUser, "User to delete from the database.", true),
 			},
 		},
 		{
 			Name:        commandName(lang, "timeout"),
-			Description: textForLanguage(lang, "Configura minutos antes de sair da call (BOT_LEAVE). 0 desativa.", "Sets minutes before leaving the call (BOT_LEAVE). 0 disables it."),
+			Description: "Sets minutes before leaving the call (BOT_LEAVE). 0 disables it.",
 			Options: []*discordgo.ApplicationCommandOption{
 				{
 					Type:        discordgo.ApplicationCommandOptionInteger,
 					Name:        optionName(lang, "minutes"),
-					Description: textForLanguage(lang, "Minutos na call antes de sair e processar. 0 = sem limite.", "Minutes in the call before leaving and processing. 0 = no limit."),
+					Description: "Minutes in the call before leaving and processing. 0 = no limit.",
 					Required:    true,
 					MinValue:    float64Pointer(0),
 					MaxValue:    24 * 60,
@@ -215,12 +215,12 @@ func buildApplicationCommands(lang botLanguage) []*discordgo.ApplicationCommand 
 		},
 		{
 			Name:        commandName(lang, "recap"),
-			Description: textForLanguage(lang, "Mostra o resumo da ultima sessao de voz do servidor.", "Shows the server's latest voice session recap."),
+			Description: "Shows the server's latest voice session recap.",
 			Options: []*discordgo.ApplicationCommandOption{
 				{
 					Type:        discordgo.ApplicationCommandOptionInteger,
 					Name:        optionName(lang, "session"),
-					Description: textForLanguage(lang, "ID da sessao. Se vazio, usa a mais recente.", "Session ID. If empty, uses the latest one."),
+					Description: "Session ID. If empty, uses the latest one.",
 					Required:    false,
 					MinValue:    float64Pointer(1),
 				},
@@ -228,26 +228,26 @@ func buildApplicationCommands(lang botLanguage) []*discordgo.ApplicationCommand 
 		},
 		{
 			Name:        commandName(lang, "oracle"),
-			Description: textForLanguage(lang, "Pergunta ao antropologo sobre a historia do grupo.", "Asks the anthropologist about the group's history."),
+			Description: "Asks the anthropologist about the group's history.",
 			Options: []*discordgo.ApplicationCommandOption{
-				opt("question", discordgo.ApplicationCommandOptionString, "Pergunta sobre decisoes, topicos ou lore do servidor.", "Question about decisions, topics, or server lore.", true),
+				opt("question", discordgo.ApplicationCommandOptionString, "Question about decisions, topics, or server lore.", true),
 			},
 		},
 		{
 			Name:        commandName(lang, "guess"),
-			Description: textForLanguage(lang, "Mini-jogo: adivinha quem disse uma frase da call.", "Mini-game: guess who said a voice-call quote."),
+			Description: "Mini-game: guess who said a voice-call quote.",
 		},
 		{
 			Name:        commandName(lang, "language"),
-			Description: textForLanguage(lang, "Muda a lingua global do bot.", "Changes the bot's global language."),
+			Description: "Changes the bot's response language.",
 			Options: []*discordgo.ApplicationCommandOption{
 				{
 					Type:        discordgo.ApplicationCommandOptionString,
 					Name:        optionName(lang, "language"),
-					Description: textForLanguage(lang, "Lingua usada em todos os comandos e respostas do bot.", "Language used for all bot commands and replies."),
+					Description: "Language used for bot replies.",
 					Required:    true,
 					Choices: []*discordgo.ApplicationCommandOptionChoice{
-						{Name: textForLanguage(lang, "Portugues", "Portuguese"), Value: string(botLanguagePT)},
+						{Name: "Portuguese", Value: string(botLanguagePT)},
 						{Name: "English", Value: string(botLanguageEN)},
 					},
 				},

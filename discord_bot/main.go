@@ -147,7 +147,7 @@ func stopHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	setBotEnabled(false)
 	stopAllVoiceConnections()
 	respondText(s, i, botText(
-		"Bot pausado. Sai de todas as calls e nao vou entrar em novas calls ate /comecar.",
+		"Bot pausado. Sai de todas as calls e nao vou entrar em novas calls ate /start.",
 		"Bot paused. I left all calls and will not join new calls until /start.",
 	))
 }
