@@ -57,6 +57,7 @@ from .speechmatics_usage import (
     SpeechmaticsKeyUsage,
     fetch_speechmatics_key_usages,
     format_speechmatics_key_usage,
+    speechmatics_key_usage_score,
 )
 from .transcriber import (
     SpeechmaticsTranscriber,
@@ -605,13 +606,6 @@ def speechmatics_key_usage_response(row: SpeechmaticsKeyUsage) -> SpeechmaticsKe
         until=row.usage.until or None,
         error=row.error,
     )
-
-
-def speechmatics_key_usage_score(row: SpeechmaticsKeyUsage) -> tuple[float, float, str]:
-    if row.usage is None:
-        return (float("inf"), float("inf"), row.key.name)
-    percent = row.usage.percent_used if row.usage.percent_used is not None else row.usage.used_hours
-    return (percent, row.usage.used_hours, row.key.name)
 
 
 def get_llm_client(settings: Settings = Depends(get_settings)) -> LLMClient:

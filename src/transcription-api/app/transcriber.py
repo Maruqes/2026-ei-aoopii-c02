@@ -376,7 +376,7 @@ class SpeechmaticsTranscriber:
             self.language,
         )
         selected_key = self._select_api_key()
-        return asyncio.run(self._transcribe(audio_path, selected_key.value))
+        return asyncio.run(self._transcribe(audio_path, selected_key))
 
     def _select_api_key(self) -> SpeechmaticsAPIKey:
         if len(self.api_keys) == 1:
@@ -391,7 +391,7 @@ class SpeechmaticsTranscriber:
         logger.info("speechmatics api key selected %s", format_speechmatics_key_usage(selected))
         return selected.key
 
-    async def _transcribe(self, audio_path: Path, api_key: str) -> TranscriptionResult:
+    async def _transcribe(self, audio_path: Path, api_key: SpeechmaticsAPIKey) -> TranscriptionResult:
         from speechmatics.batch import AsyncClient, Transcript, TranscriptionConfig
 
         client_factory = self._client_factory or AsyncClient
@@ -401,7 +401,8 @@ class SpeechmaticsTranscriber:
             additional_vocab=[{"content": term} for term in self.additional_vocab] or None,
         )
 
-        async with client_factory(api_key=api_key, url=self.batch_url) as client:
+        logger.info("speechmatics batch client opening key=%s", api_key.name)
+        async with client_factory(api_key=api_key.value, url=self.batch_url) as client:
             transcript = await client.transcribe(
                 str(audio_path),
                 transcription_config=config,

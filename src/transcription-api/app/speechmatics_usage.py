@@ -89,7 +89,7 @@ def select_speechmatics_api_key(
     if not available:
         errors = "; ".join(f"{row.key.name}: {row.error}" for row in rows if row.error)
         raise RuntimeError(f"no Speechmatics API key usage available: {errors or 'no keys configured'}")
-    return min(available, key=_key_usage_score)
+    return min(available, key=speechmatics_key_usage_score)
 
 
 def parse_speechmatics_usage(payload: dict[str, Any], *, limit_hours: float = 50.0) -> SpeechmaticsUsage:
@@ -147,7 +147,7 @@ def format_speechmatics_key_usage(row: SpeechmaticsKeyUsage) -> str:
     return f"{row.key.name}: {_format_hours(usage.used_hours)} jobs={usage.job_count}"
 
 
-def _key_usage_score(row: SpeechmaticsKeyUsage) -> tuple[float, float, str]:
+def speechmatics_key_usage_score(row: SpeechmaticsKeyUsage) -> tuple[float, float, str]:
     if row.usage is None:
         return (float("inf"), float("inf"), row.key.name)
     percent = row.usage.percent_used if row.usage.percent_used is not None else row.usage.used_hours
