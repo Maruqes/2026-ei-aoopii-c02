@@ -51,6 +51,8 @@ ChatGPT diretamente para este projeto.
 O login funciona mesmo com a API parada. O callback escuta apenas em
 `127.0.0.1:1455`; não há página de administração na porta 8000. O container de
 login usa a rede do host em Linux, e termina quando o login acaba ou é cancelado.
+O `make codex` usa a porta 1455 por omissão, mesmo que o `.env` ainda tenha um
+`CHATGPT_REDIRECT_URI` antigo. Escolhe outra porta com `CODEX_ARGS="--port 1456"`.
 
 As credenciais ficam em `/app/.tmp/state/chatgpt/auth.json`, no volume
 `api_state`, partilhado com a API. A sessão renova-se automaticamente. O ficheiro
@@ -78,6 +80,11 @@ Numa VM sem ambiente gráfico, o comando imprime o link. Copia-o para o navegado
 do teu computador e faz login. O navegador regressa a `127.0.0.1:1455`, e o túnel
 encaminha o callback para o processo de login na VM. Mantém o `make codex` ativo
 até aparecer a confirmação; depois podes fechar o túnel.
+
+São dois processos simultâneos: o túnel no teu computador e o `make codex` na
+VM. Não feches o login para abrir o túnel. Se o `make codex` correr no teu
+computador, as credenciais ficam no Docker desse computador; o túnel para a VM
+não leva o callback a esse processo.
 
 Se a porta estiver ocupada, usa a mesma porta dos dois lados, por exemplo:
 
@@ -154,6 +161,7 @@ acesso e consultar os limites em [Utilização ChatGPT](https://chatgpt.com/sett
 | Sintoma | Ação |
 | --- | --- |
 | `channel open failed` no túnel | Executa `make codex` na VM antes de abrir o link; confirma que a porta do túnel coincide com a do callback. |
+| Callback responde na VM mas falha pelo SSH no Fedora 44 | Confirma a versão de `selinux-policy`; a 44.7 tem uma regressão de encaminhamento SSH corrigida na 44.9. Atualiza os pacotes de política como indicado abaixo. |
 | Porta 1455 ocupada | Usa `--port 1456` e o túnel correspondente. |
 | Login expira ou callback inválido | Executa `make codex` novamente e usa o link novo. |
 | `/effort` ainda não aparece | Reconstrói e reinicia o bot para registar o novo comando Discord. |
@@ -161,6 +169,35 @@ acesso e consultar os limites em [Utilização ChatGPT](https://chatgpt.com/sett
 | `No route to host` / falha de DNS | Corrige a conectividade de saída da VM e dos containers. O login pela rede do host não corrige a rede da API. |
 | Limite ChatGPT atingido | Consulta a utilização da conta e aguarda a reposição dos limites. |
 | Sessão expirada ou revogada | Executa `make codex` novamente. |
+
+Com `make codex CODEX_ARGS="--port 1456"` ainda aberto na VM, verifica a escuta
+num segundo terminal da VM:
+
+```bash
+ss -ltn 'sport = :1456'
+curl --max-time 3 -i http://127.0.0.1:1456/auth/callback
+```
+
+É esperado aparecer `LISTEN` e o `curl` receber **HTTP 400** com estado de login
+inválido, pois este pedido de diagnóstico não contém um estado OAuth. Isso
+confirma que o callback está acessível sem consumir a tentativa de login.
+Se a ligação for recusada, o login não está ativo nessa VM/porta. Recomeça com
+`make codex`, mantém o comando aberto e usa o link novo.
+
+No Fedora 44, `selinux-policy-44.7-1.fc44` tem uma
+[regressão conhecida de encaminhamento SSH](https://bugzilla.redhat.com/show_bug.cgi?id=2523732),
+corrigida em `selinux-policy-44.9-1.fc44`. Se o callback responder dentro da VM
+mas o túnel continuar com `connect failed`, verifica e atualiza a política na VM:
+
+```bash
+rpm -q selinux-policy selinux-policy-targeted
+sudo dnf upgrade --refresh selinux-policy selinux-policy-targeted
+```
+
+Depois abre uma nova ligação SSH, volta a iniciar o login e usa o link novo.
+Se continuar a falhar após a atualização, reproduz o erro e consulta os bloqueios
+recentes com `sudo ausearch -m AVC -ts recent -c sshd-session`. Isto permite
+confirmar a causa antes de alterar qualquer configuração de segurança.
 
 O login e as mudanças não foram executados na tua conta durante os testes;
 os testes usam respostas OAuth e de inferência simuladas.

@@ -555,6 +555,51 @@ def test_loopback_callback_requires_process_state_and_saves_login(oauth, capsys)
     assert "sensitive-code" not in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("port,expected_port", [(None, 1455), (1456, 1456)])
+def test_cli_ignores_old_api_callback_and_uses_selected_port(
+    oauth, monkeypatch, port, expected_port
+):
+    settings, auth, _, _, _ = oauth
+    settings = replace(
+        settings, chatgpt_redirect_uri="http://127.0.0.1:8000/auth/callback"
+    )
+    bound = []
+    redirects = []
+    events = []
+
+    class Listener:
+        def __init__(self, address, handler):
+            bound.append(address)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+    def get_auth(selected):
+        redirects.append(selected.chatgpt_redirect_uri)
+        auth.settings = selected
+        return auth
+
+    monkeypatch.setattr(chatgpt_login, "HTTPServer", Listener)
+    monkeypatch.setattr(chatgpt_login, "get_chatgpt_auth", get_auth)
+    args = SimpleNamespace(
+        status=False,
+        logout=False,
+        account=None,
+        port=port,
+        timeout=0,
+        new_account=False,
+    )
+    with pytest.raises(ChatGPTError, match="expirou"):
+        chatgpt_login.run(args, settings=settings, emit=events.append)
+    assert bound == [("127.0.0.1", expected_port)]
+    expected = f"http://127.0.0.1:{expected_port}/auth/callback"
+    assert redirects[-1] == expected
+    assert parse_qs(urlsplit(events[0]["url"]).query)["redirect_uri"] == [expected]
+
+
 def test_cli_status_and_switch_account_without_api(oauth, monkeypatch):
     settings, auth, _, begin, finish = oauth
     finish()

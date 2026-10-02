@@ -90,8 +90,9 @@ def run(args, *, settings=None, emit=None):
             }
         )
         return 0
-    parsed = urlsplit(settings.chatgpt_redirect_uri)
-    port = args.port if args.port is not None else (parsed.port or 1455)
+    # The CLI owns its callback. Old API/panel configuration may still point
+    # at port 8000, where the API no longer provides an OAuth callback.
+    port = args.port if args.port is not None else 1455
     if not 1 <= port <= 65535:
         raise ChatGPTError("Porta de callback inválida.")
     settings = replace(

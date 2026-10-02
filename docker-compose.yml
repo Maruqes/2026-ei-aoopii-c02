@@ -11,7 +11,7 @@ services:
     environment:
       LLM_PROVIDER: chatgpt
       CHATGPT_AUTH_FILE: /app/.tmp/state/chatgpt/auth.json
-      CHATGPT_REDIRECT_URI: ${CHATGPT_REDIRECT_URI:-http://127.0.0.1:1455/auth/callback}
+      CHATGPT_REDIRECT_URI: http://127.0.0.1:1455/auth/callback
       LLM_MODEL_SELECTION_FILE: /app/.tmp/state/llm_model_selection.json
     volumes:
       - api_state:/app/.tmp/state

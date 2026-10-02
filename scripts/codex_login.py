@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import socket
 import subprocess
 import sys
 import webbrowser
@@ -12,6 +13,11 @@ import webbrowser
 def handle_event(event, *, no_browser=False):
     if event.get("event") == "authorize":
         url = event["url"]
+        print(f"Comando executado em: {socket.gethostname()}", flush=True)
+        print(
+            f"Callback de login: http://127.0.0.1:{event['port']}/auth/callback. Mantém este comando aberto até concluir o login.",
+            flush=True,
+        )
         print("Login ChatGPT:\n" + url, flush=True)
         if not no_browser and (
             os.environ.get("DISPLAY")
@@ -22,7 +28,7 @@ def handle_event(event, *, no_browser=False):
                 print("Navegador aberto. Conclui o login para continuar.", flush=True)
                 return
         print(
-            f"Abre o link no teu navegador. Numa VM, encaminha a porta {event['port']} por SSH (ver CHATGPT_SETUP.md).",
+            f"Abre o link no teu navegador. Para uma VM, executa make codex NA VM e encaminha a porta {event['port']} por SSH (ver CHATGPT_SETUP.md).",
             flush=True,
         )
     elif event.get("event") == "status":
