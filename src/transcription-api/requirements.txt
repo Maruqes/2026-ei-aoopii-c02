@@ -6,4 +6,5 @@ openai-whisper
 webrtcvad-wheels
 speechmatics-batch
 openai
+PyJWT[crypto]>=2.10,<3
 httpx

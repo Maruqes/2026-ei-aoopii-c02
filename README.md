@@ -9,6 +9,11 @@ Copy `.env.example` to `.env`, configure Discord and the chosen transcription/LL
 then run `make compose`. Database migrations apply automatically when the API starts.
 For NVIDIA Whisper, set `WHISPER_DEVICE=cuda` before using the Makefile.
 
+To use a ChatGPT account for commands, summaries and profiles, set
+`LLM_PROVIDER=chatgpt` and follow [ChatGPT setup](CHATGPT_SETUP.md).
+The protected `/chatgpt` panel handles login; Discord `/models` lists, tests and
+selects models available to that account. Speech-to-text keeps its own provider.
+
 The bot records voice in short per-member slices, stores text/voice observations in
 Postgres, builds funny but grounded recaps, and maintains living member profiles.
 Use `/digest` to catch up on a text channel, `/recap` for calls, `/oracle` to search the

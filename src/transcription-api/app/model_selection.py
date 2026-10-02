@@ -7,12 +7,13 @@ from pathlib import Path
 
 from .config import Settings
 
-
 _lock = threading.RLock()
 _selected_models: dict[str, str] = {}
 
 
 def configured_model(settings: Settings) -> str:
+    if settings.llm_provider == "chatgpt":
+        return settings.chatgpt_model
     if settings.llm_provider == "ollama":
         return settings.ollama_model
     if settings.llm_provider == "groq":
@@ -41,6 +42,14 @@ def select_model(provider: str, model: str, storage_path: Path | None = None) ->
             _save_selected_models(storage_path, stored_models)
 
 
+def clear_selected_model(provider: str, storage_path: Path) -> None:
+    with _lock:
+        _selected_models.pop(provider, None)
+        stored = _load_selected_models(storage_path)
+        stored.pop(provider, None)
+        _save_selected_models(storage_path, stored)
+
+
 def _load_selected_models(path: Path) -> dict[str, str]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -60,5 +69,7 @@ def _load_selected_models(path: Path) -> dict[str, str]:
 def _save_selected_models(path: Path, models: dict[str, str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f"{path.name}.tmp")
-    tmp_path.write_text(json.dumps(models, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp_path.write_text(
+        json.dumps(models, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     os.replace(tmp_path, path)

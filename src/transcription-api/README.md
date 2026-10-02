@@ -324,6 +324,10 @@ does not leave Discord commands waiting indefinitely.
 
 ## Tests without paid API calls
 
+For ChatGPT account login, model selection and VM setup, see
+[CHATGPT_SETUP.md](../../CHATGPT_SETUP.md). Select `LLM_PROVIDER=chatgpt` to use
+the signed-in account for every LLM feature, including Discord `/models`.
+
 ```bash
 python -m venv .venv
 .venv/bin/pip install -r src/transcription-api/requirements.txt -r src/transcription-api/requirements-dev.txt

@@ -26,6 +26,7 @@ type TranscriptionClient struct {
 	baseURL         string
 	endpoint        string
 	httpClient      *http.Client
+	chatgptAdminKey string
 	submissionMu    sync.Mutex
 	submissions     map[int64]*sessionSubmissions
 	inflight        map[string]bool
@@ -216,9 +217,10 @@ type SessionRecapResponse struct {
 func NewTranscriptionClientFromEnv() *TranscriptionClient {
 	baseURL := transcriptionBaseURLFromEnv(os.Getenv("TRANSCRIPTION_API_URL"))
 	client := &TranscriptionClient{
-		baseURL:    baseURL,
-		endpoint:   baseURL + "/v1/transcriptions",
-		httpClient: &http.Client{Timeout: apiRequestTimeoutFromEnv(os.Getenv("API_REQUEST_TIMEOUT"))},
+		baseURL:         baseURL,
+		endpoint:        baseURL + "/v1/transcriptions",
+		httpClient:      &http.Client{Timeout: apiRequestTimeoutFromEnv(os.Getenv("API_REQUEST_TIMEOUT"))},
+		chatgptAdminKey: strings.TrimSpace(os.Getenv("CHATGPT_ADMIN_PASSWORD")),
 	}
 	log.Printf("cliente API transcricao configurado endpoint=%s", client.endpoint)
 	return client
@@ -577,6 +579,9 @@ func (c *TranscriptionClient) postJSON(ctx context.Context, path string, body an
 		return err
 	}
 	request.Header.Set("Content-Type", "application/json")
+	if path == "/v1/models/current" && c.chatgptAdminKey != "" {
+		request.Header.Set("X-ChatGPT-Admin-Key", c.chatgptAdminKey)
+	}
 	return c.doJSON(request, target)
 }
 

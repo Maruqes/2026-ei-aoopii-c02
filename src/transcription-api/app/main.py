@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Form, HTTPException, status
+from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -28,6 +28,9 @@ from data.repository import (  # noqa: E402
 )
 
 from .agent import SessionAgent
+from .chatgpt_auth import get_chatgpt_auth
+from .chatgpt_llm import ChatGPTClient
+from .chatgpt_routes import register_chatgpt_routes, require_chatgpt_admin
 from .config import Settings
 from .docs_client import LocalMarkdownProfileClient
 from .llm import (
@@ -110,6 +113,7 @@ def create_app() -> FastAPI:
     service = FastAPI(
         title="Discord Anthropologist Transcription API", lifespan=lifespan
     )
+    register_chatgpt_routes(service, get_settings, build_llm_client)
 
     def start_profile_sync() -> None:
         settings = get_settings()
@@ -412,8 +416,11 @@ def create_app() -> FastAPI:
     @service.post("/v1/models/current", response_model=SelectLLMModelResponse)
     def change_llm_model(
         request: SelectLLMModelRequest,
+        http_request: Request,
         settings: Settings = Depends(get_settings),
     ) -> SelectLLMModelResponse:
+        if settings.llm_provider == "chatgpt":
+            require_chatgpt_admin(http_request, settings)
         model = request.model.strip()
         if not model:
             raise HTTPException(
@@ -877,6 +884,14 @@ def get_llm_client(settings: Settings = Depends(get_settings)) -> LLMClient:
 
 @lru_cache(maxsize=8)
 def build_llm_client(settings: Settings, model: str) -> LLMClient:
+    if settings.llm_provider == "chatgpt":
+        return ChatGPTClient(
+            auth=get_chatgpt_auth(settings),
+            model=model,
+            timeout_seconds=settings.llm_timeout_seconds,
+            context_chars=settings.llm_context_chars,
+            max_output_tokens=settings.llm_max_output_tokens,
+        )
     if settings.llm_provider == "ollama":
         return OllamaClient(
             base_url=settings.ollama_base_url,
@@ -903,7 +918,7 @@ def build_llm_client(settings: Settings, model: str) -> LLMClient:
             provider_name="groq",
         )
     raise RuntimeError(
-        f"Unsupported LLM_PROVIDER: {settings.llm_provider}. Use 'openai', 'groq', or 'ollama'."
+        f"Unsupported LLM_PROVIDER: {settings.llm_provider}. Use 'openai', 'groq', 'ollama', or 'chatgpt'."
     )
 
 
