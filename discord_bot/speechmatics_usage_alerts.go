@@ -75,6 +75,9 @@ func (state *speechmaticsUsageAlertState) collect(keys []SpeechmaticsKeyUsageRes
 	defer state.mu.Unlock()
 
 	for _, key := range keys {
+		if key.Error != nil || key.PercentUsed == nil || math.IsNaN(*key.PercentUsed) || math.IsInf(*key.PercentUsed, 0) {
+			continue
+		}
 		bucket := speechmaticsUsageAlertBucket(key.PercentUsed)
 		lastBucket := state.buckets[key.Name]
 		if bucket < lastBucket {
@@ -119,8 +122,8 @@ func speechmaticsUsageAlertLine(key SpeechmaticsKeyUsageResponse, lang botLangua
 	return fmt.Sprintf(
 		textForLanguage(
 			lang,
-			"Aviso Speechmatics: a chave **%s** esta em **%s** de uso (%s/%s, %s tarefas).",
-			"Speechmatics warning: key **%s** is at **%s** usage (%s/%s, %s jobs).",
+			"Aviso Speechmatics: a chave **%s** está em **%s** do orçamento configurado (%s/%s, %s tarefas).",
+			"Speechmatics warning: key **%s** is at **%s** of the configured budget (%s/%s, %s jobs).",
 		),
 		key.Name,
 		percent,

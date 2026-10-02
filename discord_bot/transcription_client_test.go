@@ -10,6 +10,7 @@ import (
 
 func TestFinishSessionAndWaitContinuesUntilSummaryIsReady(t *testing.T) {
 	t.Setenv("SESSION_SUMMARY_POLL_INTERVAL", "1ms")
+	t.Setenv("RECORDINGS_DIR", t.TempDir())
 
 	var summaryRequests int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -46,7 +47,7 @@ func TestFinishSessionAndWaitContinuesUntilSummaryIsReady(t *testing.T) {
 		httpClient: &http.Client{},
 	}
 
-	summary, err := client.FinishSessionAndWait(t.Context(), 42, "pt")
+	summary, err := client.FinishSessionAndWait(testContext(t), 42, "pt")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,7 +4,10 @@ import argparse
 import os
 from pathlib import Path
 
-from repository import connect
+try:
+    from .repository import connect
+except ImportError:  # Direct command-line invocation.
+    from repository import connect
 
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"

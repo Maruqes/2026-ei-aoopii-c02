@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -96,11 +97,14 @@ class Settings:
     speechmatics_timeout_seconds: float = 600.0
     speechmatics_segment_gap_seconds: float = 1.5
     speechmatics_additional_vocab: tuple[str, ...] = ()
-    speechmatics_usage_limit_hours: float = 50.0
+    # A user-defined budget, not a provider quota or credit balance.
+    speechmatics_usage_limit_hours: float = 0.0
+    speechmatics_usage_since: str = ""
     speechmatics_api_keys: tuple[tuple[str, str], ...] = ()
     upload_tmp_dir: Path = Path(".tmp/uploads")
     recordings_dir: Path = Path("discord_bot/recordings")
     keep_uploads: bool = False
+    recording_cleanup_interval_seconds: float = 60.0
     llm_provider: str = "openai"
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com/v1"
@@ -111,6 +115,10 @@ class Settings:
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3.5:2b"
     llm_model_selection_file: Path = Path(".tmp/llm_model_selection.json")
+    llm_timeout_seconds: float = 90.0
+    llm_context_chars: int = 24000
+    llm_max_output_tokens: int = 2500
+    transcription_workers: int = 2
     profile_docs_provider: str = "local"
     local_profile_dir: Path = Path("profiles")
     text_profile_sync_enabled: bool = True
@@ -120,7 +128,13 @@ class Settings:
     def from_env(cls) -> "Settings":
         database_url = os.getenv("DATABASE_URL")
         if not database_url:
-            database_url = "postgresql://discord:discord@127.0.0.1:5432/discord_anthropologist"
+            database_url = (
+                "postgresql://discord:discord@127.0.0.1:5432/discord_anthropologist"
+            )
+
+        cleanup_interval = env_float("RECORDING_CLEANUP_INTERVAL_SECONDS", 60)
+        if not math.isfinite(cleanup_interval):
+            cleanup_interval = 60
 
         return cls(
             database_url=database_url,
@@ -131,8 +145,12 @@ class Settings:
             whisper_beam_size=env_int("WHISPER_BEAM_SIZE", 10),
             whisper_fp16=env_bool("WHISPER_FP16", True),
             whisper_initial_prompt=env_str("WHISPER_INITIAL_PROMPT"),
-            whisper_carry_initial_prompt=env_bool("WHISPER_CARRY_INITIAL_PROMPT", False),
-            whisper_condition_on_previous_text=env_bool("WHISPER_CONDITION_ON_PREVIOUS_TEXT", False),
+            whisper_carry_initial_prompt=env_bool(
+                "WHISPER_CARRY_INITIAL_PROMPT", False
+            ),
+            whisper_condition_on_previous_text=env_bool(
+                "WHISPER_CONDITION_ON_PREVIOUS_TEXT", False
+            ),
             whisper_hallucination_silence_threshold=env_float(
                 "WHISPER_HALLUCINATION_SILENCE_THRESHOLD",
                 2.0,
@@ -140,7 +158,9 @@ class Settings:
             whisper_max_no_speech_prob=env_float("WHISPER_MAX_NO_SPEECH_PROB", 0.6),
             whisper_no_speech_threshold=env_float("WHISPER_NO_SPEECH_THRESHOLD", 0.6),
             whisper_logprob_threshold=env_float("WHISPER_LOGPROB_THRESHOLD", -0.8),
-            whisper_compression_ratio_threshold=env_float("WHISPER_COMPRESSION_RATIO_THRESHOLD", 2.0),
+            whisper_compression_ratio_threshold=env_float(
+                "WHISPER_COMPRESSION_RATIO_THRESHOLD", 2.0
+            ),
             whisper_num_threads=env_int("WHISPER_NUM_THREADS", 0),
             whisper_vad_enabled=env_bool("WHISPER_VAD_ENABLED", True),
             whisper_vad_aggressiveness=env_int("WHISPER_VAD_AGGRESSIVENESS", 3),
@@ -158,17 +178,23 @@ class Settings:
                 "SPEECHMATICS_POLLING_INTERVAL_SECONDS",
                 2.0,
             ),
-            speechmatics_timeout_seconds=env_float("SPEECHMATICS_TIMEOUT_SECONDS", 600.0),
+            speechmatics_timeout_seconds=env_float(
+                "SPEECHMATICS_TIMEOUT_SECONDS", 600.0
+            ),
             speechmatics_segment_gap_seconds=env_float(
                 "SPEECHMATICS_SEGMENT_GAP_SECONDS",
                 1.5,
             ),
             speechmatics_additional_vocab=env_csv("SPEECHMATICS_ADDITIONAL_VOCAB"),
-            speechmatics_usage_limit_hours=env_float("SPEECHMATICS_USAGE_LIMIT_HOURS", 50.0),
+            speechmatics_usage_limit_hours=max(
+                0, env_float("SPEECHMATICS_USAGE_LIMIT_HOURS", 0.0)
+            ),
+            speechmatics_usage_since=env_str("SPEECHMATICS_USAGE_SINCE"),
             speechmatics_api_keys=env_speechmatics_api_keys(),
             upload_tmp_dir=Path(os.getenv("UPLOAD_TMP_DIR", ".tmp/uploads")),
             recordings_dir=Path(os.getenv("RECORDINGS_DIR", "discord_bot/recordings")),
             keep_uploads=env_bool("KEEP_UPLOADS", False),
+            recording_cleanup_interval_seconds=max(1, cleanup_interval),
             llm_provider=env_str("LLM_PROVIDER", "openai").lower(),
             openai_api_key=env_str("OPENAI_API_KEY", env_str("GROQ_API_KEY")),
             openai_base_url=env_str(
@@ -181,9 +207,17 @@ class Settings:
             groq_model=env_str("GROQ_MODEL", "llama-3.3-70b-versatile"),
             ollama_base_url=env_str("OLLAMA_BASE_URL", "http://localhost:11434"),
             ollama_model=env_str("OLLAMA_MODEL", "qwen3.5:2b"),
-            llm_model_selection_file=Path(env_str("LLM_MODEL_SELECTION_FILE", ".tmp/llm_model_selection.json")),
+            llm_model_selection_file=Path(
+                env_str("LLM_MODEL_SELECTION_FILE", ".tmp/llm_model_selection.json")
+            ),
+            llm_timeout_seconds=max(1, env_float("LLM_TIMEOUT_SECONDS", 90)),
+            llm_context_chars=max(4000, env_int("LLM_CONTEXT_CHARS", 24000)),
+            llm_max_output_tokens=max(256, env_int("LLM_MAX_OUTPUT_TOKENS", 2500)),
+            transcription_workers=max(1, min(8, env_int("TRANSCRIPTION_WORKERS", 2))),
             profile_docs_provider=env_str("PROFILE_DOCS_PROVIDER", "local").lower(),
             local_profile_dir=Path(env_str("LOCAL_PROFILE_DIR", "profiles")),
             text_profile_sync_enabled=env_bool("TEXT_PROFILE_SYNC_ENABLED", True),
-            text_profile_sync_interval_hours=env_int("TEXT_PROFILE_SYNC_INTERVAL_HOURS", 12),
+            text_profile_sync_interval_hours=env_int(
+                "TEXT_PROFILE_SYNC_INTERVAL_HOURS", 12
+            ),
         )

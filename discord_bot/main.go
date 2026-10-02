@@ -48,7 +48,18 @@ func overwriteCommands(dg *discordgo.Session, appID string) error {
 func handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	data := i.ApplicationCommandData()
 	name := strings.ToLower(data.Name)
+	if needsDeferredResponse(i) {
+		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseDeferredChannelMessageWithSource}); err != nil {
+			return
+		}
+	}
+	if requiresManageServer(name) && !canManageServer(i) {
+		respondText(s, i, botText("Este comando requer a permissão Gerir Servidor.", "This command requires Manage Server permission."))
+		return
+	}
 	switch {
+	case isMusicCommand(name):
+		musicHook(s, i)
 	case commandMatches(name, "ping"):
 		pingHook(s, i)
 	case commandMatches(name, "start"):
@@ -77,6 +88,10 @@ func handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		oracleHook(s, i)
 	case commandMatches(name, "guess"):
 		guessHook(s, i)
+	case commandMatches(name, "digest"):
+		digestHook(s, i)
+	case commandMatches(name, "retry"):
+		retryHook(s, i)
 	case commandMatches(name, "language"):
 		languageHook(s, i)
 	}
@@ -89,6 +104,9 @@ func handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		return
 	}
 	if strings.HasPrefix(customID, modelPageCustomIDPrefix) {
+		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseDeferredMessageUpdate}); err != nil {
+			return
+		}
 		modelsPageHook(s, i, customID)
 	}
 }
@@ -178,10 +196,7 @@ func profileHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}
 
 	embed := profileEmbed(profile, targetName)
-	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{Embeds: []*discordgo.MessageEmbed{embed}},
-	})
+	_, _ = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Embeds: &[]*discordgo.MessageEmbed{embed}, AllowedMentions: noMentions()})
 }
 
 func syncHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -197,10 +212,10 @@ func syncHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	go func() {
 		result, err := client.ForceTextProfileSync(context.Background())
 		if err != nil {
-			_, _ = s.ChannelMessageSend(channelID, fmt.Sprintf(textForLanguage(lang, "Sincronizacao de texto falhou: %v", "Text synchronization failed: %v"), err))
+			_, _ = safeChannelSend(s, channelID, fmt.Sprintf(textForLanguage(lang, "Sincronizacao de texto falhou: %v", "Text synchronization failed: %v"), err))
 			return
 		}
-		_, _ = s.ChannelMessageSend(
+		_, _ = safeChannelSend(s,
 			channelID,
 			fmt.Sprintf(
 				textForLanguage(lang, "Sincronizacao de texto concluida: %d perfis atualizados em %.1fs.", "Text synchronization complete: %d profiles updated in %.1fs."),
@@ -235,7 +250,7 @@ func promptHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	go func() {
 		response, err := client.PromptUserProfile(context.Background(), targetID, question, lang.apiValue())
 		if err != nil {
-			_, _ = s.ChannelMessageSend(channelID, fmt.Sprintf(textForLanguage(lang, "Nao consegui consultar a lore de %s: %v", "I could not consult %s's lore: %v"), targetName, err))
+			_, _ = safeChannelSend(s, channelID, fmt.Sprintf(textForLanguage(lang, "Nao consegui consultar a lore de %s: %v", "I could not consult %s's lore: %v"), targetName, err))
 			return
 		}
 		name := firstNonEmpty(stringValue(response.DisplayName), response.Username, targetName, response.DiscordID)
@@ -271,7 +286,7 @@ func modelsHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		respondText(s, i, botText("Os IDs dos modelos devolvidos excedem o limite suportado pelo menu do Discord.", "The returned model IDs exceed Discord menu limits."))
 		return
 	}
-	_ = s.InteractionRespond(i.Interaction, response)
+	_, _ = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &response.Data.Content, Components: &response.Data.Components, AllowedMentions: noMentions()})
 }
 
 func modelsPageHook(s *discordgo.Session, i *discordgo.InteractionCreate, customID string) {
@@ -295,10 +310,7 @@ func modelsPageHook(s *discordgo.Session, i *discordgo.InteractionCreate, custom
 		respondText(s, i, botText("Os IDs dos modelos devolvidos excedem o limite suportado pelo menu do Discord.", "The returned model IDs exceed Discord menu limits."))
 		return
 	}
-	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseUpdateMessage,
-		Data: response.Data,
-	})
+	_, _ = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &response.Data.Content, Components: &response.Data.Components, AllowedMentions: noMentions()})
 }
 
 func modelsResponse(models *LLMModelsResponse, page int) *discordgo.InteractionResponse {
@@ -381,6 +393,10 @@ func modelsResponse(models *LLMModelsResponse, page int) *discordgo.InteractionR
 }
 
 func modelSelectHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if !canManageServer(i) {
+		respondText(s, i, botText("Mudar o modelo requer Gerir Servidor.", "Changing the model requires Manage Server."))
+		return
+	}
 	lang := currentBotLanguage()
 	data := i.MessageComponentData()
 	if len(data.Values) != 1 {
@@ -388,9 +404,11 @@ func modelSelectHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		return
 	}
 	model := data.Values[0]
-	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredMessageUpdate,
-	})
+	}); err != nil {
+		return
+	}
 
 	client := botAPIClient
 	if client == nil {
@@ -414,11 +432,12 @@ func modelSelectHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}
 	emptyComponents := []discordgo.MessageComponent{}
 	_, _ = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-		Content:    &content,
-		Components: &emptyComponents,
+		Content:         &content,
+		Components:      &emptyComponents,
+		AllowedMentions: noMentions(),
 	})
 	for _, chunk := range extraChunks {
-		if _, err := s.ChannelMessageSend(i.ChannelID, chunk); err != nil {
+		if _, err := safeChannelSend(s, i.ChannelID, chunk); err != nil {
 			log.Printf("erro ao enviar continuacao de /models para canal %s: %v", i.ChannelID, err)
 			return
 		}
@@ -556,6 +575,14 @@ func healthHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		),
 	}
 
+	lines = append(lines,
+		fmt.Sprintf(textForLanguage(lang, "**Resumos:** %d pendentes, %d falhados", "**Summaries:** %d pending, %d failed"), health.SessionsPending, health.SessionsFailed),
+		fmt.Sprintf(textForLanguage(lang, "**Perfis de voz:** %d pendentes, %d falhados", "**Voice profiles:** %d pending, %d failed"), health.VoiceProfilesPending, health.VoiceProfilesFailed),
+	)
+	if health.LLMProvider != "" || health.LLMModel != "" {
+		lines = append(lines, fmt.Sprintf("**IA:** %s / %s", health.LLMProvider, health.LLMModel))
+	}
+
 	if health.LastRecordingStatus != nil && strings.TrimSpace(*health.LastRecordingStatus) != "" {
 		lastLine := fmt.Sprintf(textForLanguage(lang, "**Ultima transcricao:** %s", "**Latest transcription:** %s"), *health.LastRecordingStatus)
 		if health.LastRecordingFilename != nil && strings.TrimSpace(*health.LastRecordingFilename) != "" {
@@ -592,14 +619,17 @@ func keysHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}
 
 	lines := []string{
-		fmt.Sprintf(textForLanguage(lang, "**Chaves Speechmatics** limite=%s", "**Speechmatics keys** limit=%s"), formatAPIHoursMinutes(keys.LimitHours)),
+		textForLanguage(lang, "**Consumo Speechmatics (Batch)**", "**Speechmatics usage (Batch)**"),
 	}
 	if keys.SelectedKey != nil && strings.TrimSpace(*keys.SelectedKey) != "" {
-		lines = append(lines, fmt.Sprintf(textForLanguage(lang, "**A usar agora:** %s", "**Currently using:** %s"), *keys.SelectedKey))
+		lines = append(lines, fmt.Sprintf(textForLanguage(lang, "**Chave sugerida pelo consumo:** %s", "**Suggested key by usage:** %s"), *keys.SelectedKey))
 	}
 	for _, key := range keys.Keys {
 		lines = append(lines, formatSpeechmaticsKeyLine(key, lang))
 	}
+	lines = append(lines, textForLanguage(lang,
+		"_Uso da conta/projeto acessível pela chave. Hoje: estimativa das gravações concluídas deste bot. A % compara com o orçamento de horas configurado; não indica saldo de créditos. Chaves da mesma conta podem partilhar consumo._",
+		"_Usage for the account/project accessible by each key. Today: estimate from this bot's completed recordings. Percent compares with a configured hours budget, not credit balance. Keys may share usage._"))
 	respondLongText(s, i, strings.Join(lines, "\n"))
 }
 
@@ -621,7 +651,23 @@ func formatSpeechmaticsKeyLine(key SpeechmaticsKeyUsageResponse, lang botLanguag
 	if key.JobCount != nil {
 		jobs = strconv.Itoa(*key.JobCount)
 	}
-	return fmt.Sprintf(textForLanguage(lang, "**%s:** %s %s/%s (%s tarefas)", "**%s:** %s %s/%s (%s jobs)"), key.Name, percent, used, limit, jobs)
+	var line string
+	if key.PercentUsed == nil || key.LimitHours <= 0 {
+		line = fmt.Sprintf(textForLanguage(lang, "**%s:** %s (%s tarefas; sem orçamento definido)", "**%s:** %s (%s jobs; no budget configured)"), key.Name, used, jobs)
+	} else {
+		line = fmt.Sprintf(textForLanguage(lang, "**%s:** %s do orçamento · %s/%s (%s tarefas)", "**%s:** %s of budget · %s/%s (%s jobs)"), key.Name, percent, used, limit, jobs)
+	}
+	if key.Since != nil && key.Until != nil {
+		if key.ReportedHours != nil {
+			line += fmt.Sprintf(textForLanguage(lang, " · reportado: %s [%s → %s UTC]", " · reported: %s [%s → %s UTC]"), formatAPIHoursMinutes(*key.ReportedHours), *key.Since, *key.Until)
+		} else {
+			line += fmt.Sprintf(" [%s → %s UTC]", *key.Since, *key.Until)
+		}
+	}
+	if key.LocalTodayHours > 0 {
+		line += textForLanguage(lang, " · inclui hoje (estimativa): ", " · includes today (estimate): ") + formatAPIHoursMinutes(key.LocalTodayHours)
+	}
+	return line
 }
 
 func formatAPIHoursMinutes(hours float64) string {
@@ -653,12 +699,25 @@ func forgetHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		return
 	}
 
+	callerID := ""
+	if i.Member != nil && i.Member.User != nil {
+		callerID = i.Member.User.ID
+	} else if i.User != nil {
+		callerID = i.User.ID
+	}
+	if targetID != callerID && !canManageServer(i) {
+		respondText(s, i, textForLanguage(lang, "Só podes apagar os teus dados; apagar dados de outra pessoa requer Gerir Servidor.", "You can delete your own data; deleting someone else's data requires Manage Server."))
+		return
+	}
+
 	client := botAPIClient
 	if client == nil {
 		client = NewTranscriptionClientFromEnv()
 	}
 
-	result, err := client.ForgetUser(context.Background(), targetID)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	result, err := forgetUserWithLocalAudio(ctx, client, targetID)
 	if err != nil {
 		if strings.Contains(err.Error(), "404") {
 			respondText(s, i, fmt.Sprintf(textForLanguage(lang, "Nao ha dados guardados para %s.", "There is no stored data for %s."), targetName))
@@ -800,10 +859,10 @@ func oracleHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		response, err := client.AskGuildOracle(context.Background(), guildID, question, lang.apiValue())
 		if err != nil {
 			if strings.Contains(err.Error(), "404") {
-				_, _ = s.ChannelMessageSend(channelID, textForLanguage(lang, "Ainda nao ha contexto guardado neste servidor para responder.", "There is no stored context in this server to answer yet."))
+				_, _ = safeChannelSend(s, channelID, textForLanguage(lang, "Ainda nao ha contexto guardado neste servidor para responder.", "There is no stored context in this server to answer yet."))
 				return
 			}
-			_, _ = s.ChannelMessageSend(channelID, fmt.Sprintf(textForLanguage(lang, "O oraculo nao respondeu: %v", "The oracle did not answer: %v"), err))
+			_, _ = safeChannelSend(s, channelID, fmt.Sprintf(textForLanguage(lang, "O oraculo nao respondeu: %v", "The oracle did not answer: %v"), err))
 			return
 		}
 		message := fmt.Sprintf(textForLanguage(lang, "**Oraculo**\n> %s\n\n%s", "**Oracle**\n> %s\n\n%s"), response.Question, response.Answer)
@@ -991,9 +1050,16 @@ func displayProfileName(profile *UserProfileResponse, fallback string) string {
 }
 
 func respondText(s *discordgo.Session, i *discordgo.InteractionCreate, content string) {
+	if needsDeferredResponse(i) {
+		_, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &content, AllowedMentions: noMentions()})
+		if err != nil {
+			log.Printf("Deferred Discord reply failed: %v", err)
+		}
+		return
+	}
 	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{Content: content},
+		Data: &discordgo.InteractionResponseData{Content: content, AllowedMentions: noMentions()},
 	})
 }
 
@@ -1005,7 +1071,7 @@ func respondLongText(s *discordgo.Session, i *discordgo.InteractionCreate, conte
 	}
 	respondText(s, i, chunks[0])
 	for _, chunk := range chunks[1:] {
-		if _, err := s.ChannelMessageSend(i.ChannelID, chunk); err != nil {
+		if _, err := safeChannelSend(s, i.ChannelID, chunk); err != nil {
 			log.Printf("erro ao enviar continuacao para canal %s: %v", i.ChannelID, err)
 			return
 		}
@@ -1014,7 +1080,7 @@ func respondLongText(s *discordgo.Session, i *discordgo.InteractionCreate, conte
 
 func sendLongChannelMessage(s *discordgo.Session, channelID string, content string) error {
 	for _, chunk := range splitDiscordMessage(content) {
-		if _, err := s.ChannelMessageSend(channelID, chunk); err != nil {
+		if _, err := safeChannelSend(s, channelID, chunk); err != nil {
 			return err
 		}
 	}
@@ -1131,6 +1197,7 @@ func main() {
 	}
 
 	botAPIClient = NewTranscriptionClientFromEnv()
+	botAPIClient.ReplayTranscriptions()
 
 	err = registerCommands(dg, appID)
 	if err != nil {
@@ -1153,4 +1220,80 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
+	stopAllVoiceConnections()
+}
+
+func noMentions() *discordgo.MessageAllowedMentions {
+	return &discordgo.MessageAllowedMentions{Parse: []discordgo.AllowedMentionType{}}
+}
+func safeChannelSend(s *discordgo.Session, channelID, content string) (*discordgo.Message, error) {
+	return s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{Content: content, AllowedMentions: noMentions()})
+}
+func needsDeferredResponse(i *discordgo.InteractionCreate) bool {
+	if i.Type == discordgo.InteractionMessageComponent {
+		return strings.HasPrefix(i.MessageComponentData().CustomID, modelPageCustomIDPrefix)
+	}
+	if i.Type != discordgo.InteractionApplicationCommand {
+		return false
+	}
+	switch i.ApplicationCommandData().Name {
+	case "start", "stop", "timeout", "language", "profile", "models", "health", "keys", "forget", "recap", "guess", "digest", "retry", "play", "pause", "skip", "queue", "musicstop":
+		return true
+	}
+	return false
+}
+func digestHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	lang := currentBotLanguage()
+	if i.GuildID == "" {
+		respondText(s, i, textForLanguage(lang, "Usa este comando num servidor.", "Use this command in a server."))
+		return
+	}
+	hours := 24
+	for _, option := range i.ApplicationCommandData().Options {
+		if option.Name == "hours" {
+			hours = int(option.IntValue())
+		}
+	}
+	client := botAPIClient
+	if client == nil {
+		client = NewTranscriptionClientFromEnv()
+	}
+	result, err := client.GetTextDigest(context.Background(), i.GuildID, i.ChannelID, hours, lang.apiValue())
+	if err != nil {
+		respondText(s, i, fmt.Sprintf(textForLanguage(lang, "Não consegui resumir este canal: %v", "Could not summarize this channel: %v"), err))
+		return
+	}
+	content := fmt.Sprintf(textForLanguage(lang, "**Resumo do canal · últimas %dh · %d mensagens**", "**Channel recap · last %dh · %d messages**"), result.Hours, result.MessageCount) + "\n\n" + result.Summary
+	if result.Limited {
+		content += textForLanguage(lang, "\n\n_Cobertura limitada às 2000 mensagens mais recentes._", "\n\n_Coverage limited to the latest 2000 messages._")
+	}
+	respondLongText(s, i, content)
+}
+func retryHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	lang := currentBotLanguage()
+	if i.GuildID == "" {
+		respondText(s, i, textForLanguage(lang, "Usa este comando num servidor.", "Use this command in a server."))
+		return
+	}
+	id := recapSessionID(i)
+	client := botAPIClient
+	if client == nil {
+		client = NewTranscriptionClientFromEnv()
+	}
+	if err := client.RetrySession(context.Background(), i.GuildID, id); err != nil {
+		respondText(s, i, fmt.Sprintf(textForLanguage(lang, "Não consegui recuperar a sessão: %v", "Could not recover this session: %v"), err))
+		return
+	}
+	respondText(s, i, fmt.Sprintf(textForLanguage(lang, "Sessão #%d enfileirada para recuperação. Consulta /recap session:%d daqui a pouco.", "Session #%d queued for recovery. Check /recap session:%d shortly."), id, id))
+}
+
+func canManageServer(i *discordgo.InteractionCreate) bool {
+	return i.Member != nil && i.Member.Permissions&(discordgo.PermissionManageServer|discordgo.PermissionAdministrator) != 0
+}
+func requiresManageServer(command string) bool {
+	switch command {
+	case "start", "stop", "sync", "timeout", "language", "retry":
+		return true
+	}
+	return false
 }

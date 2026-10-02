@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class TranscriptSegment(BaseModel):
@@ -76,7 +76,7 @@ class SelectLLMModelResponse(BaseModel):
 
 
 class ProfilePromptRequest(BaseModel):
-    question: str
+    question: str = Field(min_length=1, max_length=2000)
     language: str | None = None
 
 
@@ -136,6 +136,12 @@ class UserProfileResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
+    sessions_pending: int = 0
+    sessions_failed: int = 0
+    voice_profiles_pending: int = 0
+    voice_profiles_failed: int = 0
+    llm_provider: str = ""
+    llm_model: str = ""
     status: str
     database: str
     recordings_transcribing: int
@@ -147,6 +153,8 @@ class HealthResponse(BaseModel):
 
 
 class SpeechmaticsKeyUsageResponse(BaseModel):
+    reported_hours: float | None = None
+    local_today_hours: float = 0
     name: str
     used_hours: float | None
     limit_hours: float
@@ -158,6 +166,7 @@ class SpeechmaticsKeyUsageResponse(BaseModel):
 
 
 class SpeechmaticsKeysResponse(BaseModel):
+    usage_note: str = ""
     provider: str
     limit_hours: float
     selected_key: str | None
@@ -172,7 +181,7 @@ class ForgetUserResponse(BaseModel):
 
 
 class GuildOracleRequest(BaseModel):
-    question: str
+    question: str = Field(min_length=1, max_length=2000)
     language: str | None = None
 
 
@@ -201,3 +210,16 @@ class SessionRecapResponse(BaseModel):
     recap_source: str
     recap: str
     agent_error: str | None
+
+
+class TextDigestRequest(BaseModel):
+    hours: int = Field(default=24, ge=1, le=168)
+    channel_id: str | None = None
+    language: str | None = None
+
+
+class TextDigestResponse(BaseModel):
+    summary: str
+    message_count: int
+    limited: bool
+    hours: int

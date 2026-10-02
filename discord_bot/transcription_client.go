@@ -3,14 +3,17 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,9 +23,13 @@ const (
 )
 
 type TranscriptionClient struct {
-	baseURL    string
-	endpoint   string
-	httpClient *http.Client
+	baseURL         string
+	endpoint        string
+	httpClient      *http.Client
+	submissionMu    sync.Mutex
+	submissions     map[int64]*sessionSubmissions
+	inflight        map[string]bool
+	userSubmissions map[string]*sessionSubmissions
 }
 
 type TranscriptionRequest struct {
@@ -130,6 +137,12 @@ type ProfilePromptResponse struct {
 }
 
 type HealthResponse struct {
+	SessionsPending        int        `json:"sessions_pending"`
+	SessionsFailed         int        `json:"sessions_failed"`
+	VoiceProfilesPending   int        `json:"voice_profiles_pending"`
+	VoiceProfilesFailed    int        `json:"voice_profiles_failed"`
+	LLMProvider            string     `json:"llm_provider"`
+	LLMModel               string     `json:"llm_model"`
 	Status                 string     `json:"status"`
 	Database               string     `json:"database"`
 	RecordingsTranscribing int        `json:"recordings_transcribing"`
@@ -141,18 +154,21 @@ type HealthResponse struct {
 }
 
 type SpeechmaticsKeyUsageResponse struct {
-	Name        string   `json:"name"`
-	UsedHours   *float64 `json:"used_hours"`
-	LimitHours  float64  `json:"limit_hours"`
-	PercentUsed *float64 `json:"percent_used"`
-	JobCount    *int     `json:"job_count"`
-	Since       *string  `json:"since"`
-	Until       *string  `json:"until"`
-	Error       *string  `json:"error"`
+	Name            string   `json:"name"`
+	ReportedHours   *float64 `json:"reported_hours"`
+	LocalTodayHours float64  `json:"local_today_hours"`
+	UsedHours       *float64 `json:"used_hours"`
+	LimitHours      float64  `json:"limit_hours"`
+	PercentUsed     *float64 `json:"percent_used"`
+	JobCount        *int     `json:"job_count"`
+	Since           *string  `json:"since"`
+	Until           *string  `json:"until"`
+	Error           *string  `json:"error"`
 }
 
 type SpeechmaticsKeysResponse struct {
 	Provider    string                         `json:"provider"`
+	UsageNote   string                         `json:"usage_note"`
 	LimitHours  float64                        `json:"limit_hours"`
 	SelectedKey *string                        `json:"selected_key"`
 	Keys        []SpeechmaticsKeyUsageResponse `json:"keys"`
@@ -202,7 +218,7 @@ func NewTranscriptionClientFromEnv() *TranscriptionClient {
 	client := &TranscriptionClient{
 		baseURL:    baseURL,
 		endpoint:   baseURL + "/v1/transcriptions",
-		httpClient: &http.Client{},
+		httpClient: &http.Client{Timeout: apiRequestTimeoutFromEnv(os.Getenv("API_REQUEST_TIMEOUT"))},
 	}
 	log.Printf("cliente API transcricao configurado endpoint=%s", client.endpoint)
 	return client
@@ -237,12 +253,57 @@ func (c *TranscriptionClient) QueueTranscription(request TranscriptionRequest) {
 		request.RecordingStartedAt.UTC().Format(time.RFC3339Nano),
 	)
 
+	path := transcriptionOutboxPath(request)
+	c.submissionMu.Lock()
+	if c.inflight == nil {
+		c.inflight = make(map[string]bool)
+	}
+	if c.inflight[path] {
+		c.submissionMu.Unlock()
+		return
+	}
+	c.inflight[path] = true
+	group := c.submissionGroupLocked(request.SessionID)
+	group.pending++
+	group.notify()
+	userGroup := c.userSubmissionGroupLocked(request.DiscordID)
+	userGroup.pending++
+	userGroup.notify()
+	c.submissionMu.Unlock()
+	if err := persistTranscription(request); err != nil {
+		log.Printf("Could not persist transcription outbox file=%s: %v", request.AudioPath, err)
+	}
+	if request.SessionID > 0 {
+		if err := persistSessionFinish(request.SessionID, currentBotLanguage().apiValue()); err != nil {
+			log.Printf("Could not persist session recovery marker id=%d: %v", request.SessionID, err)
+		}
+	}
 	go func() {
-		if err := c.SubmitTranscription(context.Background(), request); err != nil {
-			log.Printf("erro ao chamar API de transcricao para user=%s file=%s: %v", request.DiscordID, request.AudioPath, err)
+		var submissionErr error
+		defer func() {
+			c.submissionMu.Lock()
+			defer c.submissionMu.Unlock()
+			delete(c.inflight, path)
+			userGroup.pending--
+			userGroup.notify()
+			group.pending--
+			if submissionErr != nil {
+				group.errors[path] = submissionErr
+			} else {
+				delete(group.errors, path)
+			}
+			group.notify()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		err := retryAPI(ctx, func() error { return c.SubmitTranscription(ctx, request) })
+		if err != nil {
+			submissionErr = err
+			log.Printf("Transcription not accepted; retained in outbox file=%s: %v", request.AudioPath, err)
 			return
 		}
-		log.Printf("pedido de transcricao aceite pela API para user=%s file=%s", request.DiscordID, request.AudioPath)
+		_ = os.Remove(transcriptionOutboxPath(request))
+		log.Printf("Transcription accepted file=%s", request.AudioPath)
 	}()
 }
 
@@ -252,6 +313,8 @@ func (c *TranscriptionClient) SubmitTranscription(ctx context.Context, request T
 	}
 
 	request = request.withFallbacks()
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
 	started := time.Now()
 	audioSize := int64(-1)
 	if stat, err := os.Stat(request.AudioPath); err != nil {
@@ -309,10 +372,12 @@ func (c *TranscriptionClient) SubmitTranscription(ctx context.Context, request T
 		detail = response.Status
 	}
 	log.Printf("chamada API transcricao falhou user=%s file=%s status=%s elapsed=%s body=%s", request.DiscordID, request.AudioPath, response.Status, time.Since(started).Round(time.Millisecond), detail)
-	return fmt.Errorf("API devolveu %s: %s", response.Status, detail)
+	return &APIError{StatusCode: response.StatusCode, Detail: detail}
 }
 
 func (c *TranscriptionClient) CreateSession(ctx context.Context, request CreateSessionRequest) (*VoiceSessionResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
 	var session VoiceSessionResponse
 	if err := c.postJSON(ctx, "/v1/sessions", request, &session); err != nil {
 		return nil, err
@@ -321,6 +386,8 @@ func (c *TranscriptionClient) CreateSession(ctx context.Context, request CreateS
 }
 
 func (c *TranscriptionClient) FinishSession(ctx context.Context, sessionID int64, language string) (*VoiceSessionResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
 	var session VoiceSessionResponse
 	request := map[string]string{
 		"ended_at": time.Now().UTC().Format(time.RFC3339Nano),
@@ -331,6 +398,12 @@ func (c *TranscriptionClient) FinishSession(ctx context.Context, sessionID int64
 	if err := c.postJSON(ctx, fmt.Sprintf("/v1/sessions/%d/finish", sessionID), request, &session); err != nil {
 		return nil, err
 	}
+	_ = os.Remove(sessionFinishPath(sessionID))
+	c.submissionMu.Lock()
+	if group := c.submissions[sessionID]; group != nil && group.pending == 0 && len(group.errors) == 0 {
+		delete(c.submissions, sessionID)
+	}
+	c.submissionMu.Unlock()
 	return &session, nil
 }
 
@@ -346,17 +419,25 @@ func (c *TranscriptionClient) FinishSessionAndWait(ctx context.Context, sessionI
 	if sessionID <= 0 {
 		return nil, nil
 	}
-	if _, err := c.FinishSession(ctx, sessionID, language); err != nil {
+	ctx, cancel := context.WithTimeout(ctx, summaryWaitTimeoutFromEnv(os.Getenv("SESSION_SUMMARY_TIMEOUT")))
+	defer cancel()
+	if err := persistSessionFinish(sessionID, language); err != nil {
+		log.Printf("Could not persist session recovery marker id=%d: %v", sessionID, err)
+	}
+	if err := c.waitForSubmissions(ctx, sessionID); err != nil {
+		return nil, err
+	}
+	if err := retryAPI(ctx, func() error { _, err := c.FinishSession(ctx, sessionID, language); return err }); err != nil {
 		return nil, err
 	}
 
 	interval := summaryPollIntervalFromEnv(os.Getenv("SESSION_SUMMARY_POLL_INTERVAL"))
 	for {
 		summary, err := c.GetSessionSummary(ctx, sessionID)
-		if err != nil {
+		if err != nil && !retryableAPIError(err) {
 			return nil, err
 		}
-		if summary.Status == "agent_done" || summary.Status == "agent_failed" {
+		if err == nil && (summary.Status == "agent_done" || summary.Status == "agent_failed") {
 			return summary, nil
 		}
 		select {
@@ -447,7 +528,9 @@ func (c *TranscriptionClient) QueueTextMessage(request TextMessageRequest) {
 
 	request = request.withFallbacks()
 	go func() {
-		if err := c.SubmitTextMessage(context.Background(), request); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := retryAPI(ctx, func() error { return c.SubmitTextMessage(ctx, request) }); err != nil {
 			log.Printf("erro ao guardar mensagem de texto user=%s message=%s: %v", request.DiscordID, request.DiscordMessageID, err)
 		}
 	}()
@@ -518,6 +601,13 @@ func (c *TranscriptionClient) doJSON(request *http.Request, target any) error {
 		return fmt.Errorf("cliente de transcricao nao configurado")
 	}
 
+	timeout := apiRequestTimeoutFromEnv(os.Getenv("API_REQUEST_TIMEOUT"))
+	if request.Method == http.MethodGet && timeout > 30*time.Second {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), timeout)
+	defer cancel()
+	request = request.Clone(ctx)
 	response, err := c.httpClient.Do(request)
 	if err != nil {
 		return err
@@ -526,9 +616,9 @@ func (c *TranscriptionClient) doJSON(request *http.Request, target any) error {
 
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return fmt.Errorf("API devolveu %s: %s", response.Status, strings.TrimSpace(string(body)))
+		return &APIError{StatusCode: response.StatusCode, Detail: strings.TrimSpace(string(body))}
 	}
-	return json.NewDecoder(response.Body).Decode(target)
+	return json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(target)
 }
 
 func summaryPollIntervalFromEnv(raw string) time.Duration {
@@ -585,4 +675,243 @@ func (r TextMessageRequest) withFallbacks() TextMessageRequest {
 	}
 
 	return r
+}
+
+type APIError struct {
+	StatusCode int
+	Detail     string
+}
+
+func (e *APIError) Error() string { return fmt.Sprintf("API HTTP %d: %s", e.StatusCode, e.Detail) }
+func retryableAPIError(err error) bool {
+	var api *APIError
+	if errors.As(err, &api) {
+		return api.StatusCode == 408 || api.StatusCode == 429 || api.StatusCode >= 500
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
+}
+func retryAPI(ctx context.Context, call func() error) error {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err = call(); err == nil || !retryableAPIError(err) {
+			return err
+		}
+		if attempt == 2 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(1<<attempt) * time.Second):
+		}
+	}
+	return err
+}
+func apiRequestTimeoutFromEnv(raw string) time.Duration {
+	if duration, err := time.ParseDuration(strings.TrimSpace(raw)); err == nil && duration > 0 && duration <= 15*time.Minute {
+		return duration
+	}
+	return 5 * time.Minute
+}
+
+func summaryWaitTimeoutFromEnv(raw string) time.Duration {
+	if duration, err := time.ParseDuration(strings.TrimSpace(raw)); err == nil && duration > 0 {
+		return duration
+	}
+	return 30 * time.Minute
+}
+
+// A change channel makes waiting cancellable without a goroutine parked on a WaitGroup.
+// Tracking failures per file lets a successful replay clear only its own failure.
+type sessionSubmissions struct {
+	pending int
+	errors  map[string]error
+	changed chan struct{}
+}
+
+func (group *sessionSubmissions) notify() {
+	close(group.changed)
+	group.changed = make(chan struct{})
+}
+
+func (c *TranscriptionClient) submissionGroupLocked(sessionID int64) *sessionSubmissions {
+	if c.submissions == nil {
+		c.submissions = make(map[int64]*sessionSubmissions)
+	}
+	group := c.submissions[sessionID]
+	if group == nil {
+		group = &sessionSubmissions{errors: make(map[string]error), changed: make(chan struct{})}
+		c.submissions[sessionID] = group
+	}
+	return group
+}
+
+func (c *TranscriptionClient) waitForSubmissions(ctx context.Context, sessionID int64) error {
+	for {
+		c.submissionMu.Lock()
+		group := c.submissionGroupLocked(sessionID)
+		if group.pending == 0 {
+			var failures []error
+			for _, err := range group.errors {
+				failures = append(failures, err)
+			}
+			c.submissionMu.Unlock()
+			if len(failures) > 0 {
+				return fmt.Errorf("recording submission failed: %w", errors.Join(failures...))
+			}
+			return nil
+		}
+		changed := group.changed
+		c.submissionMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-changed:
+		}
+	}
+}
+func transcriptionOutboxPath(request TranscriptionRequest) string {
+	return request.AudioPath + ".request.json"
+}
+func persistTranscription(request TranscriptionRequest) error {
+	return persistJSONAtomically(transcriptionOutboxPath(request), request)
+}
+
+func persistJSONAtomically(path string, value any) error {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	file, err := os.CreateTemp(filepath.Dir(path), ".outbox-*.tmp")
+	if err != nil {
+		return err
+	}
+	temp := file.Name()
+	defer os.Remove(temp)
+	if _, err = file.Write(payload); err == nil {
+		err = file.Sync()
+	}
+	closeErr := file.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err := os.Rename(temp, path); err != nil {
+		return err
+	}
+	// Persist the directory entry too, so an acknowledged write survives a crash.
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
+}
+
+type sessionFinishRequest struct {
+	SessionID int64  `json:"session_id"`
+	Language  string `json:"language"`
+}
+
+func sessionFinishPath(sessionID int64) string {
+	return filepath.Join(recordingsDirFromEnv(), fmt.Sprintf("session-%d.finish.json", sessionID))
+}
+
+func persistSessionFinish(sessionID int64, language string) error {
+	if err := os.MkdirAll(recordingsDirFromEnv(), 0755); err != nil {
+		return err
+	}
+	return persistJSONAtomically(sessionFinishPath(sessionID), sessionFinishRequest{sessionID, language})
+}
+
+func (c *TranscriptionClient) ReplayTranscriptions() {
+	paths, err := filepath.Glob(filepath.Join(recordingsDirFromEnv(), "*.request.json"))
+	if err != nil {
+		return
+	}
+	sessions := make(map[int64]string)
+	finishPaths, _ := filepath.Glob(filepath.Join(recordingsDirFromEnv(), "session-*.finish.json"))
+	for _, path := range finishPaths {
+		payload, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var request sessionFinishRequest
+		if err := json.Unmarshal(payload, &request); err == nil && request.SessionID > 0 {
+			sessions[request.SessionID] = request.Language
+		}
+	}
+	for _, path := range paths {
+		payload, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var request TranscriptionRequest
+		if err := json.Unmarshal(payload, &request); err != nil {
+			log.Printf("Invalid outbox file=%s", path)
+			continue
+		}
+		c.QueueTranscription(request)
+		if request.SessionID > 0 {
+			if _, exists := sessions[request.SessionID]; !exists {
+				sessions[request.SessionID] = currentBotLanguage().apiValue()
+			}
+		}
+	}
+	// These are recordings from a previous bot process; finalize after their admission.
+	for sessionID, language := range sessions {
+		go func(id int64, lang string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			if err := c.waitForSubmissions(ctx, id); err == nil {
+				err := retryAPI(ctx, func() error { _, err := c.FinishSession(ctx, id, lang); return err })
+				if err != nil {
+					log.Printf("Could not finalize recovered session id=%d: %v", id, err)
+				}
+			}
+		}(sessionID, language)
+	}
+}
+
+type TextDigestResponse struct {
+	Summary      string `json:"summary"`
+	MessageCount int    `json:"message_count"`
+	Limited      bool   `json:"limited"`
+	Hours        int    `json:"hours"`
+}
+
+func (c *TranscriptionClient) GetTextDigest(ctx context.Context, guildID, channelID string, hours int, language string) (*TextDigestResponse, error) {
+	var result TextDigestResponse
+	body := map[string]any{"hours": hours, "channel_id": channelID, "language": language}
+	err := c.postJSON(ctx, "/v1/guilds/"+url.PathEscape(guildID)+"/digest", body, &result)
+	return &result, err
+}
+func (c *TranscriptionClient) RetrySession(ctx context.Context, guildID string, sessionID int64) error {
+	// Recover bot-to-API admission failures too; these files do not yet exist
+	// in the backend's recording queue and cannot be retried there.
+	paths, err := filepath.Glob(filepath.Join(recordingsDirFromEnv(), "*.request.json"))
+	if err != nil {
+		return err
+	}
+	for _, path := range paths {
+		payload, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var request TranscriptionRequest
+		if err := json.Unmarshal(payload, &request); err == nil && request.SessionID == sessionID {
+			c.QueueTranscription(request)
+		}
+	}
+	if err := c.waitForSubmissions(ctx, sessionID); err != nil {
+		return err
+	}
+	var result SessionSummaryResponse
+	return c.postJSON(ctx, fmt.Sprintf("/v1/guilds/%s/sessions/%d/retry", url.PathEscape(guildID), sessionID), map[string]string{}, &result)
 }

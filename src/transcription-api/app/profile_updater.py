@@ -3,16 +3,19 @@ from __future__ import annotations
 import logging
 import re
 import threading
-import time
 from datetime import datetime, timedelta
 from typing import Callable
 
-from data.repository import DataRepository, PendingTextProfile, UserProfile
+from data.repository import (
+    DataRepository,
+    PendingTextProfile,
+    UserProfile,
+    normalize_timestamp,
+)
 
 from .agent import format_transcript
 from .docs_client import LocalMarkdownProfileClient
 from .llm import LLMClient
-
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -46,10 +49,14 @@ def run_text_profile_sync(
     updated = 0
     for pending in repository.get_pending_text_profiles():
         try:
-            if update_text_profile(repository=repository, llm=llm, docs=docs, pending=pending):
+            if update_text_profile(
+                repository=repository, llm=llm, docs=docs, pending=pending
+            ):
                 updated += 1
         except Exception:
-            logger.exception("atualizacao de perfil por texto falhou user_id=%s", pending.user_id)
+            logger.exception(
+                "atualizacao de perfil por texto falhou user_id=%s", pending.user_id
+            )
     return updated
 
 
@@ -60,43 +67,67 @@ def update_text_profile(
     docs: LocalMarkdownProfileClient,
     pending: PendingTextProfile,
 ) -> bool:
-    messages = repository.get_text_messages_for_profile(pending.user_id, pending.last_text_seen_at)
-    messages = [message for message in messages if is_profile_signal(str(message.get("content", "")))]
-    if not messages:
-        repository.mark_user_text_profile_seen(pending.user_id, pending.latest_message_at)
-        return False
+    with repository.job_lock(103, pending.user_id, wait=True):
+        current_profile = repository.get_user_profile_by_user_id(pending.user_id)
+        after = (
+            current_profile.last_text_seen_at
+            if current_profile
+            else pending.last_text_seen_at
+        )
+        if after and after >= pending.latest_message_at:
+            return False
+        messages = repository.get_text_messages_for_profile(
+            pending.user_id, after, pending.latest_message_at
+        )
+        messages = [
+            message
+            for message in messages
+            if is_profile_signal(str(message.get("content", "")))
+        ]
+        if not messages:
+            repository.mark_user_text_profile_seen(
+                pending.user_id, pending.latest_message_at
+            )
+            return False
 
-    current_profile = repository.get_user_profile_by_user_id(pending.user_id)
-    username = display_profile_name(current_profile, pending)
-    existing_doc_text = docs.read_doc_text(current_profile.google_doc_id if current_profile else None)
-    observations = (
-        f"Observation context: Text observations from {format_channel_list(messages)}\n\n"
-        f"{format_transcript(messages)}"
-    )
-    generated = llm.update_profile_from_text(
-        username=username,
-        existing_profile=current_profile,
-        existing_doc_text=existing_doc_text,
-        observations=observations,
-    )
-    stored_doc = docs.upsert_profile_doc(
-        doc_id=current_profile.google_doc_id if current_profile else None,
-        username=username,
-        profile=generated,
-    )
-    repository.upsert_user_profile(
-        user_id=pending.user_id,
-        anthropologist_title=generated.anthropologist_title,
-        summary=generated.summary,
-        interests=generated.interests,
-        communication_style=generated.communication_style,
-        known_facts=generated.persona_notes,
-        recent_updates=generated.recent_updates,
-        google_doc_id=stored_doc.doc_id,
-        google_doc_url=stored_doc.url,
-    )
-    repository.mark_user_text_profile_seen(pending.user_id, pending.latest_message_at)
-    return True
+        current_profile = repository.get_user_profile_by_user_id(pending.user_id)
+        username = display_profile_name(current_profile, pending)
+        existing_doc_text = docs.read_doc_text(
+            current_profile.google_doc_id if current_profile else None
+        )
+        observations = (
+            f"Observation context: Text observations from {format_channel_list(messages)}\n\n"
+            f"{format_transcript(messages)}"
+        )
+        generated = llm.update_profile_from_text(
+            username=username,
+            existing_profile=current_profile,
+            existing_doc_text=existing_doc_text,
+            observations=observations,
+        )
+        stored_doc = docs.upsert_profile_doc(
+            doc_id=(current_profile.google_doc_id if current_profile else None)
+            or f"user-{pending.discord_id}.md",
+            username=username,
+            profile=generated,
+            observed_on=normalize_timestamp(pending.latest_message_at).date(),
+            observation_id=f"text-{pending.user_id}-{normalize_timestamp(pending.latest_message_at).isoformat()}",
+        )
+        repository.upsert_user_profile(
+            user_id=pending.user_id,
+            anthropologist_title=generated.anthropologist_title,
+            summary=generated.summary,
+            interests=generated.interests,
+            communication_style=generated.communication_style,
+            known_facts=generated.persona_notes,
+            recent_updates=generated.recent_updates,
+            google_doc_id=stored_doc.doc_id,
+            google_doc_url=stored_doc.url,
+        )
+        repository.mark_user_text_profile_seen(
+            pending.user_id, pending.latest_message_at
+        )
+        return True
 
 
 def is_profile_signal(content: str) -> bool:
@@ -113,7 +144,9 @@ def is_profile_signal(content: str) -> bool:
     return True
 
 
-def display_profile_name(profile: UserProfile | None, pending: PendingTextProfile) -> str:
+def display_profile_name(
+    profile: UserProfile | None, pending: PendingTextProfile
+) -> str:
     if profile is not None:
         return profile.display_name or profile.username or profile.discord_id
     return pending.display_name or pending.username or pending.discord_id
@@ -149,6 +182,7 @@ def start_text_profile_sync_loop(
     llm_factory: Callable[[], LLMClient] | None = None,
     docs: LocalMarkdownProfileClient,
     interval_hours: int = 12,
+    stop_event: threading.Event | None = None,
 ) -> threading.Thread:
     if llm is None and llm_factory is None:
         raise ValueError("llm or llm_factory is required")
@@ -160,6 +194,7 @@ def start_text_profile_sync_loop(
             "llm_factory": llm_factory,
             "docs": docs,
             "interval_hours": interval_hours,
+            "stop_event": stop_event,
         },
         daemon=True,
     )
@@ -174,19 +209,33 @@ def text_profile_sync_loop(
     llm_factory: Callable[[], LLMClient] | None = None,
     docs: LocalMarkdownProfileClient,
     interval_hours: int = 12,
+    stop_event: threading.Event | None = None,
 ) -> None:
     if llm is None and llm_factory is None:
         raise ValueError("llm or llm_factory is required")
-    while True:
-        next_run = next_midnight_aligned_run(datetime.now().astimezone(), interval_hours)
-        sleep_seconds = max(0.0, (next_run - datetime.now().astimezone()).total_seconds())
-        logger.info("proxima sincronizacao de perfis por texto em %s", next_run.isoformat())
-        time.sleep(sleep_seconds)
+    stop_event = stop_event or threading.Event()
+    while not stop_event.is_set():
+        next_run = next_midnight_aligned_run(
+            datetime.now().astimezone(), interval_hours
+        )
+        sleep_seconds = max(
+            0.0, (next_run - datetime.now().astimezone()).total_seconds()
+        )
+        logger.info(
+            "proxima sincronizacao de perfis por texto em %s", next_run.isoformat()
+        )
+        if stop_event.wait(sleep_seconds):
+            return
         try:
             active_llm = llm_factory() if llm_factory is not None else llm
             if active_llm is None:
                 raise RuntimeError("LLM client is not configured")
-            updated = run_text_profile_sync(repository=repository, llm=active_llm, docs=docs)
-            logger.info("sincronizacao de perfis por texto concluida perfis_atualizados=%d", updated)
+            updated = run_text_profile_sync(
+                repository=repository, llm=active_llm, docs=docs
+            )
+            logger.info(
+                "sincronizacao de perfis por texto concluida perfis_atualizados=%d",
+                updated,
+            )
         except Exception:
             logger.exception("sincronizacao de perfis por texto falhou")

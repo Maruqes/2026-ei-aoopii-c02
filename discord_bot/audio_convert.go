@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -40,6 +42,7 @@ type userAudioRecording struct {
 	wav              *WAVWriter
 	path             string
 	startedAt        time.Time
+	lastPacketAt     time.Time
 	user             voiceUserInfo
 	channel          string
 	sessionID        int64
@@ -144,6 +147,7 @@ func NewWAVWriter(path string, sampleRate uint32, channels uint16, bitDepth uint
 	// Reservar header WAV inicial
 	if err := w.writeHeader(0); err != nil {
 		f.Close()
+		_ = os.Remove(path)
 		return nil, err
 	}
 
@@ -311,12 +315,15 @@ func closeAndTranscribeRecording(recording *userAudioRecording, info voiceUserIn
 
 	if err := recording.wav.Close(); err != nil {
 		log.Printf("erro ao fechar WAV de user=%s: %v", user.DiscordID, err)
+		if recording.wav.dataSize == 0 {
+			_ = os.Remove(recording.path)
+		}
 		return err
 	}
 
 	if recording.wav.dataSize == 0 {
 		log.Printf("WAV sem áudio para user=%s file=%s; transcrição ignorada", user.DiscordID, recording.path)
-		return nil
+		return os.Remove(recording.path)
 	}
 
 	log.Printf(
@@ -354,6 +361,7 @@ func ListenAndWriteOpusToWAV(
 	transcriptions *TranscriptionClient,
 	lookupUserInfo func(string) voiceUserInfo,
 	currentChannelName func() string,
+	stopSignals ...<-chan struct{},
 ) error {
 	if outDir == "" {
 		outDir = "."
@@ -369,9 +377,25 @@ func ListenAndWriteOpusToWAV(
 	identifiedUsers := make(map[uint32]string)
 	unknownSSRCs := make(map[uint32]bool)
 	defer closeUserRecordings(userRecordings, transcriptions)
-
+	var stopSignal <-chan struct{}
+	if len(stopSignals) > 0 {
+		stopSignal = stopSignals[0]
+	}
+	idleTicker := time.NewTicker(2 * time.Second)
+	defer idleTicker.Stop()
 	for {
 		select {
+		case <-stopSignal:
+			return closeUserRecordings(userRecordings, transcriptions)
+		case tick := <-idleTicker.C:
+			for id, recording := range userRecordings {
+				if !recording.lastPacketAt.IsZero() && tick.Sub(recording.lastPacketAt) >= recordingIdleTimeout() {
+					delete(userRecordings, id)
+					if err := closeAndTranscribeRecording(recording, voiceUserInfo{}, transcriptions); err != nil {
+						log.Printf("Could not flush idle recording: %v", err)
+					}
+				}
+			}
 		case event, ok := <-recordingEvents:
 			if !ok {
 				recordingEvents = nil
@@ -388,7 +412,12 @@ func ListenAndWriteOpusToWAV(
 				continue
 			}
 			log.Printf("evento recebido: finalizar gravação user=%s", event.user.DiscordID)
-			if err := finishUserRecording(userRecordings, event.user, transcriptions); err != nil {
+			err := finishUserRecording(userRecordings, event.user, transcriptions)
+			if event.ack != nil {
+				event.ack <- err
+				close(event.ack)
+			}
+			if err != nil {
 				return err
 			}
 			continue
@@ -427,7 +456,7 @@ func ListenAndWriteOpusToWAV(
 				}
 			}
 
-			if discordID == "" {
+			if discordID == "" || discordID == vc.UserID || isUserCapturePaused(discordID) {
 				continue
 			}
 
@@ -447,15 +476,17 @@ func ListenAndWriteOpusToWAV(
 			if recording != nil {
 				plan = recording.planRTPPacket(packet.SSRC, packet.Sequence, packet.Timestamp)
 				if plan.stale {
-					log.Printf(
-						"pacote RTP atrasado/duplicado ignorado user=%s ssrc=%d sequence=%d expected=%d",
-						discordID,
-						packet.SSRC,
-						packet.Sequence,
-						recording.nextRTPSequence,
-					)
+					// Discard before rotation so a late duplicate cannot become a new clip.
 					continue
 				}
+			}
+			if shouldRotateRecording(recording, packetAt, packet.SSRC) || shouldRotateForRTPGap(plan) {
+				delete(userRecordings, discordID)
+				if err := closeAndTranscribeRecording(recording, voiceUserInfo{}, transcriptions); err != nil {
+					return err
+				}
+				recording = nil
+				plan = rtpPacketPlan{}
 			}
 
 			recoveredPCM := []int16(nil)
@@ -528,6 +559,7 @@ func ListenAndWriteOpusToWAV(
 			); err != nil {
 				return err
 			}
+			recording.lastPacketAt = packetAt
 		}
 	}
 }
@@ -671,4 +703,34 @@ func getCurrentChannelName(currentChannelName func() string, fallback string) st
 		return fallback
 	}
 	return "voice"
+}
+
+func recordingIdleTimeout() time.Duration {
+	return recordingDurationFromEnv("RECORDING_IDLE_SECONDS", 10*time.Second)
+}
+func recordingDurationFromEnv(name string, fallback time.Duration) time.Duration {
+	seconds, err := strconv.Atoi(strings.TrimSpace(os.Getenv(name)))
+	if err != nil || seconds < 2 || seconds > 3600 {
+		return fallback
+	}
+	return time.Duration(seconds) * time.Second
+}
+func shouldRotateRecording(recording *userAudioRecording, packetAt time.Time, ssrc uint32) bool {
+	if recording == nil || recording.wav == nil {
+		return false
+	}
+	if recording.hasRTPSequence && recording.ssrc != ssrc {
+		return true
+	}
+	if !recording.lastPacketAt.IsZero() && packetAt.Sub(recording.lastPacketAt) >= recordingIdleTimeout() {
+		return true
+	}
+	maximum := recordingDurationFromEnv("RECORDING_MAX_SECONDS", 5*time.Minute)
+	return recording.wav.FramesWritten() >= int64(maximum.Seconds()*sampleRate)
+}
+
+// RTP timestamps are untrusted. A discontinuity must not allocate hours of
+// silence or produce a giant upload, even if packets arrived close together.
+func shouldRotateForRTPGap(plan rtpPacketPlan) bool {
+	return plan.timestampGapFrames >= int(recordingIdleTimeout().Seconds()*sampleRate)
 }

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
 from .llm import GeneratedProfile, LoreEvent
-
 
 LORE_TIMELINE_HEADING = "## Lore Timeline"
 
@@ -35,13 +36,30 @@ class LocalMarkdownProfileClient:
         doc_id: str | None,
         username: str,
         profile: GeneratedProfile,
+        observed_on: date | None = None,
+        observation_id: str | None = None,
     ) -> StoredDoc:
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         filename = doc_id or f"{safe_filename(username)}.md"
-        path = self.profile_dir / filename
+        path = self._resolve_path(filename)
         existing_doc_text = path.read_text(encoding="utf-8") if path.exists() else ""
-        markdown = format_profile_markdown(username, profile, existing_doc_text=existing_doc_text)
-        path.write_text(markdown, encoding="utf-8")
+        markdown = format_profile_markdown(
+            username,
+            profile,
+            existing_doc_text=existing_doc_text,
+            observed_on=observed_on,
+            observation_id=observation_id,
+        )
+        # Replace atomically so concurrent readers never see half a profile.
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=self.profile_dir, delete=False
+        ) as temp:
+            temp.write(markdown)
+            temp_name = temp.name
+        try:
+            os.replace(temp_name, path)
+        finally:
+            Path(temp_name).unlink(missing_ok=True)
         return StoredDoc(doc_id=filename, url=str(path))
 
     def delete_doc(self, doc_id: str | None) -> bool:
@@ -55,9 +73,11 @@ class LocalMarkdownProfileClient:
 
     def _resolve_path(self, doc_id: str) -> Path:
         path = Path(doc_id)
-        if path.is_absolute():
-            return path
-        return self.profile_dir / doc_id
+        root = self.profile_dir.resolve()
+        resolved = path.resolve() if path.is_absolute() else (root / path).resolve()
+        if resolved.parent != root:
+            raise ValueError("Profile document must be inside the profile directory")
+        return resolved
 
 
 def format_profile_markdown(
@@ -66,6 +86,7 @@ def format_profile_markdown(
     *,
     existing_doc_text: str = "",
     observed_on: date | None = None,
+    observation_id: str | None = None,
 ) -> str:
     observed_on = observed_on or date.today()
     current_profile = (
@@ -79,6 +100,17 @@ def format_profile_markdown(
     )
     timeline_entries = preserved_lore_timeline(existing_doc_text)
     new_entry = format_lore_entry(profile.lore_event, observed_on)
+    if observation_id:
+        if (
+            not re.fullmatch(r"[A-Za-z0-9_:.+/-]+", observation_id)
+            or "--" in observation_id
+        ):
+            raise ValueError("Invalid profile observation identifier")
+        marker = f"<!-- observation:{observation_id} -->"
+        if marker in timeline_entries:
+            new_entry = ""
+        elif new_entry:
+            new_entry = marker + "\n" + new_entry
     timeline_parts = [part for part in (new_entry, timeline_entries) if part]
     timeline = "\n\n".join(timeline_parts)
     return f"{current_profile}{LORE_TIMELINE_HEADING}\n\n{timeline}\n".rstrip() + "\n"
@@ -106,7 +138,9 @@ def format_lore_entry(lore_event: LoreEvent, observed_on: date) -> str:
     if not rendered_sections:
         return ""
     title = lore_event.title or "Profile update"
-    return f"### {observed_on.isoformat()} - {title}\n\n" + "\n\n".join(rendered_sections)
+    return f"### {observed_on.isoformat()} - {title}\n\n" + "\n\n".join(
+        rendered_sections
+    )
 
 
 def safe_filename(value: str) -> str:

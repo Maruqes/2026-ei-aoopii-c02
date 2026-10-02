@@ -75,6 +75,8 @@ func textForLanguage(lang botLanguage, pt string, en string) string {
 }
 
 var commandNames = map[string]map[botLanguage]string{
+	"digest":   {botLanguagePT: "digest", botLanguageEN: "digest"},
+	"retry":    {botLanguagePT: "retry", botLanguageEN: "retry"},
 	"ping":     {botLanguagePT: "ping", botLanguageEN: "ping"},
 	"start":    {botLanguagePT: "start", botLanguageEN: "start"},
 	"stop":     {botLanguagePT: "stop", botLanguageEN: "stop"},
@@ -148,7 +150,20 @@ func buildApplicationCommands(lang botLanguage) []*discordgo.ApplicationCommand 
 		}
 	}
 
-	return []*discordgo.ApplicationCommand{
+	commands := []*discordgo.ApplicationCommand{
+		{Name: "play", Description: textForLanguage(lang, "Toca o áudio de um vídeo do YouTube na tua call.", "Play a YouTube video's audio in your voice channel."), Options: []*discordgo.ApplicationCommandOption{
+			{Type: discordgo.ApplicationCommandOptionString, Name: "url", Description: textForLanguage(lang, "Link do vídeo do YouTube (até 1 hora).", "YouTube video link (up to 1 hour)."), Required: true},
+		}},
+		{Name: "pause", Description: textForLanguage(lang, "Pausa ou retoma o áudio na call.", "Pause or resume voice playback.")},
+		{Name: "skip", Description: textForLanguage(lang, "Salta para o próximo áudio da fila.", "Skip to the next track in the queue.")},
+		{Name: "queue", Description: textForLanguage(lang, "Mostra o áudio atual e a fila da call.", "Show the current track and voice queue.")},
+		{Name: "musicstop", Description: textForLanguage(lang, "Para a música e limpa a fila; continua a gravar a conversa.", "Stop playback and clear the queue; keep recording the conversation.")},
+		{Name: "digest", Description: "Catch up on this text channel with decisions, highlights and lore.", Options: []*discordgo.ApplicationCommandOption{
+			{Type: discordgo.ApplicationCommandOptionInteger, Name: "hours", Description: "Hours to recap (1–168). Default: 24.", MinValue: float64Pointer(1), MaxValue: 168},
+		}},
+		{Name: "retry", Description: "Recover failed recordings or a failed summary.", Options: []*discordgo.ApplicationCommandOption{
+			{Type: discordgo.ApplicationCommandOptionInteger, Name: "session", Description: "Session ID to recover.", Required: true, MinValue: float64Pointer(1)},
+		}},
 		{
 			Name:        commandName(lang, "ping"),
 			Description: "Replies with PONG!",
@@ -254,4 +269,11 @@ func buildApplicationCommands(lang botLanguage) []*discordgo.ApplicationCommand 
 			},
 		},
 	}
+	for _, command := range commands {
+		if requiresManageServer(command.Name) {
+			permissions := int64(discordgo.PermissionManageServer)
+			command.DefaultMemberPermissions = &permissions
+		}
+	}
+	return commands
 }

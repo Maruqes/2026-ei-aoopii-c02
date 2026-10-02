@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import json
 import random
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
 from urllib.parse import urlparse
 
 import psycopg2
-
 
 CHUNK_WINDOW = timedelta(minutes=30)
 
@@ -51,6 +52,7 @@ class VoiceSession:
     status: str
     summary: str | None
     agent_error: str | None
+    response_language: str = "pt"
 
 
 @dataclass(frozen=True)
@@ -118,7 +120,12 @@ def format_chunk_rows(rows: Iterable[dict]) -> str:
 
 def format_context_message_row(row: dict, *, time_only: bool = False) -> str:
     tstamp = normalize_timestamp(row["tstamp"])
-    username = row.get("display_name") or row.get("username") or row.get("discord_id") or "unknown"
+    username = (
+        row.get("display_name")
+        or row.get("username")
+        or row.get("discord_id")
+        or "unknown"
+    )
     content = " ".join(str(row.get("content", "")).split())
     if not content:
         return ""
@@ -134,7 +141,9 @@ def format_context_message_row(row: dict, *, time_only: bool = False) -> str:
     return f"{prefix} {username}: {content}"
 
 
-def display_name_from_row(username: str, display_name: str | None, discord_id: str) -> str:
+def display_name_from_row(
+    username: str, display_name: str | None, discord_id: str
+) -> str:
     for value in (display_name, username, discord_id):
         cleaned = str(value or "").strip()
         if cleaned:
@@ -176,8 +185,22 @@ class DataRepository:
                 """
             )
             last_row = cur.fetchone()
+            cur.execute(
+                "SELECT status, COUNT(*)::int FROM voice_sessions GROUP BY status"
+            )
+            sessions = dict(cur.fetchall())
+            cur.execute(
+                "SELECT status, COUNT(*)::int FROM voice_profile_jobs GROUP BY status"
+            )
+            profiles = dict(cur.fetchall())
             return {
-                "recordings_transcribing": counts.get("transcribing", 0) + counts.get("pending", 0),
+                "sessions_pending": sessions.get("finished", 0)
+                + sessions.get("agent_running", 0),
+                "sessions_failed": sessions.get("agent_failed", 0),
+                "voice_profiles_pending": profiles.get("pending", 0),
+                "voice_profiles_failed": profiles.get("failed", 0),
+                "recordings_transcribing": counts.get("transcribing", 0)
+                + counts.get("pending", 0),
                 "recordings_failed": counts.get("failed", 0),
                 "recordings_completed": counts.get("completed", 0),
                 "last_recording_status": last_row[0] if last_row else None,
@@ -187,17 +210,47 @@ class DataRepository:
         finally:
             conn.close()
 
-    def delete_user_by_discord_id(self, discord_id: str) -> dict | None:
+    def delete_user_by_discord_id(
+        self, discord_id: str, *, remove_recording=None
+    ) -> dict | None:
         conn = connect(self.database_url)
         try:
             cur = conn.cursor()
-            cur.execute("SELECT id FROM users WHERE discord_id = %s", (discord_id.strip(),))
+            cur.execute(
+                "SELECT id FROM users WHERE discord_id = %s", (discord_id.strip(),)
+            )
             row = cur.fetchone()
-            if not row:
+            user_id = int(row[0]) if row else None
+            # Never erase input owned by an active worker. Explicit erasure can be retried.
+            cur.execute(
+                "SELECT id FROM voice_recordings WHERE discord_id = %s ORDER BY id",
+                (discord_id.strip(),),
+            )
+            recording_ids = [item[0] for item in cur.fetchall()]
+            if user_id is None and not recording_ids:
                 return None
-
-            user_id = int(row[0])
-            cur.execute("SELECT google_doc_id FROM user_profiles WHERE user_id = %s", (user_id,))
+            for recording_id in recording_ids:
+                cur.execute(
+                    "SELECT pg_try_advisory_xact_lock(%s, %s)", (101, recording_id)
+                )
+                if not cur.fetchone()[0]:
+                    raise ValueError(
+                        "Transcription in progress; try /forget after it finishes"
+                    )
+            cur.execute(
+                "SELECT DISTINCT vr.recording_filename FROM voice_recordings vr "
+                "WHERE vr.discord_id = %s AND NOT EXISTS (SELECT 1 FROM voice_recordings other "
+                "WHERE other.recording_filename = vr.recording_filename AND other.discord_id <> %s)",
+                (discord_id.strip(), discord_id.strip()),
+            )
+            recording_filenames = [item[0] for item in cur.fetchall()]
+            if remove_recording is not None:
+                # Keep DB ownership on unlink failure so explicit erasure can be retried.
+                for filename in recording_filenames:
+                    remove_recording(filename)
+            cur.execute(
+                "SELECT google_doc_id FROM user_profiles WHERE user_id = %s", (user_id,)
+            )
             profile_row = cur.fetchone()
             google_doc_id = profile_row[0] if profile_row else None
 
@@ -213,13 +266,18 @@ class DataRepository:
             )
             channel_names = [channel_row[0] for channel_row in cur.fetchall()]
 
-            cur.execute("SELECT COUNT(*)::int FROM messages WHERE user_id = %s", (user_id,))
+            cur.execute(
+                "SELECT COUNT(*)::int FROM messages WHERE user_id = %s", (user_id,)
+            )
             messages_deleted = int(cur.fetchone()[0])
 
             cur.execute("DELETE FROM messages WHERE user_id = %s", (user_id,))
             cur.execute("DELETE FROM user_profiles WHERE user_id = %s", (user_id,))
             cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
-            cur.execute("DELETE FROM voice_recordings WHERE discord_id = %s", (discord_id.strip(),))
+            cur.execute(
+                "DELETE FROM voice_recordings WHERE discord_id = %s",
+                (discord_id.strip(),),
+            )
 
             for channel_name in channel_names:
                 self._rebuild_all_voice_chunks_for_channel(conn, channel_name)
@@ -240,6 +298,9 @@ class DataRepository:
         self,
         *,
         session_id: int | None = None,
+        recording_id: int | None = None,
+        duration_seconds: float | None = None,
+        provider_completed_at: datetime | None = None,
         discord_id: str,
         username: str,
         display_name: str | None,
@@ -247,16 +308,42 @@ class DataRepository:
         messages: list[MessageInsert],
     ) -> TranscriptionInsertResult:
         normalized_messages = [
-            MessageInsert(content=message.content.strip(), tstamp=normalize_timestamp(message.tstamp))
+            MessageInsert(
+                content=message.content.strip(),
+                tstamp=normalize_timestamp(message.tstamp),
+            )
             for message in messages
             if message.content.strip()
         ]
 
         conn = connect(self.database_url)
         try:
+            if recording_id is not None:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT status FROM voice_recordings WHERE id = %s FOR UPDATE",
+                    (recording_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise ValueError(
+                        "Recording was removed while transcription was running"
+                    )
+                if row[0] == "completed":
+                    return TranscriptionInsertResult(0, [], [])
             user_id = self._upsert_user(conn, discord_id, username, display_name)
-            message_ids = self._insert_messages(conn, user_id, session_id, channel_name, normalized_messages)
-            chunks = self._rebuild_chunks(conn, channel_name, [message.tstamp for message in normalized_messages])
+            message_ids = self._insert_messages(
+                conn, user_id, session_id, channel_name, normalized_messages
+            )
+            chunks = self._rebuild_chunks(
+                conn, channel_name, [message.tstamp for message in normalized_messages]
+            )
+            if recording_id is not None:
+                cur.execute(
+                    "UPDATE voice_recordings SET status = 'completed', error = NULL, "
+                    "duration_seconds = %s, provider_completed_at = %s, completed_at = NOW(), updated_at = NOW() WHERE id = %s",
+                    (duration_seconds, provider_completed_at, recording_id),
+                )
             conn.commit()
             return TranscriptionInsertResult(
                 user_id=user_id,
@@ -306,6 +393,7 @@ class DataRepository:
                     content = EXCLUDED.content,
                     tstamp = EXCLUDED.tstamp,
                     edited_at = COALESCE(EXCLUDED.edited_at, messages.edited_at)
+                WHERE COALESCE(EXCLUDED.edited_at, EXCLUDED.tstamp) >= COALESCE(messages.edited_at, messages.tstamp)
                 RETURNING id
                 """,
                 (
@@ -319,7 +407,14 @@ class DataRepository:
                     normalize_timestamp(edited_at) if edited_at else None,
                 ),
             )
-            message_id = int(cur.fetchone()[0])
+            row = cur.fetchone()
+            if row is None:
+                cur.execute(
+                    "SELECT id FROM messages WHERE discord_message_id = %s",
+                    (discord_message_id.strip(),),
+                )
+                row = cur.fetchone()
+            message_id = int(row[0])
             conn.commit()
             return TextMessageInsertResult(user_id=user_id, message_id=message_id)
         except Exception:
@@ -480,7 +575,7 @@ class DataRepository:
                 )
                 VALUES (%s, %s, %s, %s, %s, 'open')
                 RETURNING id, guild_id, voice_channel_id, channel_name, summary_channel_id,
-                          started_at, ended_at, status, summary, agent_error
+                          started_at, ended_at, status, summary, agent_error, response_language
                 """,
                 (
                     guild_id.strip(),
@@ -499,7 +594,9 @@ class DataRepository:
         finally:
             conn.close()
 
-    def finish_voice_session(self, session_id: int, ended_at: datetime) -> VoiceSession | None:
+    def finish_voice_session(
+        self, session_id: int, ended_at: datetime, language: str = "pt"
+    ) -> VoiceSession | None:
         conn = connect(self.database_url)
         try:
             cur = conn.cursor()
@@ -508,12 +605,13 @@ class DataRepository:
                 UPDATE voice_sessions
                 SET ended_at = COALESCE(ended_at, %s),
                     status = CASE WHEN status = 'open' THEN 'finished' ELSE status END,
+                    response_language = %s,
                     updated_at = NOW()
                 WHERE id = %s
                 RETURNING id, guild_id, voice_channel_id, channel_name, summary_channel_id,
-                          started_at, ended_at, status, summary, agent_error
+                          started_at, ended_at, status, summary, agent_error, response_language
                 """,
-                (normalize_timestamp(ended_at), session_id),
+                (normalize_timestamp(ended_at), language, session_id),
             )
             row = cur.fetchone()
             conn.commit()
@@ -531,7 +629,7 @@ class DataRepository:
             cur.execute(
                 """
                 SELECT id, guild_id, voice_channel_id, channel_name, summary_channel_id,
-                       started_at, ended_at, status, summary, agent_error
+                       started_at, ended_at, status, summary, agent_error, response_language
                 FROM voice_sessions
                 WHERE id = %s
                 """,
@@ -561,7 +659,7 @@ class DataRepository:
             cur.execute(
                 f"""
                 SELECT id, guild_id, voice_channel_id, channel_name, summary_channel_id,
-                       started_at, ended_at, status, summary, agent_error
+                       started_at, ended_at, status, summary, agent_error, response_language
                 FROM voice_sessions
                 WHERE guild_id = %s
                 {channel_filter}
@@ -663,7 +761,46 @@ class DataRepository:
         finally:
             conn.close()
 
-    def get_guild_oracle_context(self, guild_id: str) -> str:
+    def get_text_digest(
+        self, guild_id: str, *, hours: int = 24, channel_id: str | None = None
+    ) -> tuple[str, int, bool]:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT m.tstamp, u.username, u.display_name, m.channel_name, m.content "
+                "FROM messages m JOIN users u ON u.id = m.user_id "
+                "WHERE m.guild_id = %s AND m.source_type = 'text' "
+                "AND m.tstamp >= NOW() - %s * INTERVAL '1 hour' "
+                "AND (%s::text IS NULL OR m.channel_id = %s) "
+                "ORDER BY m.tstamp DESC, m.id DESC LIMIT 2001",
+                (guild_id.strip(), hours, channel_id, channel_id),
+            )
+            rows = cur.fetchall()
+            limited = len(rows) > 2000
+            rows = rows[:2000]
+            lines = [
+                format_context_message_row(
+                    dict(
+                        zip(
+                            (
+                                "tstamp",
+                                "username",
+                                "display_name",
+                                "channel_name",
+                                "content",
+                            ),
+                            row,
+                        )
+                    )
+                )
+                for row in reversed(rows)
+            ]
+            return "\n".join(lines), len(rows), limited
+        finally:
+            conn.close()
+
+    def get_guild_oracle_context(self, guild_id: str, question: str = "") -> str:
         conn = connect(self.database_url)
         try:
             sections: list[str] = []
@@ -688,32 +825,9 @@ class DataRepository:
                     f"Voice session {started:%Y-%m-%d %H:%M} in {channel_name}:\n{row[3].strip()}"
                 )
             if summary_lines:
-                sections.append("Recent voice session summaries:\n" + "\n\n".join(summary_lines))
-
-            cur.execute(
-                """
-                SELECT tc.channel_name, tc.start_at, tc.end_at, tc.content
-                FROM text_chunks tc
-                WHERE trim(tc.content) <> ''
-                  AND tc.channel_name IN (
-                      SELECT DISTINCT channel_name
-                      FROM voice_sessions
-                      WHERE guild_id = %s
-                  )
-                ORDER BY tc.end_at DESC
-                LIMIT 6
-                """,
-                (guild_id.strip(),),
-            )
-            chunk_lines: list[str] = []
-            for row in cur.fetchall():
-                start_at = normalize_timestamp(row[1])
-                end_at = normalize_timestamp(row[2])
-                chunk_lines.append(
-                    f"Voice chunk {row[0]} [{start_at:%Y-%m-%d %H:%M} - {end_at:%H:%M}]:\n{row[3].strip()}"
+                sections.append(
+                    "Recent voice session summaries:\n" + "\n\n".join(summary_lines)
                 )
-            if chunk_lines:
-                sections.append("Voice transcript chunks:\n" + "\n\n".join(chunk_lines))
 
             cur.execute(
                 """
@@ -744,39 +858,315 @@ class DataRepository:
             message_lines = [format_context_message_row(row) for row in message_rows]
             message_lines = [line for line in message_lines if line]
             if message_lines:
-                sections.append("Recent messages (text and voice):\n" + "\n".join(message_lines))
+                sections.append(
+                    "Recent messages (text and voice):\n" + "\n".join(message_lines)
+                )
 
+            stopwords = {
+                "about",
+                "what",
+                "when",
+                "where",
+                "this",
+                "that",
+                "with",
+                "have",
+                "does",
+                "quem",
+                "qual",
+                "quando",
+                "onde",
+                "sobre",
+                "para",
+                "como",
+                "esta",
+                "este",
+                "isso",
+                "isto",
+                "mais",
+                "menos",
+                "fazer",
+            }
+            terms = list(
+                dict.fromkeys(
+                    word.strip('.,!?;:"()').lower()
+                    for word in question.split()
+                    if len(word) >= 4 and word.lower() not in stopwords
+                )
+            )[:8]
+            if terms:
+                predicates = " OR ".join("m.content ILIKE %s" for _ in terms)
+                patterns = [
+                    "%"
+                    + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    + "%"
+                    for term in terms
+                ]
+                cur.execute(
+                    "SELECT m.tstamp, u.username, m.channel_name, m.content FROM messages m "
+                    "JOIN users u ON u.id = m.user_id LEFT JOIN voice_sessions vs ON vs.id = m.session_id "
+                    "WHERE (m.guild_id = %s OR vs.guild_id = %s) AND ("
+                    + predicates
+                    + ") "
+                    "ORDER BY m.tstamp DESC, m.id DESC LIMIT 100",
+                    (guild_id.strip(), guild_id.strip(), *patterns),
+                )
+                relevant = [
+                    format_context_message_row(
+                        {
+                            "tstamp": r[0],
+                            "username": r[1],
+                            "channel_name": r[2],
+                            "content": r[3],
+                        }
+                    )
+                    for r in cur.fetchall()
+                ]
+                if relevant:
+                    sections.insert(
+                        0,
+                        "Messages matching the question (newest first):\n"
+                        + "\n".join(relevant),
+                    )
             return "\n\n".join(sections).strip()
         finally:
             conn.close()
 
-    def start_recording(self, *, session_id: int | None, recording_filename: str, discord_id: str) -> int | None:
-        if session_id is None:
-            return None
-
+    def get_recordings_for_cleanup(self, filenames: list[str]) -> dict[str, list[dict]]:
+        if not filenames:
+            return {}
         conn = connect(self.database_url)
         try:
             cur = conn.cursor()
             cur.execute(
-                """
-                INSERT INTO voice_recordings (session_id, recording_filename, discord_id, status, error)
-                VALUES (%s, %s, %s, 'transcribing', NULL)
-                ON CONFLICT (recording_filename) DO UPDATE
-                SET session_id = EXCLUDED.session_id,
-                    discord_id = EXCLUDED.discord_id,
-                    status = 'transcribing',
-                    error = NULL,
-                    updated_at = NOW()
-                RETURNING id
-                """,
-                (session_id, recording_filename, discord_id),
+                "SELECT id, recording_filename, discord_id, session_id, status FROM voice_recordings WHERE recording_filename = ANY(%s)",
+                (filenames,),
             )
-            recording_id = int(cur.fetchone()[0])
+            result: dict[str, list[dict]] = {}
+            for row in cur.fetchall():
+                result.setdefault(row[1], []).append(
+                    dict(
+                        zip(
+                            (
+                                "id",
+                                "recording_filename",
+                                "discord_id",
+                                "session_id",
+                                "status",
+                            ),
+                            row,
+                        )
+                    )
+                )
+            return result
+        finally:
+            conn.close()
+
+    def recording_receipt(
+        self, filename: str, discord_id: str, session_id: int | None
+    ) -> dict | None:
+        rows = self.get_recordings_for_cleanup([filename]).get(filename, [])
+        if not rows:
+            return None
+        if any(
+            row["discord_id"] != discord_id or row["session_id"] != session_id
+            for row in rows
+        ):
+            raise ValueError("Recording filename belongs to different metadata")
+        return rows[0]
+
+    def start_recording(
+        self,
+        *,
+        session_id: int | None,
+        recording_filename: str,
+        discord_id: str,
+        metadata: dict | None = None,
+    ) -> int:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            if session_id is not None:
+                cur.execute(
+                    "SELECT status FROM voice_sessions WHERE id = %s FOR UPDATE",
+                    (session_id,),
+                )
+                session = cur.fetchone()
+                if not session or session[0] != "open":
+                    # Duplicate submissions after finish remain idempotent.
+                    cur.execute(
+                        "SELECT id FROM voice_recordings WHERE recording_filename = %s AND session_id = %s AND discord_id = %s",
+                        (recording_filename, session_id, discord_id),
+                    )
+                    previous = cur.fetchone()
+                    if previous:
+                        return int(previous[0])
+                    raise ValueError("Session is closed or does not exist")
+            cur.execute(
+                "INSERT INTO voice_recordings (session_id, recording_filename, discord_id, status, metadata) "
+                "VALUES (%s, %s, %s, 'pending', %s::jsonb) "
+                "ON CONFLICT (recording_filename) DO NOTHING RETURNING id",
+                (
+                    session_id,
+                    recording_filename,
+                    discord_id,
+                    json.dumps(metadata) if metadata else None,
+                ),
+            )
+            row = cur.fetchone()
+            if row is None:
+                cur.execute(
+                    "SELECT id FROM voice_recordings WHERE recording_filename = %s AND discord_id = %s AND session_id IS NOT DISTINCT FROM %s",
+                    (recording_filename, discord_id, session_id),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    raise ValueError("Recording filename belongs to different metadata")
             conn.commit()
-            return recording_id
+            return int(row[0])
         except Exception:
             conn.rollback()
             raise
+        finally:
+            conn.close()
+
+    @contextmanager
+    def job_lock(self, namespace: int, job_id: int, *, wait: bool = False):
+        """Session advisory locks survive commits, release automatically on process death."""
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            if wait:
+                cur.execute("SELECT pg_advisory_lock(%s, %s)", (namespace, job_id))
+                locked = True
+            else:
+                cur.execute("SELECT pg_try_advisory_lock(%s, %s)", (namespace, job_id))
+                locked = bool(cur.fetchone()[0])
+            yield locked
+        finally:
+            if not conn.closed:
+                conn.rollback()
+                # Closing releases the session advisory lock even after an exception.
+                conn.close()
+
+    def retry_session(self, session_id: int) -> None:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT id FROM voice_sessions WHERE id = %s FOR UPDATE", (session_id,)
+            )
+            cur.execute(
+                "UPDATE voice_profile_jobs pj SET status = 'pending', error = NULL, revision = revision + 1 "
+                "WHERE pj.session_id = %s AND (pj.status = 'failed' OR EXISTS ("
+                "SELECT 1 FROM voice_recordings vr JOIN users u ON u.discord_id = vr.discord_id "
+                "WHERE vr.session_id = pj.session_id AND vr.status = 'failed' AND u.id = pj.user_id))",
+                (session_id,),
+            )
+            cur.execute(
+                "UPDATE voice_recordings SET status = 'pending', error = NULL, updated_at = NOW() "
+                "WHERE session_id = %s AND status = 'failed' AND metadata IS NOT NULL",
+                (session_id,),
+            )
+            cur.execute(
+                "UPDATE voice_sessions SET status = 'finished', summary = NULL, agent_error = NULL, updated_at = NOW() WHERE id = %s",
+                (session_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_recording_jobs(self) -> list[dict]:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT id, session_id, recording_filename, metadata, provider_job_id, provider_key_name "
+                "FROM voice_recordings WHERE status IN ('pending', 'transcribing') AND metadata IS NOT NULL ORDER BY id LIMIT 100"
+            )
+            return [
+                dict(
+                    zip(
+                        (
+                            "id",
+                            "session_id",
+                            "recording_filename",
+                            "metadata",
+                            "provider_job_id",
+                            "provider_key_name",
+                        ),
+                        row,
+                    )
+                )
+                for row in cur.fetchall()
+            ]
+        finally:
+            conn.close()
+
+    def begin_recording_job(self, recording_id: int) -> bool:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE voice_recordings SET status = 'transcribing', updated_at = NOW() "
+                "WHERE id = %s AND status IN ('pending', 'transcribing') RETURNING id",
+                (recording_id,),
+            )
+            claimed = cur.fetchone() is not None
+            conn.commit()
+            return claimed
+        finally:
+            conn.close()
+
+    def save_provider_job(self, recording_id: int, job_id: str, key_name: str) -> None:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE voice_recordings SET provider_job_id = %s, provider_key_name = %s, updated_at = NOW() WHERE id = %s",
+                (job_id, key_name, recording_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_unfinished_session_ids(self) -> list[int]:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT vs.id FROM voice_sessions vs WHERE vs.status IN ('finished', 'agent_running') "
+                "AND NOT EXISTS (SELECT 1 FROM voice_recordings vr WHERE vr.session_id = vs.id "
+                "AND vr.status IN ('pending', 'transcribing')) ORDER BY vs.id LIMIT 100"
+            )
+            return [int(row[0]) for row in cur.fetchall()]
+        finally:
+            conn.close()
+
+    def get_session_recording_counts(self, session_id: int) -> dict[str, int]:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT status, COUNT(*) FROM voice_recordings WHERE session_id = %s GROUP BY status",
+                (session_id,),
+            )
+            return {row[0]: int(row[1]) for row in cur.fetchall()}
+        finally:
+            conn.close()
+
+    def get_local_speechmatics_hours(self) -> dict[str, float]:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT provider_key_name, SUM(duration_seconds) / 3600.0 FROM voice_recordings "
+                "WHERE status = 'completed' AND provider_key_name IS NOT NULL "
+                "AND provider_completed_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' "
+                "AND provider_completed_at < (date_trunc('day', NOW() AT TIME ZONE 'UTC') + INTERVAL '1 day') AT TIME ZONE 'UTC' "
+                "GROUP BY provider_key_name"
+            )
+            return {row[0]: float(row[1] or 0) for row in cur.fetchall()}
         finally:
             conn.close()
 
@@ -786,7 +1176,9 @@ class DataRepository:
     def mark_recording_failed(self, recording_id: int | None, error: str) -> None:
         self._mark_recording(recording_id, "failed", error)
 
-    def _mark_recording(self, recording_id: int | None, status: str, error: str | None) -> None:
+    def _mark_recording(
+        self, recording_id: int | None, status: str, error: str | None
+    ) -> None:
         if recording_id is None:
             return
 
@@ -821,7 +1213,7 @@ class DataRepository:
                     agent_error = NULL,
                     updated_at = NOW()
                 WHERE id = %s
-                  AND status = 'finished'
+                  AND status IN ('finished', 'agent_running')
                   AND NOT EXISTS (
                       SELECT 1
                       FROM voice_recordings
@@ -868,10 +1260,74 @@ class DataRepository:
                 """,
                 (status, summary, error, session_id),
             )
+            if status == "agent_done":
+                cur.execute(
+                    "INSERT INTO voice_profile_jobs (session_id, user_id) "
+                    "SELECT DISTINCT session_id, user_id FROM messages WHERE session_id = %s "
+                    "ON CONFLICT DO NOTHING",
+                    (session_id,),
+                )
             conn.commit()
         except Exception:
             conn.rollback()
             raise
+        finally:
+            conn.close()
+
+    def get_voice_profile_jobs(self) -> list[tuple[int, int]]:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT pj.session_id, pj.user_id FROM voice_profile_jobs pj JOIN voice_sessions vs ON vs.id = pj.session_id "
+                "WHERE pj.status = 'pending' AND vs.status = 'agent_done' "
+                "AND NOT EXISTS (SELECT 1 FROM voice_recordings vr WHERE vr.session_id = vs.id "
+                "AND vr.status IN ('pending', 'transcribing')) ORDER BY pj.session_id, pj.user_id LIMIT 100"
+            )
+            return [(int(row[0]), int(row[1])) for row in cur.fetchall()]
+        finally:
+            conn.close()
+
+    def get_voice_profile_job_revision(
+        self, session_id: int, user_id: int
+    ) -> int | None:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT pj.revision FROM voice_profile_jobs pj JOIN voice_sessions vs ON vs.id = pj.session_id "
+                "WHERE pj.session_id = %s AND pj.user_id = %s AND pj.status = 'pending' AND vs.status = 'agent_done'",
+                (session_id, user_id),
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row else None
+        finally:
+            conn.close()
+
+    def mark_voice_profile_job(
+        self,
+        session_id: int,
+        user_id: int,
+        status: str,
+        error: str | None = None,
+        expected_revision: int | None = None,
+    ) -> None:
+        conn = connect(self.database_url)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE voice_profile_jobs SET status = %s, error = %s WHERE session_id = %s AND user_id = %s "
+                "AND (%s::int IS NULL OR revision = %s)",
+                (
+                    status,
+                    error,
+                    session_id,
+                    user_id,
+                    expected_revision,
+                    expected_revision,
+                ),
+            )
+            conn.commit()
         finally:
             conn.close()
 
@@ -1074,39 +1530,20 @@ class DataRepository:
         finally:
             conn.close()
 
-    def get_text_messages_for_profile(self, user_id: int, after: datetime | None) -> list[dict]:
+    def get_text_messages_for_profile(
+        self, user_id: int, after: datetime | None, until: datetime | None = None
+    ) -> list[dict]:
         conn = connect(self.database_url)
         try:
             cur = conn.cursor()
-            if after is None:
-                cur.execute(
-                    """
-                    SELECT m.tstamp, u.discord_id, u.username, u.display_name,
-                           m.channel_name, m.content
-                    FROM messages m
-                    JOIN users u ON u.id = m.user_id
-                    WHERE m.user_id = %s
-                      AND m.source_type = 'text'
-                      AND m.content <> ''
-                    ORDER BY m.tstamp ASC, m.id ASC
-                    """,
-                    (user_id,),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT m.tstamp, u.discord_id, u.username, u.display_name,
-                           m.channel_name, m.content
-                    FROM messages m
-                    JOIN users u ON u.id = m.user_id
-                    WHERE m.user_id = %s
-                      AND m.source_type = 'text'
-                      AND m.content <> ''
-                      AND m.tstamp > %s
-                    ORDER BY m.tstamp ASC, m.id ASC
-                    """,
-                    (user_id, normalize_timestamp(after)),
-                )
+            cur.execute(
+                "SELECT m.tstamp, u.discord_id, u.username, u.display_name, m.channel_name, m.content "
+                "FROM messages m JOIN users u ON u.id = m.user_id "
+                "WHERE m.user_id = %s AND m.source_type = 'text' AND m.content <> '' "
+                "AND (%s::timestamptz IS NULL OR m.tstamp > %s) "
+                "AND (%s::timestamptz IS NULL OR m.tstamp <= %s) ORDER BY m.tstamp ASC, m.id ASC",
+                (user_id, after, after, until, until),
+            )
             return [
                 {
                     "tstamp": row[0],
@@ -1149,12 +1586,9 @@ def connect(database_url: str):
     parsed = urlparse(database_url)
     if parsed.scheme not in {"postgresql", "postgres"}:
         raise ValueError("DATABASE_URL must use postgresql://")
+    # libpq handles percent-encoded passwords and connection options correctly.
     return psycopg2.connect(
-        user=parsed.username,
-        password=parsed.password,
-        host=parsed.hostname or "localhost",
-        port=parsed.port or 5432,
-        dbname=parsed.path.lstrip("/"),
+        database_url, connect_timeout=5, application_name="discord_anthropologist"
     )
 
 
@@ -1170,6 +1604,7 @@ def voice_session_from_row(row) -> VoiceSession:
         status=row[7],
         summary=row[8],
         agent_error=row[9],
+        response_language=row[10] if len(row) > 10 else "pt",
     )
 
 

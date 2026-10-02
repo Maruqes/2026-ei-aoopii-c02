@@ -20,7 +20,7 @@ BEGIN
     IF NOT EXISTS (
         SELECT 1
         FROM pg_constraint
-        WHERE conname = 'messages_session_id_fkey'
+        WHERE conname = 'messages_session_id_fkey' AND conrelid = 'messages'::regclass
     ) THEN
         ALTER TABLE messages
         ADD CONSTRAINT messages_session_id_fkey

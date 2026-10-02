@@ -1,0 +1,3 @@
+# The default extras bundle the matching YouTube EJS challenge solver.
+# Upgrade together and verify playback when YouTube changes its extraction logic.
+yt-dlp[default]==2026.8.19

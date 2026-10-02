@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,12 +16,17 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/google/uuid"
 )
 
 type voiceConnectionState struct {
 	vc                  *discordgo.VoiceConnection
+	music               *MusicPlayer
 	ssrcUsers           *SSRCUserMap
 	recordingEvents     chan recordingControlEvent
+	recordingStop       chan struct{}
+	recordingDone       chan struct{}
+	recordingStopOnce   sync.Once
 	transcriptionClient *TranscriptionClient
 	sessionID           int64
 	summaryChannelID    string
@@ -43,6 +51,7 @@ type recordingControlEvent struct {
 	finishAll     bool
 	stopListening bool
 	user          voiceUserInfo
+	ack           chan error
 }
 
 var (
@@ -65,11 +74,15 @@ func newVoiceConnectionState(
 	transcriptionClient *TranscriptionClient,
 	sessionID int64,
 	summaryChannelID string,
+	onMusicError ...func(MusicTrack, error),
 ) *voiceConnectionState {
 	return &voiceConnectionState{
 		vc:                  vc,
+		music:               NewMusicPlayer(vc, onMusicError...),
 		ssrcUsers:           ssrcUsers,
 		recordingEvents:     make(chan recordingControlEvent, 128),
+		recordingStop:       make(chan struct{}),
+		recordingDone:       make(chan struct{}),
 		transcriptionClient: transcriptionClient,
 		sessionID:           sessionID,
 		summaryChannelID:    summaryChannelID,
@@ -128,6 +141,7 @@ func clearVoiceConnection(guildID string, vc *discordgo.VoiceConnection) {
 
 	if current.vc == vc {
 		current.stopLeaveTimer()
+		current.closeMusic()
 	}
 }
 
@@ -151,10 +165,24 @@ func stopAllVoiceConnections() {
 		}
 
 		state.stopLeaveTimer()
+		state.closeMusic()
 		state.queueAllRecordingsFinish()
 		state.ssrcUsers.Reset()
 		if err := state.vc.Disconnect(); err != nil {
 			log.Printf("erro ao desligar bot do servidor %s: %v", guildID, err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, state := range connections {
+		if state == nil || state.recordingDone == nil {
+			continue
+		}
+		select {
+		case <-state.recordingDone:
+		case <-ctx.Done():
+			log.Printf("Timeout waiting for local audio flush; outbox will recover finalized clips")
+			return
 		}
 	}
 }
@@ -258,6 +286,10 @@ func (state *voiceConnectionState) queueAllRecordingsFinish() {
 		return
 	}
 
+	if state.recordingStop != nil {
+		state.recordingStopOnce.Do(func() { close(state.recordingStop) })
+		return
+	}
 	state.queueRecordingEvent(recordingControlEvent{finishAll: true, stopListening: true})
 }
 
@@ -279,9 +311,10 @@ func (state *voiceConnectionState) queueRecordingEvent(event recordingControlEve
 
 	select {
 	case state.recordingEvents <- event:
-	case <-time.After(5 * time.Second):
-		log.Printf("fila de eventos de gravação cheia; a aguardar envio para user=%s finishAll=%v", event.user.DiscordID, event.finishAll)
-		state.recordingEvents <- event
+	case <-state.recordingDone:
+		return
+	case <-time.After(time.Second):
+		log.Printf("fila de eventos de gravação cheia; gravação será fechada por inatividade user=%s finishAll=%v", event.user.DiscordID, event.finishAll)
 	}
 }
 
@@ -428,6 +461,7 @@ func disconnectVoiceConnection(guildID string, state *voiceConnectionState) bool
 	voiceMu.Unlock()
 
 	state.stopLeaveTimer()
+	state.closeMusic()
 	state.queueAllRecordingsFinish()
 	state.ssrcUsers.Reset()
 	if err := state.vc.Disconnect(); err != nil {
@@ -461,6 +495,8 @@ func disconnectIfBotIsAlone(s *discordgo.Session, guildID string, state *voiceCo
 
 func receiveAudio(s *discordgo.Session, guildID string, state *voiceConnectionState) {
 	log.Printf("à espera de áudio no servidor=%s canal=%s", guildID, state.vc.ChannelID)
+	registerRecordingState(state)
+	defer unregisterRecordingState(state)
 	defer clearVoiceConnection(guildID, state.vc)
 
 	err := ListenAndWriteOpusToWAV(
@@ -472,18 +508,28 @@ func receiveAudio(s *discordgo.Session, guildID string, state *voiceConnectionSt
 		state.transcriptionClient,
 		state.userInfo,
 		state.currentChannelName,
+		state.recordingStop,
 	)
 	if err != nil {
 		log.Printf("erro ao gravar áudio no servidor=%s: %v", guildID, err)
 	}
 
+	close(state.recordingDone)
 	log.Printf("captura finalizada no servidor=%s", guildID)
 	finishSessionAndPostSummary(s, state)
 }
 
 func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
-	// Ignora o próprio bot
+	if vs == nil || vs.VoiceState == nil {
+		return
+	}
 	if s.State != nil && s.State.User != nil && vs.UserID == s.State.User.ID {
+		if vs.ChannelID == "" {
+			if current := getVoiceConnection(vs.GuildID); current != nil {
+				current.queueAllRecordingsFinish()
+				clearVoiceConnection(vs.GuildID, current.vc)
+			}
+		}
 		return
 	}
 	if !isBotEnabled() {
@@ -516,6 +562,10 @@ func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 		if current.vc.ChannelID == channelID {
 			return
 		}
+		// Keep playback in its call when members join another channel.
+		if current.music != nil && current.music.IsBusy() {
+			return
+		}
 
 		current.queueCloseAllRecordings()
 		if err := current.vc.ChangeChannel(channelID, false, false); err != nil {
@@ -534,13 +584,16 @@ func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 	voiceJoinMu.Lock()
 	defer voiceJoinMu.Unlock()
 
+	if !isBotEnabled() {
+		return
+	}
 	if existing := getVoiceConnection(guildID); existing != nil {
 		return
 	}
 
 	log.Printf("utilizador %s entrou no canal %s do servidor %s", vs.UserID, channelID, guildID)
 
-	vc, err := s.ChannelVoiceJoin(guildID, channelID, true, false)
+	vc, err := s.ChannelVoiceJoin(guildID, channelID, false, false)
 	if err != nil {
 		log.Println("erro ao entrar no voice channel:", err)
 		return
@@ -557,7 +610,14 @@ func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 		log.Printf("nao foi possivel resolver canal de texto para resumo no servidor %s", guildID)
 	}
 	sessionID := createAPISession(transcriptionClient, guildID, channelID, channelName, summaryChannelID)
-	state := newVoiceConnectionState(vc, ssrcUsers, channelName, transcriptionClient, sessionID, summaryChannelID)
+	state := newVoiceConnectionState(vc, ssrcUsers, channelName, transcriptionClient, sessionID, summaryChannelID, func(track MusicTrack, err error) {
+		log.Printf("Playback failed guild=%s video=%s: %v", guildID, track.URL, err)
+		if summaryChannelID != "" {
+			go func() {
+				_, _ = safeChannelSend(s, summaryChannelID, fmt.Sprintf(botText("Não consegui tocar **%s**. Vou tentar o próximo áudio da fila; podes voltar a tentar com /play.", "Could not play **%s**. I'll try the next queued track; you can retry with /play."), musicTitle(track.Title)))
+			}()
+		}
+	})
 	state.rememberUser(userInfo)
 
 	vc.AddHandler(func(vc *discordgo.VoiceConnection, vs *discordgo.VoiceSpeakingUpdate) {
@@ -571,7 +631,19 @@ func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 		}
 	})
 
-	setVoiceConnection(guildID, state)
+	voiceMu.Lock()
+	if !isBotEnabled() {
+		voiceMu.Unlock()
+		state.closeMusic()
+		_ = vc.Disconnect()
+		if sessionID > 0 {
+			_ = persistSessionFinish(sessionID, currentBotLanguage().apiValue())
+			go finishSessionAndPostSummary(s, state)
+		}
+		return
+	}
+	voiceConnections[guildID] = state
+	voiceMu.Unlock()
 	log.Println("bot entrou na call")
 
 	state.startLeaveTimer(guildID, botLeaveDuration())
@@ -846,6 +918,9 @@ func finishSessionAndPostSummary(s *discordgo.Session, state *voiceConnectionSta
 	summary, err := state.transcriptionClient.FinishSessionAndWait(context.Background(), state.sessionID, lang.apiValue())
 	if err != nil {
 		log.Printf("erro ao finalizar sessao id=%d: %v", state.sessionID, err)
+		if state.summaryChannelID != "" {
+			_, _ = safeChannelSend(s, state.summaryChannelID, fmt.Sprintf(textForLanguage(lang, "A sessão #%d está a demorar ou falhou. Consulta /health, /recap session:%d ou recupera com /retry session:%d.", "Session #%d is taking longer or failed. Check /health, /recap session:%d or recover with /retry session:%d."), state.sessionID, state.sessionID, state.sessionID))
+		}
 	}
 	if summary == nil {
 		return
@@ -863,7 +938,7 @@ func finishSessionAndPostSummary(s *discordgo.Session, state *voiceConnectionSta
 		if errText == "" {
 			errText = textForLanguage(lang, "erro desconhecido no agente de resumo", "unknown summary agent error")
 		}
-		if _, err := s.ChannelMessageSend(state.summaryChannelID, textForLanguage(lang, "Resumo da sessao falhou: ", "Session summary failed: ")+errText); err != nil {
+		if _, err := safeChannelSend(s, state.summaryChannelID, fmt.Sprintf(textForLanguage(lang, "Resumo da sessão #%d falhou: %s\nConsulta /recap session:%d ou recupera com /retry session:%d.", "Session #%d summary failed: %s\nCheck /recap session:%d or recover with /retry session:%d."), state.sessionID, errText, state.sessionID, state.sessionID)); err != nil {
 			log.Printf("erro ao publicar falha da sessao id=%d no canal %s: %v", state.sessionID, state.summaryChannelID, err)
 		}
 		return
@@ -893,4 +968,216 @@ func stringValue(value *string) string {
 		return ""
 	}
 	return *value
+}
+
+// Pausing capture before flushing prevents a live call from recreating clips
+// while /forget is deleting that member's data. Reference counts support calls
+// from multiple guilds and simultaneous deletion commands.
+var capturePrivacy = struct {
+	sync.RWMutex
+	paused map[string]int
+	states map[*voiceConnectionState]bool
+}{paused: make(map[string]int), states: make(map[*voiceConnectionState]bool)}
+
+func registerRecordingState(state *voiceConnectionState) {
+	capturePrivacy.Lock()
+	capturePrivacy.states[state] = true
+	capturePrivacy.Unlock()
+}
+func unregisterRecordingState(state *voiceConnectionState) {
+	capturePrivacy.Lock()
+	delete(capturePrivacy.states, state)
+	capturePrivacy.Unlock()
+}
+func isUserCapturePaused(id string) bool {
+	capturePrivacy.RLock()
+	defer capturePrivacy.RUnlock()
+	return capturePrivacy.paused[id] > 0
+}
+
+func pauseAndFlushUserCapture(ctx context.Context, id string) (func(), []*TranscriptionClient, error) {
+	capturePrivacy.Lock()
+	capturePrivacy.paused[id]++
+	states := make(map[*voiceConnectionState]bool)
+	for state := range capturePrivacy.states {
+		states[state] = true
+	}
+	capturePrivacy.Unlock()
+	voiceMu.Lock()
+	for _, state := range voiceConnections {
+		if state != nil {
+			states[state] = true
+		}
+	}
+	voiceMu.Unlock()
+	release := func() {
+		capturePrivacy.Lock()
+		capturePrivacy.paused[id]--
+		if capturePrivacy.paused[id] == 0 {
+			delete(capturePrivacy.paused, id)
+		}
+		capturePrivacy.Unlock()
+	}
+	clients := make(map[*TranscriptionClient]bool)
+	for state := range states {
+		if state.transcriptionClient != nil {
+			clients[state.transcriptionClient] = true
+		}
+		ack := make(chan error, 1)
+		event := recordingControlEvent{user: state.userInfo(id), ack: ack}
+		select {
+		case state.recordingEvents <- event:
+			select {
+			case err := <-ack:
+				if err != nil {
+					return release, nil, err
+				}
+			case <-state.recordingDone:
+			case <-ctx.Done():
+				return release, nil, ctx.Err()
+			}
+		case <-state.recordingDone:
+		case <-ctx.Done():
+			return release, nil, ctx.Err()
+		}
+	}
+	result := make([]*TranscriptionClient, 0, len(clients))
+	for client := range clients {
+		result = append(result, client)
+	}
+	return release, result, nil
+}
+
+func (c *TranscriptionClient) userSubmissionGroupLocked(id string) *sessionSubmissions {
+	if c.userSubmissions == nil {
+		c.userSubmissions = make(map[string]*sessionSubmissions)
+	}
+	group := c.userSubmissions[id]
+	if group == nil {
+		group = &sessionSubmissions{errors: make(map[string]error), changed: make(chan struct{})}
+		c.userSubmissions[id] = group
+	}
+	return group
+}
+
+func (c *TranscriptionClient) waitForUserSubmissions(ctx context.Context, id string) error {
+	for {
+		c.submissionMu.Lock()
+		group := c.userSubmissionGroupLocked(id)
+		pending, changed := group.pending, group.changed
+		c.submissionMu.Unlock()
+		if pending == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-changed:
+		}
+	}
+}
+
+// Local clips never admitted by the API still belong to their filename owner.
+// Match only the managed WAV filename/suffixes within the recordings directory.
+func removeUserLocalRecordings(id string, clients []*TranscriptionClient) error {
+	if id == "" || strings.ContainsAny(id, `/\`) {
+		return errors.New("invalid recording owner")
+	}
+	entries, err := os.ReadDir(recordingsDirFromEnv())
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	deleted := make(map[string]bool)
+	families := make(map[string]bool)
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, id+"-") {
+			continue
+		}
+		base := name
+		for _, suffix := range []string{".request.json", ".speechmatics.json", ".speechmatics.tmp"} {
+			base = strings.TrimSuffix(base, suffix)
+		}
+		if !strings.HasSuffix(base, ".wav") {
+			continue
+		}
+		token := strings.TrimSuffix(strings.TrimPrefix(base, id+"-"), ".wav")
+		parsed, err := uuid.Parse(token)
+		if err != nil || parsed.String() != token {
+			continue
+		}
+		families[base] = true
+	}
+	for base := range families {
+		path := filepath.Join(recordingsDirFromEnv(), base)
+		data, err := os.ReadFile(path + ".request.json")
+		if err == nil {
+			var request TranscriptionRequest
+			// An unreadable/invalid receipt is retained for inspection rather than
+			// assuming ownership from a conflicting filename.
+			if json.Unmarshal(data, &request) != nil || request.DiscordID != id {
+				continue
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		for _, suffix := range []string{"", ".request.json", ".speechmatics.json", ".speechmatics.tmp"} {
+			file := path + suffix
+			if err := os.Remove(file); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			deleted[file] = true
+		}
+	}
+	for _, client := range clients {
+		client.submissionMu.Lock()
+		for _, group := range client.submissions {
+			for path := range group.errors {
+				if deleted[path] {
+					delete(group.errors, path)
+				}
+			}
+			group.notify()
+		}
+		delete(client.userSubmissions, id)
+		client.submissionMu.Unlock()
+	}
+	return nil
+}
+
+func forgetUserWithLocalAudio(ctx context.Context, client *TranscriptionClient, id string) (*ForgetUserResponse, error) {
+	release, clients, err := pauseAndFlushUserCapture(ctx, id)
+	defer release()
+	if err != nil {
+		return nil, err
+	}
+	seen := false
+	for _, active := range clients {
+		if active == client {
+			seen = true
+		}
+	}
+	if !seen {
+		clients = append(clients, client)
+	}
+	for _, active := range clients {
+		if err := active.waitForUserSubmissions(ctx, id); err != nil {
+			return nil, err
+		}
+	}
+	result, err := client.ForgetUser(ctx, id)
+	var apiError *APIError
+	if errors.As(err, &apiError) && apiError.StatusCode == 404 {
+		result, err = &ForgetUserResponse{DiscordID: id, Status: "deleted"}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := removeUserLocalRecordings(id, clients); err != nil {
+		return nil, fmt.Errorf("backend data deleted but local audio cleanup failed: %w", err)
+	}
+	return result, nil
 }

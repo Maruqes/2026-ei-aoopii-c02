@@ -3,12 +3,17 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-from data.repository import DataRepository, SessionParticipant, UserProfile, normalize_timestamp
-
-logger = logging.getLogger("uvicorn.error")
+from data.repository import (
+    DataRepository,
+    SessionParticipant,
+    UserProfile,
+    normalize_timestamp,
+)
 
 from .docs_client import LocalMarkdownProfileClient
 from .llm import GeneratedProfile, LLMClient, LoreEvent
+
+logger = logging.getLogger("uvicorn.error")
 
 
 class SessionAgent:
@@ -25,11 +30,17 @@ class SessionAgent:
 
     def run_for_session(self, session_id: int, *, language: str = "pt") -> str:
         session = self.repository.get_voice_session(session_id)
-        observation_context = f"Voice session in {session.channel_name}" if session else "Voice session"
         messages = self.repository.get_session_messages(session_id)
         transcript = format_transcript(messages)
         if not transcript:
-            summary = "No voice transcript was captured for this session."
+            counts = self.repository.get_session_recording_counts(session_id)
+            if counts.get("failed", 0):
+                raise RuntimeError("No usable transcript: recordings failed")
+            summary = (
+                "No voice transcript was captured for this session."
+                if language == "en"
+                else "Não foi capturada fala nesta sessão."
+            )
             self.repository.mark_session_agent_done(session_id, summary)
             return summary
 
@@ -38,49 +49,73 @@ class SessionAgent:
             session_context=format_session_context(session),
             language=language,
         )
-        participants = self.repository.get_session_participants(session_id)
-        for participant in participants:
-            try:
-                current_profile = self.repository.get_user_profile_by_discord_id(participant.discord_id)
-                participant_transcript = format_transcript(
-                    [message for message in messages if message["discord_id"] == participant.discord_id]
-                )
-                existing_doc_text = self.docs.read_doc_text(current_profile.google_doc_id if current_profile else None)
-                generated = self.llm.update_profile(
-                    username=display_name(participant),
-                    existing_profile=current_profile,
-                    existing_doc_text=existing_doc_text,
-                    transcript=(
-                        f"Observation context: {observation_context}\n\n"
-                        f"Full session:\n{transcript}\n\n"
-                        f"Messages by {display_name(participant)}:\n{participant_transcript}"
-                    ),
-                )
-                stored_doc = self.docs.upsert_profile_doc(
-                    doc_id=current_profile.google_doc_id if current_profile else None,
-                    username=display_name(participant),
-                    profile=generated,
-                )
-                self.repository.upsert_user_profile(
-                    user_id=participant.user_id,
-                    anthropologist_title=generated.anthropologist_title,
-                    summary=generated.summary,
-                    interests=generated.interests,
-                    communication_style=generated.communication_style,
-                    known_facts=generated.persona_notes,
-                    recent_updates=generated.recent_updates,
-                    google_doc_id=stored_doc.doc_id,
-                    google_doc_url=stored_doc.url,
-                )
-            except Exception:
-                logger.exception(
-                    "falha ao atualizar perfil do participante session_id=%s discord_id=%s",
-                    session_id,
-                    participant.discord_id,
-                )
-
+        counts = self.repository.get_session_recording_counts(session_id)
+        failed = counts.get("failed", 0)
+        if failed:
+            summary += (
+                f"\n\n⚠ Partial recap: {failed} recording(s) failed transcription."
+                if language == "en"
+                else f"\n\n⚠ Resumo parcial: {failed} gravação(ões) falharam a transcrição."
+            )
+        # Publish the useful recap before slow, individually isolated profile updates.
         self.repository.mark_session_agent_done(session_id, summary)
         return summary
+
+    def update_participant_profile(self, session_id: int, user_id: int) -> None:
+        session = self.repository.get_voice_session(session_id)
+        if session is None:
+            return
+        participants = self.repository.get_session_participants(session_id)
+        participant = next(
+            (person for person in participants if person.user_id == user_id), None
+        )
+        if participant is None:
+            return
+        messages = self.repository.get_session_messages(session_id)
+        own_messages = [
+            message
+            for message in messages
+            if message["discord_id"] == participant.discord_id
+        ]
+        # A greeting or an empty/failed recording should not fabricate a personality.
+        if sum(len(str(message.get("content", ""))) for message in own_messages) < 20:
+            return
+        current_profile = self.repository.get_user_profile_by_discord_id(
+            participant.discord_id
+        )
+        participant_transcript = format_transcript(own_messages)
+        existing_doc_text = self.docs.read_doc_text(
+            current_profile.google_doc_id if current_profile else None
+        )
+        generated = self.llm.update_profile(
+            username=display_name(participant),
+            existing_profile=current_profile,
+            existing_doc_text=existing_doc_text,
+            transcript=(
+                f"Observation context: Voice session #{session_id} in {session.channel_name} on {session.started_at:%Y-%m-%d}\n\n"
+                f"Session recap (other speakers are context only):\n{session.summary or ''}\n\n"
+                f"Messages by {display_name(participant)}:\n{participant_transcript}"
+            ),
+        )
+        stored_doc = self.docs.upsert_profile_doc(
+            doc_id=(current_profile.google_doc_id if current_profile else None)
+            or f"user-{participant.discord_id}.md",
+            username=display_name(participant),
+            profile=generated,
+            observed_on=normalize_timestamp_value(session.started_at).date(),
+            observation_id=f"voice-session-{session_id}",
+        )
+        self.repository.upsert_user_profile(
+            user_id=participant.user_id,
+            anthropologist_title=generated.anthropologist_title,
+            summary=generated.summary,
+            interests=generated.interests,
+            communication_style=generated.communication_style,
+            known_facts=generated.persona_notes,
+            recent_updates=generated.recent_updates,
+            google_doc_id=stored_doc.doc_id,
+            google_doc_url=stored_doc.url,
+        )
 
 
 def display_name(participant: SessionParticipant | UserProfile) -> str:
@@ -91,10 +126,16 @@ def format_transcript(messages: list[dict]) -> str:
     lines: list[str] = []
     for message in messages:
         tstamp = normalize_timestamp_value(message["tstamp"])
-        username = message.get("display_name") or message.get("username") or message.get("discord_id")
+        username = (
+            message.get("display_name")
+            or message.get("username")
+            or message.get("discord_id")
+        )
         content = " ".join(str(message.get("content", "")).split())
         if content:
-            lines.append(f"[{tstamp:%H:%M}] {username}: {content}")
+            lines.append(
+                f"[{tstamp:%Y-%m-%d %H:%M:%S} UTC] {username} [user={message.get('discord_id', 'unknown')}] ({message.get('channel_name', 'voice')}): {content}"
+            )
     return "\n".join(lines)
 
 

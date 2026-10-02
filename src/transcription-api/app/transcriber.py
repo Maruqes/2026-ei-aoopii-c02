@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import tempfile
+import threading
+import time
 import wave
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from .speechmatics_usage import (
     SpeechmaticsAPIKey,
-    format_speechmatics_key_usage,
-    select_speechmatics_api_key,
+    fetch_speechmatics_key_usages,
 )
 
 logger = logging.getLogger("uvicorn.error")
@@ -39,6 +42,8 @@ class TranscriptionSegment:
 class TranscriptionResult:
     text: str
     segments: list[TranscriptionSegment]
+    provider_completed_at: datetime | None = None
+    duration_seconds: float | None = None
 
 
 class Transcriber(Protocol):
@@ -136,7 +141,9 @@ class WhisperTranscriber:
         if speech_regions is None:
             segments = self._transcribe_path(model, audio_path)
         else:
-            segments = self._transcribe_speech_regions(model, audio_path, speech_regions)
+            segments = self._transcribe_speech_regions(
+                model, audio_path, speech_regions
+            )
 
         return TranscriptionResult(
             text=" ".join(segment.text for segment in segments),
@@ -161,7 +168,9 @@ class WhisperTranscriber:
             "temperature": 0.0,
         }
         if self.hallucination_silence_threshold > 0:
-            options["hallucination_silence_threshold"] = self.hallucination_silence_threshold
+            options["hallucination_silence_threshold"] = (
+                self.hallucination_silence_threshold
+            )
         if self.initial_prompt.strip():
             options["initial_prompt"] = self.initial_prompt.strip()
             options["carry_initial_prompt"] = self.carry_initial_prompt
@@ -185,7 +194,10 @@ class WhisperTranscriber:
             return False
         if float(segment.get("avg_logprob", 0.0)) < self.logprob_threshold:
             return False
-        if float(segment.get("compression_ratio", 0.0)) > self.compression_ratio_threshold:
+        if (
+            float(segment.get("compression_ratio", 0.0))
+            > self.compression_ratio_threshold
+        ):
             return False
         return True
 
@@ -200,7 +212,11 @@ class WhisperTranscriber:
             for index, region in enumerate(speech_regions):
                 chunk_path = Path(tmp_dir) / f"speech-{index}.wav"
                 actual_start = self._write_wav_region(audio_path, chunk_path, region)
-                segments.extend(self._transcribe_path(model, chunk_path, offset_seconds=actual_start))
+                segments.extend(
+                    self._transcribe_path(
+                        model, chunk_path, offset_seconds=actual_start
+                    )
+                )
         return segments
 
     def _speech_regions(self, audio_path: Path) -> list[SpeechRegion] | None:
@@ -209,9 +225,13 @@ class WhisperTranscriber:
 
         try:
             import audioop
+
             import webrtcvad
         except ImportError:
-            logger.warning("webrtcvad not installed; whisper will transcribe full audio file=%s", audio_path)
+            logger.warning(
+                "webrtcvad not installed; whisper will transcribe full audio file=%s",
+                audio_path,
+            )
             return None
 
         try:
@@ -239,18 +259,30 @@ class WhisperTranscriber:
                     pcm = wav.readframes(frame_samples)
                     if len(pcm) < frame_samples * channels * sample_width:
                         break
-                    mono = audioop.tomono(pcm, sample_width, 0.5, 0.5) if channels > 1 else pcm
+                    mono = (
+                        audioop.tomono(pcm, sample_width, 0.5, 0.5)
+                        if channels > 1
+                        else pcm
+                    )
                     start = frame_index * frame_seconds
                     if vad.is_speech(mono, sample_rate):
-                        speech_frames.append(SpeechRegion(start=start, end=start + frame_seconds))
+                        speech_frames.append(
+                            SpeechRegion(start=start, end=start + frame_seconds)
+                        )
                     frame_index += 1
         except (EOFError, wave.Error, OSError, ValueError) as exc:
-            logger.warning("vad failed; whisper will transcribe full audio file=%s error=%s", audio_path, exc)
+            logger.warning(
+                "vad failed; whisper will transcribe full audio file=%s error=%s",
+                audio_path,
+                exc,
+            )
             return None
 
         return self._merge_speech_frames(speech_frames)
 
-    def _merge_speech_frames(self, speech_frames: list[SpeechRegion]) -> list[SpeechRegion]:
+    def _merge_speech_frames(
+        self, speech_frames: list[SpeechRegion]
+    ) -> list[SpeechRegion]:
         if not speech_frames:
             return []
 
@@ -276,12 +308,16 @@ class WhisperTranscriber:
             start = max(0.0, region.start - padding)
             end = region.end + padding
             if expanded and start <= expanded[-1].end:
-                expanded[-1] = SpeechRegion(start=expanded[-1].start, end=max(expanded[-1].end, end))
+                expanded[-1] = SpeechRegion(
+                    start=expanded[-1].start, end=max(expanded[-1].end, end)
+                )
             else:
                 expanded.append(SpeechRegion(start=start, end=end))
         return expanded
 
-    def _write_wav_region(self, source_path: Path, destination_path: Path, region: SpeechRegion) -> float:
+    def _write_wav_region(
+        self, source_path: Path, destination_path: Path, region: SpeechRegion
+    ) -> float:
         with wave.open(str(source_path), "rb") as source:
             sample_rate = source.getframerate()
             start_frame = max(0, int(region.start * sample_rate))
@@ -313,9 +349,13 @@ class WhisperTranscriber:
         if self.device == "auto":
             return "cuda" if torch.cuda.is_available() else "cpu"
         if self.device not in {"cuda", "cpu"}:
-            raise RuntimeError(f"Unsupported WHISPER_DEVICE: {self.device}. Use 'auto', 'cuda', or 'cpu'.")
+            raise RuntimeError(
+                f"Unsupported WHISPER_DEVICE: {self.device}. Use 'auto', 'cuda', or 'cpu'."
+            )
         if self.device == "cuda" and not torch.cuda.is_available():
-            raise RuntimeError("WHISPER_DEVICE=cuda was requested, but CUDA is not available in this container.")
+            raise RuntimeError(
+                "WHISPER_DEVICE=cuda was requested, but CUDA is not available in this container."
+            )
         return self.device
 
     def _language_option(self) -> str | None:
@@ -339,7 +379,8 @@ class SpeechmaticsTranscriber:
         batch_url: str = "https://eu1.asr.api.speechmatics.com/v2",
         language: str = "multi",
         model: str = "melia-1",
-        usage_limit_hours: float = 50.0,
+        usage_limit_hours: float = 0.0,
+        usage_since: str = "",
         polling_interval_seconds: float = 2.0,
         timeout_seconds: float = 600.0,
         segment_gap_seconds: float = 1.5,
@@ -354,8 +395,15 @@ class SpeechmaticsTranscriber:
         self.polling_interval_seconds = max(0.1, polling_interval_seconds)
         self.timeout_seconds = max(1.0, timeout_seconds)
         self.segment_gap_seconds = max(0.0, segment_gap_seconds)
-        self.additional_vocab = tuple(term.strip() for term in additional_vocab if term.strip())
+        self.additional_vocab = tuple(
+            term.strip() for term in additional_vocab if term.strip()
+        )
         self._client_factory = client_factory
+        self.usage_since = usage_since
+        self._key_lock = threading.Lock()
+        self._usage_cache = []
+        self._usage_cached_at = 0.0
+        self._selection_count: dict[str, int] = {}
 
         if not self.api_keys:
             raise RuntimeError("SPEECHMATICS_API_KEY is required")
@@ -364,9 +412,13 @@ class SpeechmaticsTranscriber:
                 "Unsupported SPEECHMATICS_MODEL. Use 'standard', 'enhanced', or 'melia-1'."
             )
         if self.model_name == "melia-1" and self.language != "multi":
-            raise RuntimeError("SPEECHMATICS_LANGUAGE must be 'multi' when SPEECHMATICS_MODEL=melia-1")
+            raise RuntimeError(
+                "SPEECHMATICS_LANGUAGE must be 'multi' when SPEECHMATICS_MODEL=melia-1"
+            )
         if self.model_name == "melia-1" and self.additional_vocab:
-            raise RuntimeError("SPEECHMATICS_ADDITIONAL_VOCAB is not supported by SPEECHMATICS_MODEL=melia-1")
+            raise RuntimeError(
+                "SPEECHMATICS_ADDITIONAL_VOCAB is not supported by SPEECHMATICS_MODEL=melia-1"
+            )
 
     def transcribe(self, audio_path: Path) -> TranscriptionResult:
         logger.info(
@@ -376,47 +428,128 @@ class SpeechmaticsTranscriber:
             self.language,
         )
         selected_key = self._select_api_key()
-        return asyncio.run(self._transcribe(audio_path, selected_key))
+        return asyncio.run(
+            asyncio.wait_for(
+                self._transcribe(audio_path, selected_key),
+                timeout=self.timeout_seconds + 30,
+            )
+        )
 
     def _select_api_key(self) -> SpeechmaticsAPIKey:
         if len(self.api_keys) == 1:
             return self.api_keys[0]
+        with self._key_lock:
+            if time.monotonic() - self._usage_cached_at > 60:
+                self._usage_cache = fetch_speechmatics_key_usages(
+                    api_keys=self.api_keys,
+                    batch_url=self.batch_url,
+                    limit_hours=self.usage_limit_hours,
+                    since=self.usage_since,
+                )
+                self._usage_cached_at = time.monotonic()
+            available = [row for row in self._usage_cache if row.available]
+            if available:
+                # Usage reporting lags; rotate equally-used keys instead of always selecting the first.
+                selected = min(
+                    available,
+                    key=lambda row: (
+                        row.usage.used_hours,
+                        self._selection_count.get(row.key.name, 0),
+                        row.key.name,
+                    ),
+                ).key
+            else:
+                logger.warning(
+                    "Speechmatics usage unavailable; attempting a configured key without assuming zero usage"
+                )
+                selected = min(
+                    self.api_keys,
+                    key=lambda key: self._selection_count.get(key.name, 0),
+                )
+            self._selection_count[selected.name] = (
+                self._selection_count.get(selected.name, 0) + 1
+            )
+            return selected
 
-        selected = select_speechmatics_api_key(
-            api_keys=self.api_keys,
-            batch_url=self.batch_url,
-            limit_hours=self.usage_limit_hours,
-            timeout_seconds=10.0,
+    def transcribe_recording(
+        self,
+        audio_path: Path,
+        *,
+        job_id: str | None,
+        key_name: str | None,
+        save_job: Callable[[str, str], None],
+    ) -> TranscriptionResult:
+        if job_id:
+            selected = next(
+                (key for key in self.api_keys if key.name == key_name), None
+            )
+            if selected is None:
+                raise RuntimeError(
+                    "The key for the existing Speechmatics job is no longer configured"
+                )
+        else:
+            selected = self._select_api_key()
+        # A persisted remote job is polled after restart, never blindly submitted again.
+        return asyncio.run(
+            asyncio.wait_for(
+                self._transcribe(
+                    audio_path, selected, job_id=job_id, save_job=save_job
+                ),
+                timeout=self.timeout_seconds + 30,
+            )
         )
-        logger.info("speechmatics api key selected %s", format_speechmatics_key_usage(selected))
-        return selected.key
 
-    async def _transcribe(self, audio_path: Path, api_key: SpeechmaticsAPIKey) -> TranscriptionResult:
+    async def _transcribe(
+        self,
+        audio_path: Path,
+        api_key: SpeechmaticsAPIKey,
+        *,
+        job_id: str | None = None,
+        save_job: Callable[[str, str], None] | None = None,
+    ) -> TranscriptionResult:
         from speechmatics.batch import AsyncClient, Transcript, TranscriptionConfig
 
         client_factory = self._client_factory or AsyncClient
         config = TranscriptionConfig(
             language=self.language,
             model=self.model_name,
-            additional_vocab=[{"content": term} for term in self.additional_vocab] or None,
+            additional_vocab=[{"content": term} for term in self.additional_vocab]
+            or None,
         )
 
         logger.info("speechmatics batch client opening key=%s", api_key.name)
         async with client_factory(api_key=api_key.value, url=self.batch_url) as client:
-            transcript = await client.transcribe(
-                str(audio_path),
-                transcription_config=config,
-                polling_interval=self.polling_interval_seconds,
-                timeout=self.timeout_seconds,
-            )
+            if save_job is not None:
+                if not job_id:
+                    job = await client.submit_job(
+                        str(audio_path), transcription_config=config
+                    )
+                    job_id = job.id
+                    save_job(job_id, api_key.name)
+                transcript = await client.wait_for_completion(
+                    job_id,
+                    polling_interval=self.polling_interval_seconds,
+                    timeout=self.timeout_seconds,
+                )
+            else:
+                transcript = await client.transcribe(
+                    str(audio_path),
+                    transcription_config=config,
+                    polling_interval=self.polling_interval_seconds,
+                    timeout=self.timeout_seconds,
+                )
 
         if not isinstance(transcript, Transcript):
-            raise RuntimeError("Speechmatics returned an unexpected non-JSON transcript")
+            raise RuntimeError(
+                "Speechmatics returned an unexpected non-JSON transcript"
+            )
 
         segments = self._segments_from_results(transcript.results)
         return TranscriptionResult(
             text=" ".join(segment.text for segment in segments),
             segments=segments,
+            provider_completed_at=_provider_completed_at(transcript),
+            duration_seconds=_provider_duration_seconds(transcript),
         )
 
     def _segments_from_results(self, results: list[Any]) -> list[TranscriptionSegment]:
@@ -429,7 +562,9 @@ class SpeechmaticsTranscriber:
             nonlocal text, start, end
             normalized = text.strip()
             if normalized and start is not None and end is not None:
-                segments.append(TranscriptionSegment(start=start, end=end, text=normalized))
+                segments.append(
+                    TranscriptionSegment(start=start, end=end, text=normalized)
+                )
             text = ""
             start = None
             end = None
@@ -483,6 +618,37 @@ def _append_token(text: str, token: str, *, attaches_to: str | None) -> str:
     if text[-1] in _ATTACH_TO_NEXT:
         return text + token
     return f"{text} {token}"
+
+
+def _provider_completed_at(transcript: Any) -> datetime | None:
+    """Date of recognition output, rather than the bot's delayed local write."""
+    value = getattr(getattr(transcript, "metadata", None), "created_at", None)
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and ":" in value:
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    # Speechmatics metadata dates are UTC; tolerate older SDKs returning naive dates.
+    return (
+        parsed.replace(tzinfo=timezone.utc)
+        if parsed.tzinfo is None
+        else parsed.astimezone(timezone.utc)
+    )
+
+
+def _provider_duration_seconds(transcript: Any) -> float | None:
+    value = getattr(getattr(transcript, "job", None), "duration", None)
+    if isinstance(value, bool):
+        return None
+    try:
+        duration = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return duration if math.isfinite(duration) and duration >= 0 else None
 
 
 def _speechmatics_api_keys_from_single(api_key: str) -> tuple[SpeechmaticsAPIKey, ...]:
