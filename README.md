@@ -11,8 +11,9 @@ For NVIDIA Whisper, set `WHISPER_DEVICE=cuda` before using the Makefile.
 
 To use a ChatGPT account for commands, summaries and profiles, set
 `LLM_PROVIDER=chatgpt` and follow [ChatGPT setup](CHATGPT_SETUP.md).
-The protected `/chatgpt` panel handles login; Discord `/models` lists, tests and
-selects models available to that account. Speech-to-text keeps its own provider.
+Run `make codex` to open the official ChatGPT login in your browser. Discord
+`/models` lists, tests and selects models available to that account; `/effort`
+changes reasoning effort. Speech-to-text keeps its own provider.
 
 The bot records voice in short per-member slices, stores text/voice observations in
 Postgres, builds funny but grounded recaps, and maintains living member profiles.

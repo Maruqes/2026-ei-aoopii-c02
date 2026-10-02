@@ -9,6 +9,38 @@ from .config import Settings
 
 _lock = threading.RLock()
 _selected_models: dict[str, str] = {}
+REASONING_EFFORTS = (
+    "default",
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+)
+
+
+def current_effort(settings: Settings) -> str:
+    if settings.llm_provider != "chatgpt":
+        return "default"
+    with _lock:
+        stored = _load_selected_models(settings.llm_model_selection_file)
+        value = stored.get(
+            "chatgpt_effort", settings.chatgpt_reasoning_effort or "default"
+        )
+    if value not in REASONING_EFFORTS:
+        raise ValueError("CHATGPT_REASONING_EFFORT inválido: " + value)
+    return value
+
+
+def select_effort(effort: str, storage_path: Path) -> None:
+    if effort not in REASONING_EFFORTS:
+        raise ValueError("Invalid reasoning effort")
+    with _lock:
+        stored = _load_selected_models(storage_path)
+        stored["chatgpt_effort"] = effort
+        _save_selected_models(storage_path, stored)
 
 
 def configured_model(settings: Settings) -> str:
@@ -35,11 +67,12 @@ def select_model(provider: str, model: str, storage_path: Path | None = None) ->
     if not value:
         raise ValueError("Model is required")
     with _lock:
-        _selected_models[provider] = value
         if storage_path is not None:
             stored_models = _load_selected_models(storage_path)
             stored_models[provider] = value
             _save_selected_models(storage_path, stored_models)
+        else:
+            _selected_models[provider] = value
 
 
 def clear_selected_model(provider: str, storage_path: Path) -> None:

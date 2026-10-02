@@ -9,10 +9,10 @@ import (
 	"testing"
 )
 
-func TestChatGPTModelSelectionSendsAdminKeyOnlyToModelEndpoint(t *testing.T) {
+func TestChatGPTSelectionSendsAdminKeyOnlyToControlEndpoints(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := r.Header.Get("X-ChatGPT-Admin-Key")
-		if r.URL.Path == "/v1/models/current" {
+		if r.URL.Path == "/v1/models/current" || r.URL.Path == "/v1/effort/current" {
 			if key != "owner-secret" {
 				t.Errorf("model endpoint key = %q", key)
 			}
@@ -27,6 +27,9 @@ func TestChatGPTModelSelectionSendsAdminKeyOnlyToModelEndpoint(t *testing.T) {
 	t.Setenv("CHATGPT_ADMIN_PASSWORD", "owner-secret")
 	client := NewTranscriptionClientFromEnv()
 	if _, err := client.SelectLLMModel(context.Background(), "selected"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.SelectLLMEffort(context.Background(), "low"); err != nil {
 		t.Fatal(err)
 	}
 	var unrelatedResponse map[string]any

@@ -1,5 +1,6 @@
 PYTHON ?= python
 COMPOSE ?= docker compose
+CODEX_ARGS ?=
 
 -include .env
 
@@ -18,7 +19,7 @@ POSTGRES_PORT ?= 5432
 DATABASE_URL ?= postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)
 DOCKER_DATABASE_URL ?= postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)
 
-.PHONY: help compose up down logs db-reset migrate api
+.PHONY: help compose up down logs db-reset migrate api codex
 
 help:
 	@echo "make compose   Build and start API + Postgres"
@@ -28,6 +29,7 @@ help:
 	@echo "make db-reset  Recreate local Docker volumes"
 	@echo "make migrate   Apply migrations in Docker"
 	@echo "make api       Run API in Docker foreground"
+	@echo "make codex     Sign in to ChatGPT in your browser"
 
 compose:
 	$(COMPOSE_CMD) up -d --build
@@ -49,3 +51,6 @@ migrate:
 
 api:
 	$(COMPOSE_CMD) up --build api
+
+codex:
+	python3 scripts/codex_login.py $(CODEX_ARGS) -- $(COMPOSE_CMD)

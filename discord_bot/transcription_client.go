@@ -107,6 +107,20 @@ type TextProfileSyncResponse struct {
 	ProcessingMS    int64  `json:"processing_ms"`
 }
 
+type LLMEffortResponse struct {
+	Provider      string   `json:"provider"`
+	Model         string   `json:"model"`
+	CurrentEffort string   `json:"current_effort"`
+	Efforts       []string `json:"efforts"`
+}
+
+type SelectLLMEffortResponse struct {
+	Provider     string `json:"provider"`
+	Model        string `json:"model"`
+	Effort       string `json:"effort"`
+	TestResponse string `json:"test_response"`
+}
+
 type LLMModelsResponse struct {
 	Provider     string   `json:"provider"`
 	CurrentModel string   `json:"current_model"`
@@ -552,6 +566,23 @@ func (c *TranscriptionClient) ForceTextProfileSync(ctx context.Context) (*TextPr
 	return &response, nil
 }
 
+func (c *TranscriptionClient) GetLLMEffort(ctx context.Context) (*LLMEffortResponse, error) {
+	var response LLMEffortResponse
+	if err := c.getJSON(ctx, "/v1/effort", &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *TranscriptionClient) SelectLLMEffort(ctx context.Context, effort string) (*SelectLLMEffortResponse, error) {
+	var response SelectLLMEffortResponse
+	request := map[string]string{"effort": strings.TrimSpace(effort)}
+	if err := c.postJSON(ctx, "/v1/effort/current", request, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
 func (c *TranscriptionClient) GetLLMModels(ctx context.Context) (*LLMModelsResponse, error) {
 	var response LLMModelsResponse
 	if err := c.getJSON(ctx, "/v1/models", &response); err != nil {
@@ -579,7 +610,7 @@ func (c *TranscriptionClient) postJSON(ctx context.Context, path string, body an
 		return err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	if path == "/v1/models/current" && c.chatgptAdminKey != "" {
+	if (path == "/v1/models/current" || path == "/v1/effort/current") && c.chatgptAdminKey != "" {
 		request.Header.Set("X-ChatGPT-Admin-Key", c.chatgptAdminKey)
 	}
 	return c.doJSON(request, target)

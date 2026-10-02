@@ -107,8 +107,9 @@ class Settings:
     recording_cleanup_interval_seconds: float = 60.0
     llm_provider: str = "openai"
     chatgpt_model: str = ""
+    chatgpt_reasoning_effort: str = "medium"
     chatgpt_auth_file: Path = Path(".tmp/chatgpt/auth.json")
-    chatgpt_redirect_uri: str = "http://127.0.0.1:8000/auth/callback"
+    chatgpt_redirect_uri: str = "http://127.0.0.1:1455/auth/callback"
     chatgpt_admin_password: str = ""
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com/v1"
@@ -201,11 +202,14 @@ class Settings:
             recording_cleanup_interval_seconds=max(1, cleanup_interval),
             llm_provider=env_str("LLM_PROVIDER", "openai").lower(),
             chatgpt_model=env_str("CHATGPT_MODEL"),
+            chatgpt_reasoning_effort=env_str(
+                "CHATGPT_REASONING_EFFORT", "medium"
+            ).lower(),
             chatgpt_auth_file=Path(
                 env_str("CHATGPT_AUTH_FILE", ".tmp/chatgpt/auth.json")
             ),
             chatgpt_redirect_uri=env_str(
-                "CHATGPT_REDIRECT_URI", "http://127.0.0.1:8000/auth/callback"
+                "CHATGPT_REDIRECT_URI", "http://127.0.0.1:1455/auth/callback"
             ),
             chatgpt_admin_password=env_str("CHATGPT_ADMIN_PASSWORD"),
             openai_api_key=env_str("OPENAI_API_KEY", env_str("GROQ_API_KEY")),

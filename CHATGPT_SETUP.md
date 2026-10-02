@@ -1,159 +1,172 @@
-# Usar uma conta ChatGPT no Discord Anthropologist
+# ChatGPT: login, modelos e reasoning effort
 
 Esta opção usa a conta ChatGPT para gerar resumos, atualizar perfis e responder
-aos comandos de IA, incluindo `/oracle`, `/digest` e `/prompt`. A transcrição
-continua a usar o fornecedor configurado em `TRANSCRIPTION_PROVIDER`.
+aos comandos de AI. A transcrição continua a usar `TRANSCRIPTION_PROVIDER`.
+Há uma conta ativa por instância do bot.
 
-O fornecedor novo é `LLM_PROVIDER=chatgpt`. Os fornecedores `openai`, `groq` e
-`ollama` continuam disponíveis. Não é necessária uma `OPENAI_API_KEY` para esta
-opção; o login usa a integração oficial **Sign in with ChatGPT**.
+## Configuração
 
-## 1. Requisitos
+Precisas de Docker Compose, Python 3 no computador onde executas `make`, uma
+conta ChatGPT elegível para autorizar o uso do plano e acesso HTTPS a
+`auth.openai.com` e `api.openai.com`. A elegibilidade, os modelos e os limites
+dependem da conta e das políticas da OpenAI; esta opção não usa `OPENAI_API_KEY`.
 
-- Docker com Compose e acesso HTTPS, a partir dos containers, a
-  `auth.openai.com` e `api.openai.com`.
-- Uma conta ChatGPT Plus/Pro elegível para autorizar o uso do plano nesta
-  aplicação. A disponibilidade depende da conta, do workspace e das políticas
-  da OpenAI. O login não garante quota ilimitada.
-- Um browser no teu computador. Para uma VM remota, usa o túnel SSH do passo 3.
-
-Há uma conta ativa por instância do bot. Os comandos, resumos e tarefas de perfis
-usam essa conta e consomem a sua utilização autorizada. O painel permite guardar
-registos de outras contas e escolher a conta ativa.
-
-## 2. Configurar e arrancar
-
-Atualiza os ficheiros do projeto na VM. No `.env`, mantém a configuração de
-Discord, Postgres e transcrição e acrescenta:
+Mantém as variáveis de Discord, Postgres e transcrição e acrescenta ao `.env`:
 
 ```dotenv
 LLM_PROVIDER=chatgpt
-CHATGPT_ADMIN_PASSWORD=coloca_aqui_uma_password_longa_e_unica
-CHATGPT_REDIRECT_URI=http://127.0.0.1:8000/auth/callback
+CHATGPT_ADMIN_PASSWORD=coloca_aqui_um_segredo_longo_e_unico
 CHATGPT_MODEL=
+CHATGPT_REASONING_EFFORT=medium
+CHATGPT_REDIRECT_URI=http://127.0.0.1:1455/auth/callback
 ```
 
-Podes gerar uma password com `openssl rand -hex 32` e copiar o resultado para
-`CHATGPT_ADMIN_PASSWORD`. Esta password protege o painel e é também entregue
-ao bot para autorizar a mudança de modelo por `/models`.
+Podes gerar o segredo com `openssl rand -hex 32`. `CHATGPT_ADMIN_PASSWORD`
+autoriza os pedidos de mudança de modelo e effort do bot à API; não é a password
+da conta ChatGPT e não é pedida no navegador.
 
-Deixa `CHATGPT_MODEL` vazio para escolher a partir do catálogo da conta. Depois
-de selecionado, o modelo fica guardado; não é necessário editar o `.env` sempre
-que mudas de modelo.
+Deixa `CHATGPT_MODEL` vazio para escolher um modelo no Discord através de
+`/models`. `CHATGPT_REASONING_EFFORT` define o nível inicial. Uma escolha guardada
+por `/models` ou `/effort` tem prioridade sobre o `.env` e sobrevive a reinícios.
+Depois de editar o `.env`, recria os serviços:
 
 ```bash
 docker compose up -d --build
 ```
 
-O Compose guarda as credenciais em
-`/app/.tmp/state/chatgpt/auth.json`, dentro do volume `api_state`. A conta e o
-modelo sobrevivem a reinícios e recriações dos containers. `docker compose down
--v` elimina esse estado juntamente com os outros volumes do projeto.
+## Login no próprio computador
 
-## 3. Abrir o painel numa VM
-
-No computador em que vais abrir o browser, mantém este comando a correr:
+Na raiz do projeto:
 
 ```bash
-ssh -N -L 127.0.0.1:8000:127.0.0.1:8000 commov@IP_DA_VM
+make codex
 ```
 
-Substitui `IP_DA_VM` pelo endereço da VM. Se `API_PORT` no `.env` for diferente
-de 8000, substitui a **última** porta do túnel pela porta publicada na VM.
+O comando constrói um pequeno container de login, abre o endereço oficial da
+OpenAI no navegador do computador e aguarda a autorização. Faz login e autoriza
+o uso do plano ChatGPT. Depois da confirmação, podes fechar o separador.
+O comando não instala nem executa o Codex CLI: usa o fluxo oficial Sign in with
+ChatGPT diretamente para este projeto.
 
-Abre **<http://127.0.0.1:8000/chatgpt>**. No pedido de autenticação do browser:
+O login funciona mesmo com a API parada. O callback escuta apenas em
+`127.0.0.1:1455`; não há página de administração na porta 8000. O container de
+login usa a rede do host em Linux, e termina quando o login acaba ou é cancelado.
 
-- Utilizador: `admin`
-- Password: o valor de `CHATGPT_ADMIN_PASSWORD`
+As credenciais ficam em `/app/.tmp/state/chatgpt/auth.json`, no volume
+`api_state`, partilhado com a API. A sessão renova-se automaticamente. O ficheiro
+tem permissões restritas e não deve ser partilhado. `docker compose down -v`
+apaga este volume, incluindo a sessão e as escolhas guardadas.
 
-O callback de login tem de usar o endereço literal `127.0.0.1`. Abre o painel
-por esse endereço, através do túnel, para que o browser regresse à mesma
-instância que iniciou o login. Não substituas esse endereço por `localhost` ou
-pelo IP da VM.
+## Login na tua VM
 
-Se a porta local 8000 estiver ocupada, usa por exemplo 18000:
+No teu computador, abre um terminal e mantém este túnel ativo:
 
-1. Configura `CHATGPT_REDIRECT_URI=http://127.0.0.1:18000/auth/callback` na VM.
-2. Recria a API com `docker compose up -d --force-recreate api`.
-3. Usa `ssh -N -L 127.0.0.1:18000:127.0.0.1:8000 commov@IP_DA_VM`.
-4. Abre <http://127.0.0.1:18000/chatgpt>.
+```bash
+ssh -N -o ExitOnForwardFailure=yes \
+  -L 127.0.0.1:1455:127.0.0.1:1455 commov@vm.commov
+```
 
-Para execução no próprio computador, abre diretamente o painel sem túnel.
-Para execução sem Docker, `CHATGPT_AUTH_FILE` define o caminho local das
-credenciais; o valor por omissão é `.tmp/chatgpt/auth.json`.
+Noutro terminal, entra na VM e executa o login na pasta do projeto:
 
-## 4. Fazer login e escolher o modelo
+```bash
+ssh commov@vm.commov
+cd ~/2026-ei-aoopii-c02
+make codex
+```
 
-1. Clica em **Continue with ChatGPT**.
-2. Inicia sessão na página da OpenAI e autoriza o uso do teu plano pela aplicação.
-3. Regressa ao painel pelo link apresentado após o callback.
-4. Escolhe um modelo na lista de modelos disponíveis à tua conta.
-5. Clica em **Testar e ativar modelo**. A aplicação envia `Ola!` e só guarda a
-   escolha quando recebe uma resposta concluída com sucesso.
+Numa VM sem ambiente gráfico, o comando imprime o link. Copia-o para o navegador
+do teu computador e faz login. O navegador regressa a `127.0.0.1:1455`, e o túnel
+encaminha o callback para o processo de login na VM. Mantém o `make codex` ativo
+até aparecer a confirmação; depois podes fechar o túnel.
 
-O bot já tem o comando **`/models`**: lista os modelos da conta ativa e permite
-testar e mudar o modelo diretamente no Discord. Mudar o modelo requer a
-permissão **Gerir Servidor**, como nos outros fornecedores. A escolha aplica-se
-a toda a instância do bot e fica guardada após um reinício. Os pedidos já em
-curso podem terminar com o modelo que usavam quando começaram.
+Se a porta estiver ocupada, usa a mesma porta dos dois lados, por exemplo:
 
-Os IDs não estão fixos no código: o catálogo é obtido com a sessão autenticada.
-Ao mudar de conta, a escolha anterior é removida; escolhe um modelo disponível
-à nova conta. Podes usar **Adicionar outra conta** ou voltar a entrar numa
-conta guardada. Cada registo conserva o seu próprio identificador OAuth.
+```bash
+# No teu computador:
+ssh -N -o ExitOnForwardFailure=yes \
+  -L 127.0.0.1:1456:127.0.0.1:1456 commov@vm.commov
 
-## 5. Sessão, utilização e logout
+# Na VM:
+make codex CODEX_ARGS="--port 1456"
+```
 
-A API renova automaticamente a sessão, guardando os tokens substitutos em
-conjunto. A renovação é serializada para evitar duas utilizações simultâneas de
-um refresh token. Os ficheiros de credenciais são escritos atomicamente com
-permissões `0600`; o browser recebe apenas o estado de login e o catálogo.
+Para uma sessão já registada, pode mudar a porta; mantém o caminho
+`/auth/callback`. Atualiza o antigo `CHATGPT_REDIRECT_URI` no `.env` se ainda
+apontar para a porta 8000.
 
-Usa uma instância Uvicorn para o login, como no Dockerfile do projeto: as
-tentativas de login pendentes ficam em memória por 10 minutos. Se reiniciares
-a API durante o login, inicia uma nova tentativa. A sessão já autenticada
-continua persistente.
+## Modelo e effort no Discord
 
-No painel, **Terminar sessão** tenta revogar a sessão na OpenAI e remove os
-tokens locais, mantendo o registo da conta para um futuro login. Se a revogação
-remota não puder ser confirmada, o painel informa-te. Nesse caso, desliga a
-aplicação nas definições do ChatGPT. O browser pode manter a autenticação Basic
-do painel até fechares a janela; essa autenticação é distinta da conta ChatGPT.
+Depois do login, usa `/models` para consultar o catálogo da conta, escolher um
+modelo e testar um pedido curto antes de o guardar. A mudança de modelo requer
+**Gerir Servidor**. O modelo selecionado passa a ser usado por todas as funções
+de AI.
 
-Podes gerir o acesso e os limites em <https://chatgpt.com/settings/usage>.
-Os erros de quota ou inelegibilidade são apresentados; a aplicação não troca
-automaticamente para uma API paga. O parâmetro `LLM_MAX_OUTPUT_TOKENS` não é
-enviado como limite de resposta nesta integração, porque esse campo não é
-suportado pela rota OAuth. Mantém-se o orçamento de contexto e as instruções
-dos comandos existentes.
+```text
+/effort
+/effort level:low
+/effort level:medium
+/effort level:high
+/effort level:default
+```
 
-## 6. Resolver problemas
+`/effort` mostra o modelo e o nível atuais. Com `level`, testa o nível proposto
+no modelo ativo e só guarda a alteração se o pedido funcionar. O comando requer
+**Gerir Servidor** e a alteração aplica-se aos próximos pedidos sem reiniciar.
+Se ainda não escolheste um modelo, o teste usa o primeiro modelo do catálogo,
+sem o selecionar. Assim podes corrigir a effort inicial antes de usar `/models`.
+
+Os valores configuráveis são `default`, `none`, `minimal`, `low`, `medium`,
+`high`, `xhigh` e `max`; cada modelo aceita apenas alguns deles. `default`
+deixa o modelo escolher o seu nível. Se o modelo rejeitar o nível, o bot mantém
+a escolha anterior. O `/models` também testa o modelo novo com a effort atual.
+
+No `.env`, a configuração equivalente é:
+
+```dotenv
+CHATGPT_REASONING_EFFORT=low
+```
+
+Menor effort pode reduzir o tempo de resposta e o consumo de raciocínio.
+Experimenta `low` para respostas mais rápidas, caso o modelo o aceite.
+Para trocar para um modelo que não aceita a effort atual, usa primeiro
+`/effort level:default`, depois `/models`, e escolhe o nível adequado.
+
+## Consultar, trocar de conta e terminar sessão
+
+```bash
+make codex CODEX_ARGS="--status"
+make codex CODEX_ARGS="--new-account"
+make codex CODEX_ARGS="--account CLIENT_ID_GUARDADO"
+make codex CODEX_ARGS="--logout"
+```
+
+`--status` mostra as contas guardadas e os seus IDs, sem tokens. `--new-account`
+abre um novo login; `--account` ativa um registo existente. Ao mudar de conta,
+a escolha guardada de modelo é removida: volta a escolher através de `/models`.
+O nível de effort é mantido.
+
+`--logout` tenta revogar a sessão ativa na OpenAI e remove os seus tokens locais.
+Se a revogação remota não for confirmada, o comando informa-te. Podes gerir o
+acesso e consultar os limites em [Utilização ChatGPT](https://chatgpt.com/settings/usage).
+
+## Resolver problemas
 
 | Sintoma | Ação |
 | --- | --- |
-| Painel devolve 503 | Define `CHATGPT_ADMIN_PASSWORD` e recria API e bot. |
-| Callback não chega à API | Confirma o túnel SSH, o endereço `127.0.0.1` e a porta de `CHATGPT_REDIRECT_URI`. |
-| Login expirado ou estado inválido | Reinicia o login no painel; não reutilizes uma URL de callback. |
-| Plano não autorizado | Volta a entrar e autoriza explicitamente o uso do plano. |
-| Conta/plano inelegível | Confirma a elegibilidade e políticas da conta na OpenAI. |
-| Limite de utilização atingido | Consulta a página de utilização; verifica os limites do plano e desta aplicação. |
-| Sessão expirada ou revogada | Volta a entrar na conta guardada pelo painel. |
-| `/models` não consegue ativar | Confirma a mesma `CHATGPT_ADMIN_PASSWORD` em API e bot; recria ambos se alteraste o `.env`. |
-| `no route to host` | Corrige a rede/firewall Docker na VM; uma alteração ao fornecedor de IA não corrige esse erro. |
+| `channel open failed` no túnel | Executa `make codex` na VM antes de abrir o link; confirma que a porta do túnel coincide com a do callback. |
+| Porta 1455 ocupada | Usa `--port 1456` e o túnel correspondente. |
+| Login expira ou callback inválido | Executa `make codex` novamente e usa o link novo. |
+| `/effort` ainda não aparece | Reconstrói e reinicia o bot para registar o novo comando Discord. |
+| Modelo rejeita a effort | Usa um nível aceite ou `default`; a escolha anterior mantém-se. |
+| `No route to host` / falha de DNS | Corrige a conectividade de saída da VM e dos containers. O login pela rede do host não corrige a rede da API. |
+| Limite ChatGPT atingido | Consulta a utilização da conta e aguarda a reposição dos limites. |
+| Sessão expirada ou revogada | Executa `make codex` novamente. |
 
-Os logs não incluem tokens OAuth nem os parâmetros do callback. Não copies
-`auth.json` para o Git ou para conversas de suporte. Para recuperar uma sessão
-do bot que falhou antes do setup, usa o comando `/retry` depois de confirmar
-que o modelo está ativo e responde.
+O login e as mudanças não foram executados na tua conta durante os testes;
+os testes usam respostas OAuth e de inferência simuladas.
 
-## Documentação oficial e validação
+## Referências oficiais
 
-- [Login e registo OAuth](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)
-- [Catálogo e inferência](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
-- [Renovação e contas](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions)
-- [Limitações da integração](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
-
-A implementação usa PKCE, valida `state`, nonce, assinatura, emissor e audiência
-do ID token, e só aceita inferência concluída pela Responses API. A validação
-automática usa fornecedores simulados: o login real e a elegibilidade têm de
-ser confirmados com a tua conta no servidor onde vais executar o projeto.
+- [Registo e login](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)
+- [Modelos e inferência com o plano ChatGPT](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
+- [Reasoning effort](https://developers.openai.com/api/docs/guides/reasoning)

@@ -4,6 +4,7 @@ from openai import APIConnectionError, APIStatusError, OpenAI
 
 from .chatgpt_auth import RESOURCE, ChatGPTAuth, ChatGPTError, provider_error
 from .llm import ConversationClient
+from .model_selection import REASONING_EFFORTS
 
 
 class ChatGPTClient(ConversationClient):
@@ -14,12 +15,16 @@ class ChatGPTClient(ConversationClient):
         *,
         auth: ChatGPTAuth,
         model: str,
+        reasoning_effort: str = "medium",
         timeout_seconds: float = 90,
         context_chars: int = 24000,
         max_output_tokens: int = 2500,
     ):
         self.auth = auth
         self.model = model
+        if reasoning_effort not in REASONING_EFFORTS:
+            raise ValueError("Invalid reasoning effort: " + reasoning_effort)
+        self.reasoning_effort = reasoning_effort
         self.timeout_seconds = timeout_seconds
         self.context_chars = context_chars
         # Used by shared prompt budgeting. The OAuth route forbids sending an
@@ -34,7 +39,9 @@ class ChatGPTClient(ConversationClient):
 
     def _chat(self, *, system: str, user: str, json_format: bool = False) -> str:
         if not self.model:
-            raise ChatGPTError("Escolhe e testa um modelo em /chatgpt ou /models.")
+            raise ChatGPTError(
+                "Faz login com make codex e escolhe um modelo em /models."
+            )
         body = {
             "model": self.model,
             "instructions": system,
@@ -44,6 +51,8 @@ class ChatGPTClient(ConversationClient):
         }
         if json_format:
             body["text"] = {"format": {"type": "json_object"}}
+        if self.reasoning_effort != "default":
+            body["reasoning"] = {"effort": self.reasoning_effort}
         completed = None
         pieces = []
         try:

@@ -1,26 +1,31 @@
 """Offline OAuth, provider, setup and Discord model API regression checks."""
 
 import json
-import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from http.server import HTTPServer
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import jwt
 import pytest
-from app import chatgpt_llm, main
+from app import chatgpt_llm, chatgpt_login, main
 from app.chatgpt_auth import (
     ISSUER,
     ChatGPTAuth,
     ChatGPTError,
 )
 from app.chatgpt_llm import ChatGPTClient
-from app.chatgpt_routes import CallbackLogFilter
 from app.config import Settings
-from app.model_selection import current_model, select_model
+from app.model_selection import (
+    current_effort,
+    current_model,
+    select_effort,
+    select_model,
+)
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 
@@ -372,7 +377,6 @@ def test_partial_output_is_never_accepted(oauth, monkeypatch, terminal):
 @pytest.fixture
 def panel(oauth, monkeypatch):
     settings, auth, _, _, _ = oauth
-    monkeypatch.setattr("app.chatgpt_routes.get_chatgpt_auth", lambda _: auth)
     monkeypatch.setattr(main, "get_chatgpt_auth", lambda _: auth)
     application = main.create_app()
     application.dependency_overrides[main.get_settings] = lambda: settings
@@ -383,93 +387,9 @@ def panel(oauth, monkeypatch):
     main.build_llm_client.cache_clear()
 
 
-def test_setup_is_protected_and_requires_same_origin(panel):
-    assert panel.get("/chatgpt").status_code == 401
-    assert panel.get("/chatgpt", auth=("admin", "wrong")).status_code == 401
-    assert panel.get("/chatgpt", auth=("admin", "owner-secret")).status_code == 200
-    assert (
-        panel.post(
-            "/chatgpt/login",
-            auth=("admin", "owner-secret"),
-            headers={"Origin": "https://attacker.invalid"},
-        ).status_code
-        == 403
-    )
-    response = panel.post(
-        "/chatgpt/login",
-        auth=("admin", "owner-secret"),
-        headers={"Origin": "http://127.0.0.1:8000"},
-        follow_redirects=False,
-    )
-    assert response.status_code == 303
-    assert response.headers["location"].startswith(ISSUER + "/api/accounts/authorize?")
-    assert "HttpOnly" in response.headers["set-cookie"]
-
-
-def test_callback_rejects_requests_without_browser_cookie(panel):
-    assert (
-        panel.get("/auth/callback?state=stolen&code=secret&client_id=other").status_code
-        == 400
-    )
-
-
-def test_browser_login_completes_and_model_can_be_selected_in_panel(
-    panel, oauth, monkeypatch
-):
-    settings, auth, state, _, _ = oauth
-    start = panel.post(
-        "/chatgpt/login",
-        auth=("admin", "owner-secret"),
-        headers={"Origin": "http://127.0.0.1:8000"},
-        follow_redirects=False,
-    )
-    query = parse_qs(urlsplit(start.headers["location"]).query)
-    state["nonce"] = query["nonce"][0]
-    response = panel.get(
-        "/auth/callback",
-        params={"state": query["state"][0], "code": "code", "client_id": "oaiapp_test"},
-    )
-    assert response.status_code == 200
-    provider_stream(
-        monkeypatch,
-        auth,
-        [
-            SimpleNamespace(
-                type="response.completed", response=SimpleNamespace(output_text="Ola!")
-            )
-        ],
-    )
-    response = panel.post(
-        "/chatgpt/model",
-        data={"model": "model-b"},
-        auth=("admin", "owner-secret"),
-        headers={"Origin": "http://127.0.0.1:8000"},
-    )
-    assert response.status_code == 200
-    assert "Ola!" in response.text
-    assert current_model(settings) == "model-b"
-    html = panel.get("/chatgpt", auth=("admin", "owner-secret")).text
-    assert "Model A" in html and "Model B" in html
-    assert auth.access_token() not in html
-    assert "refresh-1" not in html
-
-
-def test_switching_account_clears_model_selection(panel, oauth):
-    settings, auth, _, begin, finish = oauth
-    finish()
-    _, state = begin(new_account=True)
-    auth.finish_login(state=state, browser_state=state, code="code", client_id="second")
-    select_model("chatgpt", "model-a", settings.llm_model_selection_file)
-    response = panel.post(
-        "/chatgpt/account",
-        data={"client_id": "oaiapp_test"},
-        auth=("admin", "owner-secret"),
-        headers={"Origin": "http://127.0.0.1:8000"},
-        follow_redirects=False,
-    )
-    assert response.status_code == 303
-    assert auth.status()["active_client_id"] == "oaiapp_test"
-    assert current_model(settings) == ""
+def test_custom_setup_pages_are_removed(panel):
+    assert panel.get("/chatgpt").status_code == 404
+    assert panel.get("/auth/callback").status_code == 404
 
 
 def test_real_sdk_decodes_responses_sse_and_json_requests(oauth, monkeypatch):
@@ -526,20 +446,6 @@ def test_real_sdk_decodes_responses_sse_and_json_requests(oauth, monkeypatch):
     ) == {"answer": "ok"}
     assert sent[0]["text"]["format"]["type"] == "json_object"
     assert sent[0]["store"] is False
-
-
-def test_callback_access_logs_do_not_contain_authorization_code():
-    record = logging.LogRecord(
-        "uvicorn.access",
-        logging.INFO,
-        "",
-        1,
-        '%s - "%s %s HTTP/%s" %s',
-        ("client", "GET", "/auth/callback?code=secret&state=secret", "1.1", 200),
-        None,
-    )
-    assert CallbackLogFilter().filter(record)
-    assert "secret" not in record.getMessage()
 
 
 def test_discord_models_api_tests_and_persists_chatgpt_selection(
@@ -609,7 +515,260 @@ def test_settings_read_chatgpt_environment(monkeypatch, tmp_path):
     monkeypatch.setenv("LLM_PROVIDER", "chatgpt")
     monkeypatch.setenv("CHATGPT_AUTH_FILE", str(tmp_path / "credentials.json"))
     monkeypatch.setenv("CHATGPT_ADMIN_PASSWORD", "password")
+    monkeypatch.setenv("CHATGPT_REASONING_EFFORT", "low")
     settings = Settings.from_env()
     assert settings.llm_provider == "chatgpt"
     assert settings.chatgpt_admin_password == "password"
     assert settings.chatgpt_auth_file == tmp_path / "credentials.json"
+    assert settings.chatgpt_reasoning_effort == "low"
+
+
+def test_loopback_callback_requires_process_state_and_saves_login(oauth, capsys):
+    settings, auth, _, begin, _ = oauth
+    _, state = begin()
+    result = {}
+    with HTTPServer(
+        ("127.0.0.1", 0), chatgpt_login.callback_handler(auth, state, result)
+    ) as server:
+        thread = threading.Thread(
+            target=lambda: (server.handle_request(), server.handle_request())
+        )
+        thread.start()
+        url = f"http://127.0.0.1:{server.server_port}/auth/callback"
+        wrong = httpx.get(url, params={"state": "wrong", "code": "sensitive-code"})
+        assert wrong.status_code == 400
+        assert not result
+        correct = httpx.get(
+            url,
+            params={
+                "state": state,
+                "code": "sensitive-code",
+                "client_id": "oaiapp_test",
+            },
+        )
+        assert correct.status_code == 200
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+    assert result == {"done": True, "changed": True}
+    assert auth.status()["connected"]
+    assert settings.chatgpt_auth_file.exists()
+    assert "sensitive-code" not in capsys.readouterr().err
+
+
+def test_cli_status_and_switch_account_without_api(oauth, monkeypatch):
+    settings, auth, _, begin, finish = oauth
+    finish()
+    _, state = begin(new_account=True)
+    auth.finish_login(state=state, browser_state=state, code="code", client_id="second")
+    select_model("chatgpt", "model-a", settings.llm_model_selection_file)
+    monkeypatch.setattr(chatgpt_login, "get_chatgpt_auth", lambda _: auth)
+    events = []
+    args = SimpleNamespace(status=True, logout=False, account=None)
+    assert chatgpt_login.run(args, settings=settings, emit=events.append) == 0
+    assert events[0]["active_client_id"] == "second"
+    assert "access_token" not in json.dumps(events)
+    args.status, args.account = False, "oaiapp_test"
+    assert chatgpt_login.run(args, settings=settings, emit=events.append) == 0
+    assert auth.status()["active_client_id"] == "oaiapp_test"
+    assert current_model(settings) == ""
+
+
+def test_printable_reauthorization_url_contains_no_identity_token(oauth):
+    _, auth, _, _, finish = oauth
+    finish()
+    url, _ = auth.start_login(include_id_token_hint=False)
+    params = parse_qs(urlsplit(url).query)
+    assert params["client_id"] == ["oaiapp_test"]
+    assert "id_token_hint" not in params
+
+
+def test_effort_is_tested_persisted_and_used_by_next_request(panel, oauth, monkeypatch):
+    settings, auth, _, _, finish = oauth
+    finish()
+    select_model("chatgpt", "model-a", settings.llm_model_selection_file)
+    assert main.get_llm_client(settings).reasoning_effort == "medium"
+    _, calls = provider_stream(
+        monkeypatch,
+        auth,
+        [
+            SimpleNamespace(
+                type="response.completed", response=SimpleNamespace(output_text="ok")
+            )
+        ],
+    )
+    assert panel.post("/v1/effort/current", json={"effort": "low"}).status_code == 401
+    response = panel.post(
+        "/v1/effort/current",
+        json={"effort": "low"},
+        headers={"X-ChatGPT-Admin-Key": "owner-secret"},
+    )
+    assert response.status_code == 200
+    assert calls[-1]["reasoning"] == {"effort": "low"}
+    assert current_effort(settings) == "low"
+    assert main.get_llm_client(settings).reasoning_effort == "low"
+    assert panel.get("/v1/effort").json()["current_effort"] == "low"
+    # Persisted selection applies to freshly created clients and model testing.
+    response = panel.post(
+        "/v1/models/current",
+        json={"model": "model-b"},
+        headers={"X-ChatGPT-Admin-Key": "owner-secret"},
+    )
+    assert response.status_code == 200
+    assert calls[-1]["reasoning"] == {"effort": "low"}
+    assert main.get_llm_client(settings).model == "model-b"
+
+
+def test_effort_can_be_reset_before_a_model_is_selected(panel, oauth, monkeypatch):
+    settings, auth, _, _, finish = oauth
+    finish()
+    select_effort("max", settings.llm_model_selection_file)
+    _, calls = provider_stream(
+        monkeypatch,
+        auth,
+        [
+            SimpleNamespace(
+                type="response.completed", response=SimpleNamespace(output_text="ok")
+            )
+        ],
+    )
+    response = panel.post(
+        "/v1/effort/current",
+        json={"effort": "default"},
+        headers={"X-ChatGPT-Admin-Key": "owner-secret"},
+    )
+    assert response.status_code == 200
+    assert current_effort(settings) == "default"
+    assert current_model(settings) == ""
+    assert calls[-1]["model"] == "model-a"
+    assert "reasoning" not in calls[-1]
+
+
+def test_unsupported_effort_keeps_previous_setting(panel, oauth, monkeypatch):
+    settings, auth, _, _, finish = oauth
+    finish()
+    select_model("chatgpt", "model-a", settings.llm_model_selection_file)
+    select_effort("low", settings.llm_model_selection_file)
+    provider_stream(
+        monkeypatch, auth, [SimpleNamespace(type="error", code="unsupported_value")]
+    )
+    response = panel.post(
+        "/v1/effort/current",
+        json={"effort": "max"},
+        headers={"X-ChatGPT-Admin-Key": "owner-secret"},
+    )
+    assert response.status_code == 502
+    assert current_effort(settings) == "low"
+    assert main.get_llm_client(settings).reasoning_effort == "low"
+    assert (
+        panel.post(
+            "/v1/effort/current",
+            json={"effort": "ultra"},
+            headers={"X-ChatGPT-Admin-Key": "owner-secret"},
+        ).status_code
+        == 400
+    )
+
+
+def test_default_effort_omits_reasoning_override(oauth, monkeypatch):
+    _, auth, _, _, finish = oauth
+    finish()
+    client, calls = provider_stream(
+        monkeypatch,
+        auth,
+        [
+            SimpleNamespace(
+                type="response.completed", response=SimpleNamespace(output_text="ok")
+            )
+        ],
+    )
+    client.reasoning_effort = "default"
+    assert client.test_model() == "ok"
+    assert "reasoning" not in calls[-1]
+
+
+def test_host_wrapper_opens_official_login_url(monkeypatch, capsys):
+    import importlib.util
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[3] / "scripts" / "codex_login.py"
+    spec = importlib.util.spec_from_file_location("codex_login_host", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setenv("DISPLAY", ":0")
+    urls = []
+    monkeypatch.setattr(module.webbrowser, "open", lambda url: urls.append(url) or True)
+    module.handle_event(
+        {
+            "event": "authorize",
+            "url": ISSUER + "/api/accounts/authorize?state=test",
+            "port": 1455,
+        }
+    )
+    assert urls == [ISSUER + "/api/accounts/authorize?state=test"]
+    module.handle_event(
+        {"event": "authorize", "url": "headless", "port": 1455}, no_browser=True
+    )
+    assert len(urls) == 1
+    assert "1455" in capsys.readouterr().out
+
+
+def test_host_wrapper_forwards_login_options_and_container_exit_code(
+    monkeypatch, capsys
+):
+    import importlib.util
+    import io
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[3] / "scripts" / "codex_login.py"
+    spec = importlib.util.spec_from_file_location("codex_login_host_options", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    commands = []
+
+    class Process:
+        stdout = io.StringIO('{"event":"error","message":"login failed"}\n')
+
+        def wait(self):
+            return 1
+
+    def launch(command, **kwargs):
+        commands.append(command)
+        return Process()
+
+    monkeypatch.setattr(module.subprocess, "Popen", launch)
+    monkeypatch.setattr(
+        module.sys,
+        "argv",
+        [
+            "codex_login.py",
+            "--no-browser",
+            "--port",
+            "1456",
+            "--",
+            "docker",
+            "compose",
+            "-f",
+            "docker-compose.yml",
+        ],
+    )
+    assert module.main() == 1
+    assert commands == [
+        [
+            "docker",
+            "compose",
+            "-f",
+            "docker-compose.yml",
+            "run",
+            "--build",
+            "--rm",
+            "--no-deps",
+            "-T",
+            "codex",
+            "python",
+            "-m",
+            "app.chatgpt_login",
+            "--port",
+            "1456",
+        ]
+    ]
+    assert "login failed" in capsys.readouterr().out

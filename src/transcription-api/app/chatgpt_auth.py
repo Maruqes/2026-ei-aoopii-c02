@@ -45,7 +45,7 @@ def provider_error(code: str) -> ChatGPTError:
         "subscription_sharing_usage_limit_exceeded": "Limite ChatGPT atingido. Consulta https://chatgpt.com/settings/usage.",
         "subscription_sharing_usage_unavailable": "A disponibilidade ChatGPT não pôde ser verificada. Tenta mais tarde.",
         "subscription_sharing_user_unavailable": "Conta ChatGPT temporariamente indisponível. Tenta mais tarde.",
-        "subscription_sharing_invalid_user": "Sessão ChatGPT inválida. Volta a iniciar sessão em /chatgpt.",
+        "subscription_sharing_invalid_user": "Sessão ChatGPT inválida. Executa make codex novamente.",
     }
     return ChatGPTError(
         messages.get(
@@ -127,7 +127,9 @@ class ChatGPTAuth:
                 ],
             }
 
-    def start_login(self, *, new_account: bool = False) -> tuple[str, str]:
+    def start_login(
+        self, *, new_account: bool = False, include_id_token_hint: bool = True
+    ) -> tuple[str, str]:
         redirect = self.settings.chatgpt_redirect_uri
         parsed = urlsplit(redirect)
         if (
@@ -162,7 +164,7 @@ class ChatGPTAuth:
                 .rstrip("="),
             }
             if cid:
-                if account.get("id_token"):
+                if include_id_token_hint and account.get("id_token"):
                     params["id_token_hint"] = account["id_token"]
                 if account.get("email"):
                     params["login_hint"] = account["email"]
@@ -198,7 +200,7 @@ class ChatGPTAuth:
             code = error.get("code", "") if isinstance(error, dict) else error
             if code in TERMINAL_REFRESH_ERRORS:
                 raise InvalidRefreshError(
-                    "Sessão expirada ou revogada. Volta a iniciar sessão em /chatgpt."
+                    "Sessão expirada ou revogada. Executa make codex novamente."
                 )
             raise provider_error(str(code or ""))
         return result
@@ -344,7 +346,9 @@ class ChatGPTAuth:
             cid = data.get("active_client_id")
             account = data["accounts"].get(cid, {})
             if not account.get("access_token"):
-                raise ChatGPTError("Inicia sessão e escolhe um modelo em /chatgpt.")
+                raise ChatGPTError(
+                    "Inicia sessão com make codex e escolhe um modelo em /models."
+                )
             if account["expires_at"] <= time.time() + 60:
                 if account.get("earliest_refresh_at", 0) > time.time():
                     if account["expires_at"] <= time.time():

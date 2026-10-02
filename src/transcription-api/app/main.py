@@ -29,8 +29,8 @@ from data.repository import (  # noqa: E402
 
 from .agent import SessionAgent
 from .chatgpt_auth import get_chatgpt_auth
+from .chatgpt_control import require_chatgpt_admin
 from .chatgpt_llm import ChatGPTClient
-from .chatgpt_routes import register_chatgpt_routes, require_chatgpt_admin
 from .config import Settings
 from .docs_client import LocalMarkdownProfileClient
 from .llm import (
@@ -39,7 +39,13 @@ from .llm import (
     OpenAICompatibleClient,
     normalize_response_language,
 )
-from .model_selection import current_model, select_model
+from .model_selection import (
+    REASONING_EFFORTS,
+    current_effort,
+    current_model,
+    select_effort,
+    select_model,
+)
 from .profile_updater import run_text_profile_sync, start_text_profile_sync_loop
 from .recording_cleanup import RecordingCleanup, remove_recording_files
 from .schemas import (
@@ -50,9 +56,12 @@ from .schemas import (
     GuildOracleRequest,
     GuildOracleResponse,
     HealthResponse,
+    LLMEffortResponse,
     LLMModelsResponse,
     ProfilePromptRequest,
     ProfilePromptResponse,
+    SelectLLMEffortRequest,
+    SelectLLMEffortResponse,
     SelectLLMModelRequest,
     SelectLLMModelResponse,
     SessionRecapResponse,
@@ -113,7 +122,6 @@ def create_app() -> FastAPI:
     service = FastAPI(
         title="Discord Anthropologist Transcription API", lifespan=lifespan
     )
-    register_chatgpt_routes(service, get_settings, build_llm_client)
 
     def start_profile_sync() -> None:
         settings = get_settings()
@@ -393,6 +401,56 @@ def create_app() -> FastAPI:
             processing_ms=int((time.perf_counter() - started) * 1000),
         )
 
+    @service.get("/v1/effort", response_model=LLMEffortResponse)
+    def list_llm_efforts(
+        settings: Settings = Depends(get_settings),
+    ) -> LLMEffortResponse:
+        if settings.llm_provider != "chatgpt":
+            raise HTTPException(409, "Reasoning effort requires LLM_PROVIDER=chatgpt")
+        return LLMEffortResponse(
+            provider=settings.llm_provider,
+            model=current_model(settings),
+            current_effort=current_effort(settings),
+            efforts=list(REASONING_EFFORTS),
+        )
+
+    @service.post("/v1/effort/current", response_model=SelectLLMEffortResponse)
+    def change_llm_effort(
+        request: SelectLLMEffortRequest,
+        http_request: Request,
+        settings: Settings = Depends(get_settings),
+    ) -> SelectLLMEffortResponse:
+        if settings.llm_provider != "chatgpt":
+            raise HTTPException(409, "Reasoning effort requires LLM_PROVIDER=chatgpt")
+        require_chatgpt_admin(http_request, settings)
+        effort = request.effort.strip().lower()
+        if effort not in REASONING_EFFORTS:
+            raise HTTPException(400, "Invalid reasoning effort")
+        model = current_model(settings)
+        try:
+            if not model:
+                models = get_chatgpt_auth(settings).models()
+                if not models:
+                    raise HTTPException(
+                        409, "No models available; sign in with make codex"
+                    )
+                # Let users fix an incompatible initial effort before /models
+                # has saved a model. Test against the catalog without selecting it.
+                model = models[0]["slug"]
+            candidate = build_llm_client(settings, model, effort)
+            test_response = candidate.test_model()
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(502, f"Effort test failed: {exc}") from exc
+        select_effort(effort, settings.llm_model_selection_file)
+        return SelectLLMEffortResponse(
+            provider=settings.llm_provider,
+            model=model,
+            effort=effort,
+            test_response=test_response,
+        )
+
     @service.get("/v1/models", response_model=LLMModelsResponse)
     def list_llm_models(
         settings: Settings = Depends(get_settings),
@@ -433,7 +491,7 @@ def create_app() -> FastAPI:
                 status_code=status.HTTP_404_NOT_FOUND, detail="Model is not available"
             )
 
-        candidate = build_llm_client(settings, model)
+        candidate = build_llm_client(settings, model, current_effort(settings))
         try:
             test_response = candidate.test_model()
         except Exception as exc:
@@ -879,15 +937,18 @@ def speechmatics_key_usage_response(
 
 
 def get_llm_client(settings: Settings = Depends(get_settings)) -> LLMClient:
-    return build_llm_client(settings, current_model(settings))
+    return build_llm_client(settings, current_model(settings), current_effort(settings))
 
 
 @lru_cache(maxsize=8)
-def build_llm_client(settings: Settings, model: str) -> LLMClient:
+def build_llm_client(
+    settings: Settings, model: str, effort: str | None = None
+) -> LLMClient:
     if settings.llm_provider == "chatgpt":
         return ChatGPTClient(
             auth=get_chatgpt_auth(settings),
             model=model,
+            reasoning_effort=effort if effort is not None else current_effort(settings),
             timeout_seconds=settings.llm_timeout_seconds,
             context_chars=settings.llm_context_chars,
             max_output_tokens=settings.llm_max_output_tokens,

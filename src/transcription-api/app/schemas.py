@@ -59,6 +59,24 @@ class TextProfileSyncResponse(BaseModel):
     processing_ms: int
 
 
+class LLMEffortResponse(BaseModel):
+    provider: str
+    model: str
+    current_effort: str
+    efforts: list[str]
+
+
+class SelectLLMEffortRequest(BaseModel):
+    effort: str
+
+
+class SelectLLMEffortResponse(BaseModel):
+    provider: str
+    model: str
+    effort: str
+    test_response: str
+
+
 class LLMModelsResponse(BaseModel):
     provider: str
     current_model: str

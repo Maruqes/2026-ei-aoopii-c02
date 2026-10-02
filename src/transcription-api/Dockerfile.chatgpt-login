@@ -1,0 +1,5 @@
+FROM python:3.11-slim-bookworm
+WORKDIR /app/src/transcription-api
+RUN pip install --no-cache-dir "httpx>=0.27,<1" "PyJWT[crypto]>=2.10,<3"
+COPY src/transcription-api/app ./app
+CMD ["python", "-m", "app.chatgpt_login"]

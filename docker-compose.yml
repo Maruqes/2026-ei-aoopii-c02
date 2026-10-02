@@ -1,4 +1,21 @@
 services:
+  codex:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: src/transcription-api/Dockerfile.chatgpt-login
+      network: host
+      entitlements:
+        - network.host
+    network_mode: host
+    environment:
+      LLM_PROVIDER: chatgpt
+      CHATGPT_AUTH_FILE: /app/.tmp/state/chatgpt/auth.json
+      CHATGPT_REDIRECT_URI: ${CHATGPT_REDIRECT_URI:-http://127.0.0.1:1455/auth/callback}
+      LLM_MODEL_SELECTION_FILE: /app/.tmp/state/llm_model_selection.json
+    volumes:
+      - api_state:/app/.tmp/state
+
   postgres:
     image: postgres:16
     container_name: discord-anthropologist-postgres
@@ -74,8 +91,9 @@ services:
       LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-2500}
       LLM_PROVIDER: ${LLM_PROVIDER:-openai}
       CHATGPT_MODEL: ${CHATGPT_MODEL:-}
+      CHATGPT_REASONING_EFFORT: ${CHATGPT_REASONING_EFFORT:-medium}
       CHATGPT_ADMIN_PASSWORD: ${CHATGPT_ADMIN_PASSWORD:-}
-      CHATGPT_REDIRECT_URI: ${CHATGPT_REDIRECT_URI:-http://127.0.0.1:8000/auth/callback}
+      CHATGPT_REDIRECT_URI: ${CHATGPT_REDIRECT_URI:-http://127.0.0.1:1455/auth/callback}
       CHATGPT_AUTH_FILE: /app/.tmp/state/chatgpt/auth.json
       OPENAI_API_KEY: ${OPENAI_API_KEY:-${GROQ_API_KEY:-}}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-${GROQ_BASE_URL:-https://api.openai.com/v1}}

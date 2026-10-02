@@ -326,7 +326,9 @@ does not leave Discord commands waiting indefinitely.
 
 For ChatGPT account login, model selection and VM setup, see
 [CHATGPT_SETUP.md](../../CHATGPT_SETUP.md). Select `LLM_PROVIDER=chatgpt` to use
-the signed-in account for every LLM feature, including Discord `/models`.
+the signed-in account for every LLM feature. Run `make codex` to sign in;
+Discord `/models` changes the model and `/effort level:low` changes reasoning effort.
+The initial effort is set with `CHATGPT_REASONING_EFFORT` in `.env`.
 
 ```bash
 python -m venv .venv

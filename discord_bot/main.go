@@ -74,6 +74,8 @@ func handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		syncHook(s, i)
 	case commandMatches(name, "models"):
 		modelsHook(s, i)
+	case commandMatches(name, "effort"):
+		effortHook(s, i)
 	case commandMatches(name, "health"):
 		healthHook(s, i)
 	case commandMatches(name, "keys"):
@@ -264,6 +266,31 @@ func promptHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			log.Printf("erro ao enviar resposta /prompt para canal %s: %v", channelID, err)
 		}
 	}()
+}
+
+func effortHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	client := botAPIClient
+	if client == nil {
+		client = NewTranscriptionClientFromEnv()
+	}
+	for _, option := range i.ApplicationCommandData().Options {
+		if option.Name != "level" {
+			continue
+		}
+		result, err := client.SelectLLMEffort(context.Background(), option.StringValue())
+		if err != nil {
+			respondText(s, i, fmt.Sprintf(botText("Nao consegui alterar a effort: %v", "Could not change effort: %v"), err))
+			return
+		}
+		respondText(s, i, fmt.Sprintf(botText("Effort alterada para **%s**. Teste com **%s**: %s", "Effort changed to **%s**. Test with **%s**: %s"), result.Effort, result.Model, result.TestResponse))
+		return
+	}
+	result, err := client.GetLLMEffort(context.Background())
+	if err != nil {
+		respondText(s, i, fmt.Sprintf(botText("Nao consegui consultar a effort: %v", "Could not read effort: %v"), err))
+		return
+	}
+	respondText(s, i, fmt.Sprintf(botText("Modelo: **%s**\nEffort: **%s**\nOpcoes: %s\nUsa `/effort level:low` para alterar. Os niveis aceites dependem do modelo.", "Model: **%s**\nEffort: **%s**\nOptions: %s\nUse `/effort level:low` to change it. Supported levels depend on the model."), result.Model, result.CurrentEffort, strings.Join(result.Efforts, ", ")))
 }
 
 func modelsHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -1237,7 +1264,7 @@ func needsDeferredResponse(i *discordgo.InteractionCreate) bool {
 		return false
 	}
 	switch i.ApplicationCommandData().Name {
-	case "start", "stop", "timeout", "language", "profile", "models", "health", "keys", "forget", "recap", "guess", "digest", "retry", "play", "pause", "skip", "queue", "musicstop":
+	case "start", "stop", "timeout", "language", "profile", "models", "effort", "health", "keys", "forget", "recap", "guess", "digest", "retry", "play", "pause", "skip", "queue", "musicstop":
 		return true
 	}
 	return false
@@ -1292,7 +1319,7 @@ func canManageServer(i *discordgo.InteractionCreate) bool {
 }
 func requiresManageServer(command string) bool {
 	switch command {
-	case "start", "stop", "sync", "timeout", "language", "retry":
+	case "start", "stop", "sync", "timeout", "language", "retry", "effort":
 		return true
 	}
 	return false

@@ -84,6 +84,7 @@ var commandNames = map[string]map[botLanguage]string{
 	"prompt":   {botLanguagePT: "prompt", botLanguageEN: "prompt"},
 	"sync":     {botLanguagePT: "sync", botLanguageEN: "sync"},
 	"models":   {botLanguagePT: "models", botLanguageEN: "models"},
+	"effort":   {botLanguagePT: "effort", botLanguageEN: "effort"},
 	"health":   {botLanguagePT: "health", botLanguageEN: "health"},
 	"keys":     {botLanguagePT: "keys", botLanguageEN: "keys"},
 	"forget":   {botLanguagePT: "forget", botLanguageEN: "forget"},
@@ -198,6 +199,26 @@ func buildApplicationCommands(lang botLanguage) []*discordgo.ApplicationCommand 
 		{
 			Name:        commandName(lang, "models"),
 			Description: "Lists and changes the active LLM model.",
+		},
+		{
+			Name:        commandName(lang, "effort"),
+			Description: "Shows or changes ChatGPT reasoning effort (tested before saving).",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Name: "level", Type: discordgo.ApplicationCommandOptionString,
+					Description: "Reasoning effort; supported levels depend on the model.",
+					Choices: []*discordgo.ApplicationCommandOptionChoice{
+						{Name: "default", Value: "default"},
+						{Name: "none", Value: "none"},
+						{Name: "minimal", Value: "minimal"},
+						{Name: "low", Value: "low"},
+						{Name: "medium", Value: "medium"},
+						{Name: "high", Value: "high"},
+						{Name: "xhigh", Value: "xhigh"},
+						{Name: "max", Value: "max"},
+					},
+				},
+			},
 		},
 		{
 			Name:        commandName(lang, "health"),
