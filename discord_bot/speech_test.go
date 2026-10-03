@@ -17,7 +17,7 @@ import (
 
 func speechPlayer(t *testing.T) *MusicPlayer {
 	t.Helper()
-	for _, command := range []string{"piper", "ffmpeg"} {
+	for _, command := range []string{"python3", "piper", "ffmpeg"} {
 		if _, err := exec.LookPath(command); err != nil {
 			t.Skip(command + " is not installed")
 		}
@@ -38,7 +38,7 @@ func TestSpeechPortugueseSynthesisProducesDiscordOpusWhileMusicPaused(t *testing
 	p.paused = true
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := p.Speak(ctx, "Diz."); err != nil {
+	if err := p.Speak(ctx, "Boa! 😂"); err != nil {
 		t.Fatal(err)
 	}
 	if !p.Snapshot().Paused || p.IsBusy() {
@@ -62,6 +62,16 @@ func TestSpeechPortugueseSynthesisProducesDiscordOpusWhileMusicPaused(t *testing
 	}
 	if packets < 5 || energy == 0 {
 		t.Fatalf("no audible Portuguese synthesis: packets=%d energy=%d", packets, energy)
+	}
+}
+
+func TestSpeechUnknownEmojiOnlyReplyStaysSilent(t *testing.T) {
+	p := speechPlayer(t)
+	if err := p.Speak(context.Background(), "🚀🧑‍💻"); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.vc.OpusSend) != 0 || p.IsBusy() {
+		t.Fatal("silent emoji reply produced speech or retained playback")
 	}
 }
 

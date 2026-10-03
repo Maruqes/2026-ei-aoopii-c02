@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,9 @@ import (
 
 	"gopkg.in/hraban/opus.v2"
 )
+
+//go:embed speech_synthesis.py
+var speechSynthesis string
 
 func speechVoiceModel() string {
 	if model := strings.TrimSpace(os.Getenv("ASSISTANT_VOICE_MODEL")); model != "" {
@@ -49,13 +53,15 @@ func (p *MusicPlayer) Speak(ctx context.Context, text string) error {
 		return nil
 	}
 	// ponytail: buffer one bounded local reply; stream synthesis if longer replies are needed.
-	// Tugão produces 22.05 kHz mono PCM. Longer phonemes slow speech without changing pitch.
-	synth := musicCommand(ctx, "piper", "--model", speechVoiceModel(),
-		"--length-scale", "1.3", "--sentence-silence", "0.4", "--output-raw")
+	// One Piper model load handles all emoji expressions and produces 22.05 kHz mono PCM.
+	synth := musicCommand(ctx, "python3", "-c", speechSynthesis, speechVoiceModel())
 	synth.Stdin, synth.Stderr = strings.NewReader(text), io.Discard
 	audio, err := synth.Output()
 	if err != nil {
 		return fmt.Errorf("could not synthesize Portuguese speech with Piper: %w", err)
+	}
+	if len(audio) == 0 {
+		return nil
 	}
 	streamCtx, stop := context.WithCancelCause(ctx)
 	defer stop(nil)

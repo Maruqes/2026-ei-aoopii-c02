@@ -157,6 +157,17 @@ a síntese falhe. Para respostas longas, fala até 2000 caracteres e indica o ch
 para o restante. Desligar o assistente, mudar a configuração ou sair da chamada
 cancela a fala em curso.
 
+Os emojis da resposta dão expressão à frase imediatamente anterior (ou à primeira
+frase, quando aparecem no início): 😊/😄/🎉 tornam a voz mais alegre, 😂/🤣/😆
+acrescentam um riso curto, 😢/😔/💔 suavizam e abrandam a voz, e 😭 acrescenta uma
+ligeira tremulação. 😮/😱/🤯 indicam surpresa, 😡/😠 irritação, ❤️/🥰/🙏 carinho,
+😉/😜/😏 brincadeira, 🤔 reflexão e 😴 cansaço. Os símbolos e variantes de cor de
+pele não são lidos; emojis repetidos não repetem o riso. O texto no chat mantém-se.
+São aproximações por tom, ritmo, volume e vocalizações sintetizadas: Tugão não é um
+modelo de interpretação emocional nem produz choro ou gargalhadas naturais.
+O modelo carrega uma única vez por resposta; após 12 mudanças de expressão, o
+restante texto é lido com a voz normal.
+
 `ASSISTANT_VOICE_ENABLED=true` é o default. Usa `false` para resposta apenas no chat.
 Depois de atualizar, reconstrói o bot com `docker compose up -d --build discord-bot`.
 Para execução fora do Docker, instala `piper-tts==1.8.0` e descarrega o
