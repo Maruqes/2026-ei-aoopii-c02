@@ -37,9 +37,9 @@ Estes valores são defaults propostos, ajustáveis depois de um ensaio real.
 | Repetição | Repetir a frase durante a captura não cria outro pedido. Durante a resposta, não interrompe o LLM nesta versão. |
 | Frase | Default «Olá macaco»; 2 a 5 palavras, até 50 caracteres, normalizada por maiúsculas, acentos e pontuação. Validar que sobra uma frase útil. |
 | Deteção | Qualquer posição do enunciado, na ordem certa; ignorar acentos/pontuação/caixa, tolerar um erro de reconhecimento, duas palavras intercaladas e palavras juntas/separadas. Aceitar fronteira entre finais do mesmo autor. |
-| Fim da pergunta | 2 segundos sem atividade de fala do autor; aguardar finais correspondentes ao áudio antes de enviar ao LLM. Silêncio não é apenas ausência de texto novo. |
-| Sem pergunta | 10 segundos para começar; avisar e voltar à espera. |
-| Pedido longo | Máximo de 30 segundos de fala após ativação; se exceder, pedir uma pergunta mais curta, sem responder a um corte arbitrário. |
+| Fim da pergunta | 5 segundos sem fala do autor nem novos finais; os parciais sinalizam fala ainda por finalizar. Acumular todos os finais antes de enviar uma única pergunta ao LLM. |
+| Sem pergunta | 10 segundos após receber a ativação para começar; avisar e voltar à espera. |
+| Pedido longo | Máximo de 30 segundos de captura após receber a ativação; se exceder, pedir uma pergunta mais curta, sem responder a um corte arbitrário. |
 | Cancelamento | «Cancela» como enunciado isolado do autor durante a captura cancela. Sair do canal também cancela. |
 | Resposta | Assistente geral, português por defeito, resposta concisa; sem executar ações, pesquisar a internet ou carregar todo o histórico do servidor. |
 | Erros | Timeout de pedido ao LLM de 30 segundos; indicar falha e voltar à espera. Sem repetir automaticamente uma resposta que possa já ter sido publicada. |
@@ -103,7 +103,7 @@ stateDiagram-v2
    deduplicação limitada ao ciclo de vida da ligação/gravação.
 3. Detetar a frase com tolerância limitada, incluindo quando se divide entre finais.
    Eliminar apenas a ativação; preservar a pergunta antes e depois no mesmo enunciado.
-   Uma pausa superior a 2 segundos separa o contexto anterior.
+   Uma pausa superior a 5 segundos separa o contexto anterior.
    Associar cada ativação à sua posição no áudio, não apenas ao recording ID.
 4. Capturar eventos novos apenas do autor. Associar atividade de fala e progresso
    de finais ao mesmo relógio de áudio. Tratar silêncio/DTX com o PCM e mecanismos
@@ -221,7 +221,11 @@ A energia PCM usa um limiar inicial RMS de 500 em S16LE, ajustável por
 `ASSISTANT_SPEECH_RMS`. Validar o limiar com fala
 baixa, ruído, microfones e música; se a heurística não delimitar fala adequadamente,
 substituí-la por um detetor comprovado. Pedidos com finais pendentes falham após
-5 segundos adicionais ao silêncio de 2 segundos, em vez de enviar texto incompleto.
+5 segundos adicionais ao silêncio de 5 segundos, em vez de enviar texto incompleto.
+Os parciais ficam ativos no fornecedor e comunicam só os tempos ao bot; nunca
+fornecem texto à pergunta. Finais novos reiniciam a margem de silêncio, evitando
+enviar apenas o primeiro fragmento. Números e datas formatados como entidades
+também são preservados, incluindo pontuação e resultados com várias palavras.
 
 
 Atualização da frase: default «Olá macaco», alterável por

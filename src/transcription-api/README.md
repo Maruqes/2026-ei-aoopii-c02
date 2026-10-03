@@ -415,8 +415,10 @@ mensagem e timeouts impedem crescimento ilimitado e operações de rede no loop 
 
 Cada WAV é uma unidade e epoch independentes; a reserva sobrevive ao fecho por silêncio,
 rotação e novo SSRC. As fronteiras de promoção e modo fecham o WAV anterior antes de
-criar o seguinte. A API guarda finais idempotentes com `recording_id` e geração; parciais
-só aparecem no terminal se debug estiver ligado. `EndOfStream` inclui a sequência final;
+criar o seguinte. A API guarda finais idempotentes com `recording_id` e geração.
+Parciais estão ativos para comunicar ao bot apenas os tempos de fala ainda por
+finalizar; o texto parcial só aparece no terminal se debug estiver ligado.
+`EndOfStream` inclui a sequência final;
 o commit exige `EndOfTranscript` e correspondência entre frames enviados e WAV fechado.
 
 Uma falha deixa a unidade em `fallback_pending`. A admissão Batch invalida a geração
@@ -476,6 +478,9 @@ O WebSocket agora devolve `ready` com `recording_id`/`generation` e eventos `fin
 apenas depois de persistir cada segmento novo. Cada final inclui `session_id`,
 `discord_id`, `recording_id`, `generation`, `identity`, `text`, `start`, `end` e `words`
 com tempos relativos ao PCM daquela unidade. Pontuação é preservada nas palavras.
+Números e datas formatados como entidades também fazem parte de `words`.
+Eventos `speech` levam só `session_id`, `discord_id`, `recording_id`, `generation`,
+`start` e `end`: indicam fala ainda por finalizar, sem texto nem ativação.
 Duplicados, parciais e recuperação Batch não geram eventos de ativação. Falha de
 persistência/entrega termina o stream com `fallback`; o bot cancela o pedido afetado.
 
@@ -484,5 +489,5 @@ O relógio e as fronteiras RTP descontam esse padding para evitar silêncio dupl
 O fecho idle continua a libertar o transporte, preservando a reserva e a possibilidade
 de abrir novo stream na próxima fala. Esses frames enviados contam no uso Realtime.
 Os logs do assistente medem até à publicação, desde o tempo áudio da frase e desde a
-última fala PCM da pergunta; não registam perguntas ou respostas. Uma publicação
+última fala PCM ou palavra final da pergunta; não registam perguntas ou respostas. Uma publicação
 Discord falhada não é repetida automaticamente.

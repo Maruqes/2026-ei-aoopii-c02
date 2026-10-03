@@ -21,11 +21,15 @@ type assistantSettings struct {
 	ChannelID *string `json:"channel_id"`
 	Revision  int64   `json:"revision"`
 }
+
+const assistantSilence = 5 * time.Second
+
 type assistantWord struct {
-	Text  string  `json:"text"`
-	Raw   string  `json:"-"`
-	Start float64 `json:"start"`
-	End   float64 `json:"end"`
+	Text         string  `json:"text"`
+	Raw          string  `json:"-"`
+	Continuation bool    `json:"-"`
+	Start        float64 `json:"start"`
+	End          float64 `json:"end"`
 }
 type realtimeEvent struct {
 	Type        string          `json:"type"`
@@ -40,21 +44,25 @@ type realtimeEvent struct {
 	Words       []assistantWord `json:"words"`
 }
 type assistantStream struct {
-	audio       *realtimeAudioClient
-	recordingID int64
-	generation  int
-	seen        map[string]bool
-	window      []assistantWord
-	through     float64
-	wordThrough float64
-	speechFloor float64
-	failed      bool
+	audio         *realtimeAudioClient
+	recordingID   int64
+	generation    int
+	seen          map[string]bool
+	window        []assistantWord
+	through       float64
+	wordThrough   float64
+	speechThrough float64
+	lastSpeechAt  time.Time
+	speechFloor   float64
+	failed        bool
 }
 type assistantRequest struct {
 	id            uint64
 	user          string
 	stream        *assistantStream
 	activation    time.Time
+	openedAt      time.Time
+	lastFinal     time.Time
 	questionEnded time.Time
 	boundary      float64
 	text          string
@@ -283,7 +291,10 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 		return
 	}
 	frames, _, _ := audio.progress()
-	if event.Type != "final" || event.SessionID != a.state.sessionID || event.DiscordID != user || event.RecordingID != stream.recordingID || event.Generation != stream.generation || event.Identity == "" || stream.seen[event.Identity] {
+	if (event.Type != "final" && event.Type != "speech") || event.SessionID != a.state.sessionID || event.DiscordID != user || event.RecordingID != stream.recordingID || event.Generation != stream.generation {
+		return
+	}
+	if event.Type == "final" && (event.Identity == "" || stream.seen[event.Identity]) {
 		return
 	}
 	if math.IsNaN(event.Start) || math.IsNaN(event.End) || math.IsInf(event.Start, 0) || math.IsInf(event.End, 0) || event.Start < 0 || event.End < event.Start || event.End > frames+0.1 || len(stream.seen) >= 4096 {
@@ -292,6 +303,14 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 		if a.request != nil && a.request.stream == stream {
 			a.reset()
 			a.notice(user, "Recebi tempos Realtime inválidos. Tenta novamente.")
+		}
+		return
+	}
+	if event.Type == "speech" {
+		// Partial text never enters the question; its timing keeps quiet speech
+		// and unfinished provider output from being mistaken for silence.
+		if event.End > max(stream.through, stream.speechThrough) && event.End > stream.speechFloor {
+			stream.speechThrough, stream.lastSpeechAt = event.End, now
 		}
 		return
 	}
@@ -333,12 +352,8 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 			continue
 		}
 		normalized := assistantWords(word.Text)
-		for _, text := range normalized {
-			raw := word.Text
-			if len(normalized) > 1 {
-				raw = text
-			}
-			tokens = append(tokens, assistantWord{Text: text, Raw: raw, Start: word.Start, End: word.End})
+		for part, text := range normalized {
+			tokens = append(tokens, assistantWord{Text: text, Raw: word.Text, Continuation: part > 0, Start: word.Start, End: word.End})
 		}
 	}
 	if len(tokens) == 0 {
@@ -362,6 +377,7 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 		}
 		// A repeated wake phrase is acknowledgement, never another request.
 		text := assistantQuestionTokens(tokens, phrase)
+		a.request.lastFinal = now
 		a.request.text = strings.TrimSpace(a.request.text + " " + text)
 		if len(a.request.text) > 2000 {
 			a.reset()
@@ -369,7 +385,7 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 		}
 		return
 	}
-	if len(stream.window) > 0 && tokens[0].Start > stream.window[len(stream.window)-1].End+2 {
+	if len(stream.window) > 0 && tokens[0].Start > stream.window[len(stream.window)-1].End+assistantSilence.Seconds() {
 		stream.window = nil
 	}
 	combined := append(stream.window, tokens...)
@@ -377,7 +393,7 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 	// 2001 words suffice to reject questions beyond the existing 2000-byte limit.
 	windowStart := max(0, len(combined)-2001)
 	for j := windowStart + 1; j < len(combined); j++ {
-		if combined[j].Start > combined[j-1].End+2 {
+		if combined[j].Start > combined[j-1].End+assistantSilence.Seconds() {
 			windowStart = j
 		}
 	}
@@ -389,7 +405,7 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 		}
 		contiguousSpeech := true
 		for j := i + 1; j < end; j++ {
-			if combined[j].Start > combined[j-1].End+2 {
+			if combined[j].Start > combined[j-1].End+assistantSilence.Seconds() {
 				contiguousSpeech = false
 			}
 		}
@@ -408,12 +424,12 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 		boundary := combined[end-1].End
 		// Include speech on either side, without replaying an earlier utterance.
 		prefixStart := i
-		for prefixStart > 0 && combined[prefixStart].Start <= combined[prefixStart-1].End+2 {
+		for prefixStart > 0 && combined[prefixStart].Start <= combined[prefixStart-1].End+assistantSilence.Seconds() {
 			prefixStart--
 		}
 		question := append([]assistantWord(nil), combined[prefixStart:i]...)
 		question = append(question, combined[end:]...)
-		a.request = &assistantRequest{id: a.serial, user: user, stream: stream, activation: audio.startedAt.Add(time.Duration(boundary * float64(time.Second))), boundary: boundary, text: assistantQuestionTokens(question, phrase)}
+		a.request = &assistantRequest{id: a.serial, user: user, stream: stream, activation: audio.startedAt.Add(time.Duration(boundary * float64(time.Second))), openedAt: now, lastFinal: now, boundary: boundary, text: assistantQuestionTokens(question, phrase)}
 		stream.window = nil
 		if len(a.request.text) > 2000 {
 			a.reset()
@@ -510,6 +526,10 @@ func assistantQuestionTokens(tokens []assistantWord, phrase []string) string {
 			i = end
 			continue
 		}
+		if tokens[i].Continuation {
+			i++
+			continue
+		}
 		raw := tokens[i].Raw
 		if raw == "" {
 			raw = tokens[i].Text
@@ -535,22 +555,29 @@ func (a *assistantController) tick(now time.Time) {
 		return
 	}
 	_, speech, lastSpeech := request.stream.audio.progress()
+	speech = max(speech, request.stream.speechThrough)
 	hasSpeech := speech > request.boundary+0.02 || request.text != ""
-	if !hasSpeech && now.Sub(request.activation) >= 10*time.Second {
+	if !hasSpeech && now.Sub(request.openedAt) >= 10*time.Second {
 		a.reset()
 		a.notice(request.user, "Não ouvi uma pergunta. Diz a frase para tentar novamente.")
 		return
 	}
-	if now.Sub(request.activation) >= 30*time.Second {
+	if now.Sub(request.openedAt) >= 30*time.Second {
 		a.reset()
 		a.notice(request.user, "Faz uma pergunta mais curta.")
 		return
 	}
-	if !hasSpeech || now.Sub(lastSpeech) < 2*time.Second {
+	quietSince := lastSpeech
+	for _, activity := range []time.Time{request.stream.lastSpeechAt, request.lastFinal} {
+		if activity.After(quietSince) {
+			quietSince = activity
+		}
+	}
+	if !hasSpeech || now.Sub(quietSince) < assistantSilence {
 		return
 	}
 	if request.stream.through+0.02 < speech {
-		if now.Sub(lastSpeech) >= 7*time.Second {
+		if now.Sub(quietSince) >= assistantSilence+5*time.Second {
 			a.reset()
 			a.notice(request.user, "Os finais Realtime não chegaram a tempo. Repete a pergunta.")
 		}
@@ -563,6 +590,9 @@ func (a *assistantController) tick(now time.Time) {
 	}
 	request.responding = true
 	request.questionEnded = lastSpeech
+	if recognizedEnd := request.stream.audio.startedAt.Add(time.Duration(request.stream.wordThrough * float64(time.Second))); recognizedEnd.After(request.questionEnded) {
+		request.questionEnded = recognizedEnd
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	request.cancel = cancel
 	go func() {

@@ -278,19 +278,30 @@ def test_websocket_pcm_final_flush_and_cleanup(
             assert usage["realtime_hours"] == pytest.approx(0.02 / 3600)
             assert usage["estimated_cost_usd"] == pytest.approx(0.02 / 3600 * 0.8)
             ws.send_json({"type": "end", "last_seq_no": 2})
+            activity = ws.receive_json()
+            assert activity == {
+                "type": "speech",
+                "session_id": s.id,
+                "discord_id": "123",
+                "recording_id": activity["recording_id"],
+                "generation": activity["generation"],
+                "start": 0,
+                "end": 0.01,
+            }
             final = ws.receive_json()
             assert final["type"] == "final"
             assert final["session_id"] == s.id and final["discord_id"] == "123"
             assert final["recording_id"] > 0 and final["generation"] >= 0
             assert final["identity"] and final["start"] == 0 and final["end"] == 0.01
             assert final["text"] == "Olá, mundo."
-            # Partials and duplicate finals must not reach the bot.
+            # Partials only convey timing; duplicate final text never reaches the bot.
             assert len(repository.get_session_messages(s.id)) == 1
+            assert ws.receive_json() == activity
             assert ws.receive_json()["type"] == "completed"
         assert provider.start["transcription_config"] == {
             "language": "pt",
             "model": "enhanced",
-            "enable_partials": False,
+            "enable_partials": True,
         }
         assert len(provider.received) == 2
         assert "Olá, mundo." not in caplog.text
@@ -651,14 +662,42 @@ def test_debug_only_outputs_transcript_when_explicitly_enabled(
             assert ws.receive_json()["type"] == "ready"
             ws.send_bytes(struct.pack("<Q", 1) + b"\0" * 480 * 2)
             ws.send_json({"type": "end", "last_seq_no": 1})
+            activity = ws.receive_json()
+            assert activity["type"] == "speech"
+            assert "text" not in activity and "words" not in activity
             final = ws.receive_json()
             assert final["type"] == "final"
             assert final["session_id"] == s.id and final["discord_id"] == "123"
             assert final["recording_id"] > 0 and final["generation"] >= 0
             assert final["identity"] and final["start"] == 0 and final["end"] == 0.01
             assert final["text"] == "Olá, mundo."
-            # Partials and duplicate finals must not reach the bot.
+            # Partials only convey timing; duplicate final text never reaches the bot.
             assert len(repository.get_session_messages(s.id)) == 1
             assert ws.receive_json()["type"] == "completed"
     assert "partial" in caplog.text and "Olá, mundo." in caplog.text
     assert "secret-0" not in caplog.text
+
+
+def test_final_words_preserves_formatted_entities():
+    from app.realtime import final_words
+
+    assert final_words(
+        [
+            {
+                "type": "word",
+                "start_time": 0,
+                "end_time": 1,
+                "alternatives": [{"content": "Quanto"}],
+            },
+            {
+                "type": "entity",
+                "start_time": 1,
+                "end_time": 2,
+                "alternatives": [{"content": "1.500,50 euros"}],
+            },
+            {"type": "punctuation", "alternatives": [{"content": "?"}]},
+        ]
+    ) == [
+        {"text": "Quanto", "start": 0, "end": 1},
+        {"text": "1.500,50 euros?", "start": 1, "end": 2},
+    ]

@@ -181,7 +181,7 @@ async def open_provider(settings, pool, reservation):
                         "transcription_config": {
                             "language": settings.speechmatics_realtime_language,
                             "model": settings.speechmatics_realtime_model,
-                            "enable_partials": settings.transcription_streaming_debug,
+                            "enable_partials": True,
                         },
                     }
                 )
@@ -221,7 +221,7 @@ def final_words(results: list[dict]) -> list[dict]:
         if not alternatives:
             continue
         text = alternatives[0]["content"]
-        if item.get("type") == "word":
+        if item.get("type") in {"word", "entity"}:
             words.append(
                 {"text": text, "start": item["start_time"], "end": item["end_time"]}
             )
@@ -355,6 +355,19 @@ async def bridge(
                             user,
                             kind,
                             result["transcript"],
+                        )
+                    if kind == "AddPartialTranscript" and result["transcript"].strip():
+                        # Timing only: unfinished text must never activate or reach the LLM.
+                        await websocket.send_json(
+                            {
+                                "type": "speech",
+                                "session_id": session_id,
+                                "discord_id": user,
+                                "recording_id": recording_id,
+                                "generation": generation,
+                                "start": start,
+                                "end": end,
+                            }
                         )
                     if kind == "AddTranscript":
                         identity = hashlib.sha256(

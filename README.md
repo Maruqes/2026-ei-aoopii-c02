@@ -109,7 +109,7 @@ A frase é procurada no início, meio ou fim do enunciado, ignorando maiúsculas
 acentos e pontuação. Aceita um pequeno erro de reconhecimento, até duas palavras
 intercaladas e palavras juntas/separadas: «olha macaco», «olá meu macaco» e
 «olamacaco» também ativam. A pergunta antes e depois da ativação é preservada,
-mesmo dividida entre finais; uma pausa superior a 2 segundos separa enunciados.
+mesmo dividida entre finais; uma pausa superior a 5 segundos separa enunciados.
 `/assistant phrase value:"outra frase"` altera a frase usada pelo servidor.
 
 Alterações exigem **Gerir Servidor**, são persistidas e cancelam pedidos pendentes.
@@ -118,8 +118,11 @@ o assistente não inicia pedidos. Só o autor da ativação fornece a pergunta. 
 interação de cada vez; outras ativações recebem um aviso de ocupado, sem fila.
 «Cancela» como enunciado isolado cancela a captura; sair da chamada também cancela.
 
-A pergunta termina após 2 segundos sem fala detetada no PCM, aguardando finais
-Realtime que cubram essa fala. Há 10 segundos para começar, 30 segundos de captura
+A pergunta junta os segmentos do mesmo autor e termina após 5 segundos sem fala
+nem novos finais. Os sinais parciais do Speechmatics também mantêm a captura ativa
+enquanto o reconhecimento ainda está pendente, incluindo fala baixa. Só texto final
+entra no pedido à IA; números, datas e pontuação são preservados. Há 10 segundos
+para começar e 30 segundos de captura a partir do reconhecimento da ativação,
 e 30 segundos para o LLM. Finais em falta ou falhas de streaming cancelam o pedido;
 Batch continua a servir as gravações, mas nunca ativa o assistente.
 Tempos sobrepostos nos finais não cancelam a captura; palavras já recebidas e
