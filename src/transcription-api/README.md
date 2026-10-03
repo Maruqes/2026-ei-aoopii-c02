@@ -148,7 +148,7 @@ per-key estimates as independent account costs.
 
 Spend levels are display bands, not Speechmatics billing tiers: level 1 below $1,
 level 2 from $1 to below $5, level 3 from $5 to below $10, level 4 at $10 or above.
-The command includes the rate date and [pricing source](https://www.speechmatics.com/pricing).
+The command shows only one short cost/level line per key. Rate details remain in the API response.
 
 `SPEECHMATICS_USAGE_LIMIT_HOURS` is an optional local hours budget for this period. With
 `0` (default), `/keys` displays hours without a percentage. With `50`, 10 hours means 20%
