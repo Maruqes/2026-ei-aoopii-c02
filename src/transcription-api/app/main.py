@@ -7,7 +7,6 @@ import threading
 import time
 import wave
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -83,6 +82,7 @@ from .speechmatics_usage import (
     SpeechmaticsAPIKey,
     SpeechmaticsKeyUsage,
     fetch_speechmatics_key_usages,
+    speechmatics_cost_items,
     speechmatics_key_usage_score,
 )
 from .streaming_routes import install_streaming_routes
@@ -269,6 +269,10 @@ def create_app() -> FastAPI:
             )
 
         rows = get_speechmatics_key_usages(settings, repository)
+        since = settings.speechmatics_usage_since or (
+            datetime.now(timezone.utc).date().replace(day=1).isoformat()
+        )
+        realtime = repository.local_realtime_usage(since=since)
         selected_key = None
         available_rows = [row for row in rows if row.available]
         if available_rows:
@@ -280,8 +284,14 @@ def create_app() -> FastAPI:
             provider=settings.transcription_provider,
             limit_hours=settings.speechmatics_usage_limit_hours,
             selected_key=selected_key,
-            keys=[speechmatics_key_usage_response(row) for row in rows],
-            usage_note="Batch usage for the account/project accessible by each key. Today includes only completed recordings from this bot and is provisional. Percent is a configured hours budget, not credit balance. Keys may share usage.",
+            keys=[speechmatics_key_usage_response(row, realtime) for row in rows],
+            usage_note=(
+                "Batch includes provisional provider usage through today. "
+                "Realtime is this bot's locally sent audio for units started in the same UTC period, "
+                "updated about every 5 seconds. Costs use PAYG base USD rates, excluding credits, "
+                "discounts, tax and add-ons; they are not an invoice or credit balance. "
+                "Keys may share Batch usage and must not be summed."
+            ),
         )
 
     @service.post("/v1/transcriptions", response_model=TranscriptionAcceptedResponse)
@@ -888,30 +898,38 @@ def get_speechmatics_key_usages(
         limit_hours=settings.speechmatics_usage_limit_hours,
         since=settings.speechmatics_usage_since,
     )
-    local = repository.get_local_speechmatics_hours() if repository else {}
-    combined = []
-    for row in rows:
-        if row.usage:
-            today_hours = local.get(row.key.name, 0)
-            used_hours = row.usage.used_hours + today_hours
-            usage = replace(
-                row.usage,
-                used_hours=used_hours,
-                local_today_hours=today_hours,
-                percent_used=used_hours / row.usage.limit_hours * 100
-                if row.usage.limit_hours > 0
-                else None,
-            )
-            row = replace(row, usage=usage)
-        combined.append(row)
-    return combined
+    # Today is already in the provider query; adding local WAVs would double-count.
+    return rows
 
 
 def speechmatics_key_usage_response(
     row: SpeechmaticsKeyUsage,
+    realtime_usage: list[dict] | tuple = (),
 ) -> SpeechmaticsKeyUsageResponse:
+    realtime_models = [
+        (item["model"], item["used_hours"])
+        for item in realtime_usage
+        if item["key_name"] == row.key.name
+    ]
+    cost_items = speechmatics_cost_items("realtime", realtime_models)
+    realtime_hours = sum(hours for _, hours in realtime_models)
+    if row.usage is not None:
+        models = row.usage.model_hours or (("unknown", row.usage.used_hours),)
+        cost_items = speechmatics_cost_items("batch", models) + cost_items
+    estimated_cost = (
+        sum(item["estimated_cost_usd"] for item in cost_items)
+        if row.available
+        and all(item["estimated_cost_usd"] is not None for item in cost_items)
+        else None
+    )
+    cost_fields = dict(
+        realtime_hours=realtime_hours,
+        cost_items=cost_items,
+        estimated_cost_usd=estimated_cost,
+    )
     if row.usage is None:
         return SpeechmaticsKeyUsageResponse(
+            **cost_fields,
             name=row.key.name,
             used_hours=None,
             limit_hours=0,
@@ -922,6 +940,7 @@ def speechmatics_key_usage_response(
             error=row.error or "usage unavailable",
         )
     return SpeechmaticsKeyUsageResponse(
+        **cost_fields,
         name=row.key.name,
         used_hours=row.usage.used_hours,
         limit_hours=row.usage.limit_hours,

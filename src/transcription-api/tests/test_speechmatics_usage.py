@@ -218,7 +218,7 @@ def test_no_percentage_without_an_explicit_budget():
 
 
 def test_usage_requests_explicit_utc_period_and_deduplicates_keys(monkeypatch):
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timezone
 
     import httpx
     from app.speechmatics_usage import fetch_speechmatics_key_usages
@@ -241,7 +241,7 @@ def test_usage_requests_explicit_utc_period_and_deduplicates_keys(monkeypatch):
     assert len(calls) == 1
     assert calls[0]["params"] == {
         "since": "2026-01-01",
-        "until": (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat(),
+        "until": datetime.now(timezone.utc).date().isoformat(),
     }
 
 
@@ -262,3 +262,153 @@ def test_usage_errors_never_include_provider_echoed_secret(monkeypatch):
     )[0]
     assert row.error == "HTTP 401"
     assert row.usage is None
+
+
+def test_cost_estimate_uses_each_model_and_counts_both_products():
+    import pytest
+    from app.main import speechmatics_key_usage_response
+
+    usage = parse_speechmatics_usage(
+        {
+            "summary": [{"type": "transcription", "duration_hrs": 3, "count": 2}],
+            "details": [
+                {
+                    "type": "transcription",
+                    "operating_point": "melia-1",
+                    "duration_hrs": 1,
+                },
+                {
+                    "type": "transcription",
+                    "operating_point": "enhanced",
+                    "duration_hrs": 2,
+                },
+                {
+                    "type": "alignment",
+                    "operating_point": "enhanced",
+                    "duration_hrs": 99,
+                },
+            ],
+        }
+    )
+    row = SpeechmaticsKeyUsage(SpeechmaticsAPIKey("one", "secret"), usage)
+    response = speechmatics_key_usage_response(
+        row,
+        [
+            {"key_name": "one", "model": "enhanced", "used_hours": 0.5},
+            {"key_name": "other", "model": "enhanced", "used_hours": 99},
+        ],
+    )
+    assert response.estimated_cost_usd == pytest.approx(2.14)
+    assert response.realtime_hours == 0.5
+    assert len(response.cost_items) == 3
+    assert response.used_hours == 3  # Batch budget and selection keep their meaning.
+    assert "secret" not in response.model_dump_json()
+
+
+def test_unknown_models_and_missing_details_never_become_free():
+    from app.main import speechmatics_key_usage_response
+
+    for details in [
+        None,
+        [],
+        [
+            {
+                "type": "transcription",
+                "operating_point": "future-model",
+                "duration_hrs": 1,
+            },
+        ],
+        [
+            {
+                "type": "transcription",
+                "operating_point": "melia-1",
+                "duration_hrs": 0.5,
+            },
+        ],
+        [
+            {"type": "transcription", "operating_point": "melia-1", "duration_hrs": 2},
+        ],
+    ]:
+        usage = parse_speechmatics_usage(
+            {
+                "summary": [{"type": "transcription", "duration_hrs": 1, "count": 1}],
+                "details": details,
+            }
+        )
+        response = speechmatics_key_usage_response(
+            SpeechmaticsKeyUsage(SpeechmaticsAPIKey("one", "secret"), usage)
+        )
+        assert response.estimated_cost_usd is None
+        assert any(item.estimated_cost_usd is None for item in response.cost_items)
+
+
+def test_batch_failure_keeps_local_streaming_as_partial_estimate():
+    from app.main import speechmatics_key_usage_response
+
+    response = speechmatics_key_usage_response(
+        SpeechmaticsKeyUsage(SpeechmaticsAPIKey("one", "secret"), None, "HTTP 401"),
+        [{"key_name": "one", "model": "standard", "used_hours": 1}],
+    )
+    assert response.error == "HTTP 401"
+    assert response.estimated_cost_usd is None
+    assert response.cost_items[0].estimated_cost_usd == 0.45
+
+
+def test_keys_endpoint_reports_today_without_adding_local_batch_twice(monkeypatch):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from app import main
+    from app.config import Settings
+    from fastapi.testclient import TestClient
+
+    today = datetime.now(timezone.utc).date()
+    usage = parse_speechmatics_usage(
+        {
+            "since": today.replace(day=1).isoformat(),
+            "until": today.isoformat(),
+            "summary": [{"type": "transcription", "duration_hrs": 1, "count": 1}],
+            "details": [
+                {
+                    "type": "transcription",
+                    "operating_point": "melia-1",
+                    "duration_hrs": 1,
+                }
+            ],
+        }
+    )
+    monkeypatch.setattr(
+        main,
+        "fetch_speechmatics_key_usages",
+        lambda **kwargs: [
+            SpeechmaticsKeyUsage(SpeechmaticsAPIKey("one", "secret"), usage),
+        ],
+    )
+    periods = []
+
+    def realtime(*, since):
+        periods.append(since)
+        return [{"key_name": "one", "model": "enhanced", "used_hours": 1}]
+
+    application = main.create_app()
+    application.dependency_overrides[main.get_settings] = lambda: Settings(
+        database_url="postgresql://unused/test",
+        transcription_provider="speechmatics",
+        speechmatics_api_keys=(("one", "secret"),),
+    )
+    # No local Batch method: the endpoint must not add today's WAVs again.
+    application.dependency_overrides[main.get_repository] = lambda: SimpleNamespace(
+        local_realtime_usage=realtime
+    )
+    client = TestClient(application)
+    try:
+        response = client.get("/v1/speechmatics/keys")
+    finally:
+        client.close()
+    assert response.status_code == 200
+    row = response.json()["keys"][0]
+    assert row["used_hours"] == 1
+    assert row["local_today_hours"] == 0
+    assert row["estimated_cost_usd"] == 1.04
+    assert row["realtime_hours"] == 1
+    assert periods == [today.replace(day=1).isoformat()]

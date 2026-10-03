@@ -171,20 +171,33 @@ type HealthResponse struct {
 	LastRecordingAt        *time.Time `json:"last_recording_at"`
 }
 
+type SpeechmaticsCostItem struct {
+	Mode             string   `json:"mode"`
+	Model            string   `json:"model"`
+	UsedHours        float64  `json:"used_hours"`
+	RateUSDPerHour   *float64 `json:"rate_usd_per_hour"`
+	EstimatedCostUSD *float64 `json:"estimated_cost_usd"`
+}
+
 type SpeechmaticsKeyUsageResponse struct {
-	Name            string   `json:"name"`
-	ReportedHours   *float64 `json:"reported_hours"`
-	LocalTodayHours float64  `json:"local_today_hours"`
-	UsedHours       *float64 `json:"used_hours"`
-	LimitHours      float64  `json:"limit_hours"`
-	PercentUsed     *float64 `json:"percent_used"`
-	JobCount        *int     `json:"job_count"`
-	Since           *string  `json:"since"`
-	Until           *string  `json:"until"`
-	Error           *string  `json:"error"`
+	RealtimeHours    float64                `json:"realtime_hours"`
+	CostItems        []SpeechmaticsCostItem `json:"cost_items"`
+	EstimatedCostUSD *float64               `json:"estimated_cost_usd"`
+	Name             string                 `json:"name"`
+	ReportedHours    *float64               `json:"reported_hours"`
+	LocalTodayHours  float64                `json:"local_today_hours"`
+	UsedHours        *float64               `json:"used_hours"`
+	LimitHours       float64                `json:"limit_hours"`
+	PercentUsed      *float64               `json:"percent_used"`
+	JobCount         *int                   `json:"job_count"`
+	Since            *string                `json:"since"`
+	Until            *string                `json:"until"`
+	Error            *string                `json:"error"`
 }
 
 type SpeechmaticsKeysResponse struct {
+	PricingAsOf string                         `json:"pricing_as_of"`
+	PricingURL  string                         `json:"pricing_url"`
 	Provider    string                         `json:"provider"`
 	UsageNote   string                         `json:"usage_note"`
 	LimitHours  float64                        `json:"limit_hours"`

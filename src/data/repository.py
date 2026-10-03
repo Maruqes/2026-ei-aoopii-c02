@@ -1605,13 +1605,25 @@ class DataRepository:
             conn.commit()
             return True
 
+    def checkpoint_realtime_usage(
+        self, recording_id: int, generation: int, seconds: float
+    ) -> None:
+        with closing(connect(self.database_url)) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE voice_recordings SET realtime_seconds = GREATEST(realtime_seconds, %s) "
+                    "WHERE id = %s AND generation = %s AND status = 'streaming'",
+                    (seconds, recording_id, generation),
+                )
+            conn.commit()
+
     def finish_realtime_unit(
         self, recording_id: int, generation: int, seconds: float, completed: bool
     ) -> bool:
         with closing(connect(self.database_url)) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE voice_recordings SET status = %s, realtime_seconds = %s, generation = generation + 1, completed_at = CASE WHEN %s THEN NOW() ELSE NULL END, updated_at = NOW() WHERE id = %s AND generation = %s AND status = 'streaming' RETURNING id",
+                    "UPDATE voice_recordings SET status = %s, realtime_seconds = GREATEST(realtime_seconds, %s), generation = generation + 1, completed_at = CASE WHEN %s THEN NOW() ELSE NULL END, updated_at = NOW() WHERE id = %s AND generation = %s AND status = 'streaming' RETURNING id",
                     (
                         "completed" if completed else "fallback_pending",
                         seconds,
@@ -1767,6 +1779,22 @@ class DataRepository:
                     "SELECT realtime_key_name, SUM(realtime_seconds) / 3600 FROM voice_recordings WHERE realtime_key_name IS NOT NULL GROUP BY realtime_key_name"
                 )
                 return dict(cur.fetchall())
+
+    def local_realtime_usage(self, *, since: str) -> list[dict]:
+        with closing(connect(self.database_url)) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT realtime_key_name, COALESCE(metadata->>'speechmatics_realtime_model', 'unknown'), "
+                    "SUM(realtime_seconds) / 3600 FROM voice_recordings "
+                    "WHERE realtime_key_name IS NOT NULL AND created_at >= %s::date AT TIME ZONE 'UTC' "
+                    "AND created_at < (date_trunc('day', NOW() AT TIME ZONE 'UTC') + INTERVAL '1 day') AT TIME ZONE 'UTC' "
+                    "GROUP BY realtime_key_name, metadata->>'speechmatics_realtime_model'",
+                    (since,),
+                )
+                return [
+                    dict(key_name=key, model=model, used_hours=float(hours))
+                    for key, model, hours in cur.fetchall()
+                ]
 
 def connect(database_url: str):
     parsed = urlparse(database_url)

@@ -115,10 +115,40 @@ Repeated copies of the same secret are treated as one key.
 
 `/keys` reports Batch usage for the **account/project accessible by each key**. Several
 keys can share that usage; creating a new key does not create a new allowance. The period
-is the current UTC calendar month, or `SPEECHMATICS_USAGE_SINCE` through the last completed
-UTC day. The provider excludes the current day; the bot adds its own successfully
-transcribed WAV durations with a known provider completion timestamp as a **provisional**
-today estimate. That estimate cannot include other apps, pending jobs or unknown timestamps.
+is the current UTC calendar month, or `SPEECHMATICS_USAGE_SINCE` through today.
+The request sends an explicit `until=today`: EU1 returned today's jobs in the
+2026-10-03 investigation despite the documentation excluding today. Today's report is
+**provisional**, may lag and is not guaranteed in every region. Local Batch WAVs are
+not added to that total, to avoid counting the same job twice.
+
+`/keys` also shows this bot's locally sent Realtime audio for units started in the
+same UTC period, including active units. The first audio packet is checkpointed,
+then every ~5 seconds while sending audio and again on close. No audio means no
+consumption. A crash can lose the interval since the last checkpoint. Model and
+key are recorded per unit; historical units without a recorded model are shown
+as **unknown**, with no invented cost. Changing the configured model does not
+reprice older units as that model.
+
+Cost estimates use each model's hours and the public PAYG base rates checked on
+2026-10-03, in USD per hour:
+
+| Model | Batch | Realtime |
+| --- | ---: | ---: |
+| Melia 1 | $0.24 | — |
+| Enhanced | $0.75 | $0.80 |
+| Standard | $0.45 | $0.45 |
+| Oak 1 | $0.30 | — |
+
+These are gross transcription estimates, excluding model-training/pack/subscription
+discounts, grants, taxes and add-ons. They are not an invoice, amount due or credit
+balance. Unsupported models or unavailable Batch usage make the estimate **partial**;
+known priced rows remain visible. Streaming followed by Batch fallback can consume
+both products, so both are included. Keys may share Batch usage: do not sum the
+per-key estimates as independent account costs.
+
+Spend levels are display bands, not Speechmatics billing tiers: level 1 below $1,
+level 2 from $1 to below $5, level 3 from $5 to below $10, level 4 at $10 or above.
+The command includes the rate date and [pricing source](https://www.speechmatics.com/pricing).
 
 `SPEECHMATICS_USAGE_LIMIT_HOURS` is an optional local hours budget for this period. With
 `0` (default), `/keys` displays hours without a percentage. With `50`, 10 hours means 20%
@@ -410,8 +440,9 @@ minutos; uma falha simultânea prolongada do bot e da confirmação após envio 
 reconciliação manual desse aviso. `/streaming mode:on` ou uma nova chamada reavalia as
 keys sem recuperar áudio descartado.
 
-`GET /v1/speechmatics/realtime-usage` reporta horas locais de PCM enviadas por key,
-separadas do reporte Batch existente. Reserva em silêncio não conta como áudio; um WAV
+`GET /v1/speechmatics/realtime-usage` reporta todo o histórico de horas locais de PCM
+enviadas por key. `/keys` filtra essas unidades pelo período UTC e apresenta modelo
+e custo estimado, separados do reporte Batch. Reserva em silêncio não conta como áudio; um WAV
 recuperado por Batch pode consumir ambos os produtos. Logs normais não contêm texto
 transcrito nem credenciais. Os códigos seguem a
 [referência Realtime da Speechmatics](https://docs.speechmatics.com/api-ref/realtime-transcription-websocket).

@@ -222,6 +222,7 @@ async def bridge(
     recording_id = None
     generation = 0
     frames = packets = 0
+    sent_frames = 0
     completed = False
     session_id = None
     tasks = []
@@ -256,7 +257,10 @@ async def bridge(
             repository.start_realtime_unit,
             session_id,
             filename,
-            meta,
+            {
+                **meta,
+                "speechmatics_realtime_model": settings.speechmatics_realtime_model.strip().lower(),
+            },
             reservation.token,
             reservation.key.name,
         )
@@ -264,7 +268,8 @@ async def bridge(
         eos = asyncio.Event()
 
         async def send_audio():
-            nonlocal frames, packets
+            nonlocal frames, packets, sent_frames
+            last_checkpoint = 0.0
             while True:
                 packet = await websocket.receive()
                 if packet["type"] == "websocket.disconnect":
@@ -298,6 +303,15 @@ async def bridge(
                 packets += 1
                 frames += (len(data) - 8) // 2
                 await upstream.send(data[8:])
+                sent_frames += (len(data) - 8) // 2
+                if time.monotonic() - last_checkpoint >= 5:
+                    await asyncio.to_thread(
+                        repository.checkpoint_realtime_usage,
+                        recording_id,
+                        generation,
+                        sent_frames / 48000,
+                    )
+                    last_checkpoint = time.monotonic()
 
         async def receive_results():
             while True:
@@ -386,7 +400,7 @@ async def bridge(
             repository.finish_realtime_unit,
             recording_id,
             generation,
-            frames / 48000,
+            sent_frames / 48000,
             True,
         )
         if not completed:
@@ -420,7 +434,7 @@ async def bridge(
                 repository.finish_realtime_unit,
                 recording_id,
                 generation,
-                frames / 48000,
+                sent_frames / 48000,
                 False,
             )
         if upstream is not None:

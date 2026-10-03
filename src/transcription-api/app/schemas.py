@@ -147,9 +147,20 @@ class HealthResponse(BaseModel):
     last_recording_at: datetime | None
 
 
+class SpeechmaticsCostItem(BaseModel):
+    mode: str
+    model: str
+    used_hours: float
+    rate_usd_per_hour: float | None
+    estimated_cost_usd: float | None
+
+
 class SpeechmaticsKeyUsageResponse(BaseModel):
     reported_hours: float | None = None
     local_today_hours: float = 0
+    realtime_hours: float = 0
+    cost_items: list[SpeechmaticsCostItem] = Field(default_factory=list)
+    estimated_cost_usd: float | None = None
     name: str
     used_hours: float | None
     limit_hours: float
@@ -162,6 +173,8 @@ class SpeechmaticsKeyUsageResponse(BaseModel):
 
 class SpeechmaticsKeysResponse(BaseModel):
     usage_note: str = ""
+    pricing_as_of: str = "2026-10-03"
+    pricing_url: str = "https://www.speechmatics.com/pricing"
     provider: str
     limit_hours: float
     selected_key: str | None

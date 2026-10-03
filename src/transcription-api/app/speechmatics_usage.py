@@ -3,10 +3,21 @@ from __future__ import annotations
 import math
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
+
+# PAYG base USD/hour, checked 2026-10-03: https://www.speechmatics.com/pricing
+# Gross transcription value: excludes grants, training/pack discounts and add-ons.
+SPEECHMATICS_HOURLY_RATES = {
+    ("batch", "melia-1"): 0.24,
+    ("batch", "enhanced"): 0.75,
+    ("batch", "standard"): 0.45,
+    ("batch", "oak-1"): 0.30,
+    ("realtime", "enhanced"): 0.80,
+    ("realtime", "standard"): 0.45,
+}
 
 
 @dataclass(frozen=True)
@@ -25,6 +36,7 @@ class SpeechmaticsUsage:
     until: str
     reported_hours: float = 0.0
     local_today_hours: float = 0.0
+    model_hours: tuple[tuple[str, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -48,8 +60,8 @@ def fetch_speechmatics_usage(
 ) -> SpeechmaticsUsage:
     today = datetime.now(timezone.utc).date()
     start = since or today.replace(day=1).isoformat()
-    # The provider reports completed UTC days, not live usage.
-    end = (today - timedelta(days=1)).isoformat()
+    # EU1 returns provisional usage for today when until is explicit (2026-10-03).
+    end = today.isoformat()
     if datetime.fromisoformat(start).date() > today:
         raise ValueError("SPEECHMATICS_USAGE_SINCE cannot be in the future")
     if start[:10] > end:
@@ -154,6 +166,30 @@ def parse_speechmatics_usage(
     )
     job_count = sum(int(_float(row.get("count"))) for row in rows)
 
+    details = payload.get("details")
+    model_rows = details if isinstance(details, list) and details else rows
+    model_hours: dict[str, float] = {}
+    for row in model_rows:
+        if (
+            not isinstance(row, dict)
+            or str(row.get("type", "")).strip().lower() != "transcription"
+            or str(row.get("mode", "batch")).strip().lower() != "batch"
+        ):
+            continue
+        model = str(row.get("operating_point") or "unknown").strip().lower()
+        model_hours[model] = model_hours.get(model, 0) + _float(row.get("duration_hrs"))
+    detailed_hours = sum(model_hours.values())
+    if detailed_hours > used_hours and not math.isclose(
+        detailed_hours, used_hours, abs_tol=1e-6
+    ):
+        model_hours = {"unknown": used_hours}
+    elif used_hours > detailed_hours and not math.isclose(
+        detailed_hours, used_hours, abs_tol=1e-6
+    ):
+        model_hours["unknown"] = (
+            model_hours.get("unknown", 0) + used_hours - detailed_hours
+        )
+
     return SpeechmaticsUsage(
         used_hours=used_hours,
         limit_hours=normalized_limit_hours,
@@ -162,7 +198,27 @@ def parse_speechmatics_usage(
         since=str(payload.get("since", "") or ""),
         until=str(payload.get("until", "") or ""),
         reported_hours=used_hours,
+        model_hours=tuple(sorted(model_hours.items())),
     )
+
+
+def speechmatics_cost_items(mode: str, model_hours) -> list[dict[str, Any]]:
+    items = []
+    for model, hours in model_hours:
+        hours = _float(hours)
+        if hours == 0:
+            continue
+        rate = SPEECHMATICS_HOURLY_RATES.get((mode, model))
+        items.append(
+            {
+                "mode": mode,
+                "model": model,
+                "used_hours": hours,
+                "rate_usd_per_hour": rate,
+                "estimated_cost_usd": hours * rate if rate is not None else None,
+            }
+        )
+    return items
 
 
 def format_speechmatics_usage(usage: SpeechmaticsUsage) -> str:

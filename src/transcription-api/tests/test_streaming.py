@@ -210,7 +210,30 @@ def client_for(r, directory, url):
     return TestClient(app), settings
 
 
-def test_websocket_pcm_final_flush_and_cleanup(repository, tmp_path, caplog):
+def test_websocket_pcm_final_flush_and_cleanup(
+    repository, tmp_path, caplog, monkeypatch
+):
+    import time
+
+    from app import main, realtime
+    from app.speechmatics_usage import SpeechmaticsKeyUsage, parse_speechmatics_usage
+
+    monkeypatch.setattr(
+        main,
+        "fetch_speechmatics_key_usages",
+        lambda **kwargs: [
+            SpeechmaticsKeyUsage(
+                keys()[0], parse_speechmatics_usage({"summary": None})
+            ),
+        ],
+    )
+    # Advance only the bridge/pool clock; don't alter the WebSocket event-loop clock.
+    offset = [0.0]
+    monkeypatch.setattr(
+        realtime,
+        "time",
+        SimpleNamespace(monotonic=lambda: time.monotonic() + offset[0]),
+    )
     caplog.set_level("INFO", logger="uvicorn.error")
     r = repository
     s = session(r)
@@ -219,7 +242,7 @@ def test_websocket_pcm_final_flush_and_cleanup(repository, tmp_path, caplog):
         wav.setnchannels(2)
         wav.setsampwidth(2)
         wav.setframerate(48000)
-        wav.writeframes(b"\0" * 480 * 4)
+        wav.writeframes(b"\0" * 960 * 4)
     with ProviderSimulator() as provider:
         client, settings = client_for(r, tmp_path, provider.url)
         assert (
@@ -235,20 +258,43 @@ def test_websocket_pcm_final_flush_and_cleanup(repository, tmp_path, caplog):
             ws.send_json(m)
             assert ws.receive_json()["type"] == "ready"
             ws.send_bytes(struct.pack("<Q", 1) + b"\0" * 480 * 2)
-            ws.send_json({"type": "end", "last_seq_no": 1})
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                usage = client.get("/v1/speechmatics/keys").json()["keys"][0]
+                if usage["realtime_hours"] > 0:
+                    break
+                time.sleep(0.01)
+            assert usage["realtime_hours"] == pytest.approx(0.01 / 3600)
+            assert usage["estimated_cost_usd"] == pytest.approx(0.01 / 3600 * 0.8)
+            assert r.get_session_recording_counts(s.id) == {"streaming": 1}
+            offset[0] = 5.1
+            ws.send_bytes(struct.pack("<Q", 2) + b"\0" * 480 * 2)
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                usage = client.get("/v1/speechmatics/keys").json()["keys"][0]
+                if usage["realtime_hours"] >= 0.02 / 3600:
+                    break
+                time.sleep(0.01)
+            assert usage["realtime_hours"] == pytest.approx(0.02 / 3600)
+            assert usage["estimated_cost_usd"] == pytest.approx(0.02 / 3600 * 0.8)
+            ws.send_json({"type": "end", "last_seq_no": 2})
             assert ws.receive_json()["type"] == "completed"
         assert provider.start["transcription_config"] == {
             "language": "pt",
             "model": "enhanced",
             "enable_partials": False,
         }
-        assert len(provider.received) == 1
+        assert len(provider.received) == 2
         assert "Olá, mundo." not in caplog.text
         assert "secret-0" not in caplog.text
         assert [item["content"] for item in r.get_session_messages(s.id)] == [
             "Olá, mundo."
         ]
         assert r.get_session_recording_counts(s.id) == {"completed": 1}
+        # Completing a previously checkpointed unit must not count its audio twice.
+        assert client.get("/v1/speechmatics/keys").json()["keys"][0][
+            "realtime_hours"
+        ] == pytest.approx(0.02 / 3600)
         assert not (tmp_path / m["recording_filename"]).exists()
         assert (
             client.post("/v1/guilds/g/streaming", json={"mode": "off"}).json()[
@@ -257,6 +303,35 @@ def test_websocket_pcm_final_flush_and_cleanup(repository, tmp_path, caplog):
             is False
         )
         assert r.streaming_preference("g", True) is False
+
+
+def test_realtime_usage_checkpoints_are_monotonic_and_period_scoped(repository):
+    from data.repository import connect
+
+    r = repository
+    s = session(r)
+    m = meta(s)
+    m["speechmatics_realtime_model"] = "standard"
+    unit, generation = r.start_realtime_unit(
+        s.id, m["recording_filename"], m, "t", "key-0"
+    )
+    r.checkpoint_realtime_usage(unit, generation, 120)
+    r.checkpoint_realtime_usage(unit, generation, 60)
+    r.checkpoint_realtime_usage(unit, generation + 1, 999)
+    today = datetime.now(timezone.utc).date().isoformat()
+    usage = r.local_realtime_usage(since=today)
+    assert usage == [
+        {"key_name": "key-0", "model": "standard", "used_hours": 120 / 3600}
+    ]
+    r.finish_realtime_unit(unit, generation, 100, False)
+    r.checkpoint_realtime_usage(unit, generation, 999)
+    assert r.local_realtime_usage(since=today) == usage
+    with connect(r.database_url) as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE voice_recordings SET created_at = NOW() - INTERVAL '2 days' WHERE id = %s",
+            (unit,),
+        )
+    assert r.local_realtime_usage(since=today) == []
 
 
 @pytest.mark.parametrize(

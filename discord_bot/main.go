@@ -667,7 +667,7 @@ func keysHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}
 
 	lines := []string{
-		textForLanguage(lang, "**Consumo Speechmatics (Batch)**", "**Speechmatics usage (Batch)**"),
+		textForLanguage(lang, "**Consumo e custo estimado Speechmatics**", "**Speechmatics usage and estimated cost**"),
 	}
 	if keys.SelectedKey != nil && strings.TrimSpace(*keys.SelectedKey) != "" {
 		lines = append(lines, fmt.Sprintf(textForLanguage(lang, "**Chave sugerida pelo consumo:** %s", "**Suggested key by usage:** %s"), *keys.SelectedKey))
@@ -676,14 +676,17 @@ func keysHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		lines = append(lines, formatSpeechmaticsKeyLine(key, lang))
 	}
 	lines = append(lines, textForLanguage(lang,
-		"_Uso da conta/projeto acessível pela chave. Hoje: estimativa das gravações concluídas deste bot. A % compara com o orçamento de horas configurado; não indica saldo de créditos. Chaves da mesma conta podem partilhar consumo._",
-		"_Usage for the account/project accessible by each key. Today: estimate from this bot's completed recordings. Percent compares with a configured hours budget, not credit balance. Keys may share usage._"))
+		"_Batch: reporte do fornecedor, hoje provisório. Streaming: áudio enviado por este bot, unidades iniciadas no período UTC, atualizado a cada ~5 s. Custo às tarifas base PAYG, sem descontos, créditos gratuitos, impostos ou extras; não é fatura nem saldo. A % refere-se ao orçamento Batch de horas. Chaves da mesma conta podem partilhar Batch: não somes os valores._",
+		"_Batch: provider report, today provisional. Streaming: audio sent by this bot, units started in the UTC period, updated every ~5 s. Cost at PAYG base rates, excluding discounts, free credits, taxes and add-ons; not an invoice or balance. Percent refers to the Batch hours budget. Keys may share Batch usage: do not sum their values._"))
+	if keys.PricingURL != "" {
+		lines = append(lines, fmt.Sprintf(textForLanguage(lang, "[Tarifas de referência](%s) · %s", "[Reference rates](%s) · %s"), keys.PricingURL, keys.PricingAsOf))
+	}
 	respondLongText(s, i, strings.Join(lines, "\n"))
 }
 
 func formatSpeechmaticsKeyLine(key SpeechmaticsKeyUsageResponse, lang botLanguage) string {
 	if key.Error != nil && strings.TrimSpace(*key.Error) != "" {
-		return fmt.Sprintf(textForLanguage(lang, "**%s:** erro: %s", "**%s:** error: %s"), key.Name, *key.Error)
+		return fmt.Sprintf(textForLanguage(lang, "**%s:** Batch indisponível: %s", "**%s:** Batch unavailable: %s"), key.Name, *key.Error) + formatSpeechmaticsCostLines(key, lang)
 	}
 
 	used := "?"
@@ -715,7 +718,73 @@ func formatSpeechmaticsKeyLine(key SpeechmaticsKeyUsageResponse, lang botLanguag
 	if key.LocalTodayHours > 0 {
 		line += textForLanguage(lang, " · inclui hoje (estimativa): ", " · includes today (estimate): ") + formatAPIHoursMinutes(key.LocalTodayHours)
 	}
-	return line
+	return line + formatSpeechmaticsCostLines(key, lang)
+}
+
+func formatSpeechmaticsCostLines(key SpeechmaticsKeyUsageResponse, lang botLanguage) string {
+	lines := []string{}
+	knownCost := 0.0
+	hasKnownCost := false
+	for _, item := range key.CostItems {
+		mode := "Batch"
+		if item.Mode == "realtime" {
+			mode = textForLanguage(lang, "Streaming (local)", "Streaming (local)")
+		}
+		model := item.Model
+		if model == "unknown" {
+			model = textForLanguage(lang, "modelo desconhecido", "unknown model")
+		}
+		line := fmt.Sprintf("  • %s / %s: %s", mode, model, formatSpeechmaticsDuration(item.UsedHours))
+		if item.EstimatedCostUSD != nil && item.RateUSDPerHour != nil {
+			hasKnownCost = true
+			knownCost += *item.EstimatedCostUSD
+			line += fmt.Sprintf(" × $%.2f/h ≈ %s USD", *item.RateUSDPerHour, formatSpeechmaticsUSD(*item.EstimatedCostUSD))
+		} else {
+			line += textForLanguage(lang, " · custo indisponível", " · cost unavailable")
+		}
+		lines = append(lines, line)
+	}
+	if key.EstimatedCostUSD != nil {
+		cost := *key.EstimatedCostUSD
+		lines = append(lines, fmt.Sprintf(textForLanguage(lang, "  **Custo estimado: ≈ %s USD · %s**", "  **Estimated cost: ≈ %s USD · %s**"), formatSpeechmaticsUSD(cost), speechmaticsCostLevel(cost, lang)))
+	} else if hasKnownCost {
+		lines = append(lines, fmt.Sprintf(textForLanguage(lang, "  **Estimativa parcial: ≈ %s USD; total indisponível.**", "  **Partial estimate: ≈ %s USD; total unavailable.**"), formatSpeechmaticsUSD(knownCost)))
+	} else {
+		lines = append(lines, textForLanguage(lang, "  **Custo estimado indisponível.**", "  **Estimated cost unavailable.**"))
+	}
+	if key.RealtimeHours == 0 {
+		lines = append(lines, textForLanguage(lang, "  Streaming (local): 0h 00m 00s", "  Streaming (local): 0h 00m 00s"))
+	}
+	return "\n" + strings.Join(lines, "\n")
+}
+
+func speechmaticsCostLevel(cost float64, lang botLanguage) string {
+	// Display bands only; these are not provider billing tiers or credit limits.
+	level, band := 4, "≥ $10"
+	switch {
+	case cost < 1:
+		level, band = 1, "< $1"
+	case cost < 5:
+		level, band = 2, "$1–5"
+	case cost < 10:
+		level, band = 3, "$5–10"
+	}
+	return fmt.Sprintf(textForLanguage(lang, "nível %d (%s)", "level %d (%s)"), level, band)
+}
+
+func formatSpeechmaticsUSD(cost float64) string {
+	if cost > 0 && cost < 0.0001 {
+		return "< $0.0001"
+	}
+	if cost > 0 && cost < 1 {
+		return fmt.Sprintf("$%.4f", cost)
+	}
+	return fmt.Sprintf("$%.2f", cost)
+}
+
+func formatSpeechmaticsDuration(hours float64) string {
+	seconds := int(math.Round(math.Max(0, hours) * 3600))
+	return fmt.Sprintf("%dh %02dm %02ds", seconds/3600, seconds/60%60, seconds%60)
 }
 
 func formatAPIHoursMinutes(hours float64) string {
