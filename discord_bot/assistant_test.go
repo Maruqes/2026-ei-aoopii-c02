@@ -561,7 +561,7 @@ func TestAssistantKeepsQuestionAcrossFinalsWithinSameUtterance(t *testing.T) {
 			h.a.mu.Lock()
 			defer h.a.mu.Unlock()
 			want := "Explica Go?"
-			if pause > assistantSilence.Seconds() {
+			if pause > h.a.silence.Seconds() {
 				want = ""
 			}
 			if h.a.request.text != want {
@@ -667,9 +667,9 @@ func TestAssistantSendsWholeSlowQuestionAcrossDelayedFinals(t *testing.T) {
 		{Text: "em", Start: 10.5, End: 10.6},
 		{Text: "3 de outubro.", Start: 10.6, End: 11},
 	}}, h.now.Add(15*time.Second))
-	h.a.tick(h.now.Add(18 * time.Second))
+	h.a.tick(h.now.Add(15999 * time.Millisecond))
 	assertCapturing()
-	h.a.tick(h.now.Add(20 * time.Second))
+	h.a.tick(h.now.Add(16 * time.Second))
 	h.wait(t, h.waiting)
 	select {
 	case text := <-received:
@@ -735,5 +735,84 @@ func TestAssistantPartialTimingCannotActivateOrSupplyQuestion(t *testing.T) {
 	h.a.tick(h.now.Add(14 * time.Second))
 	if !h.waiting() {
 		t.Fatal("missing final did not time out")
+	}
+}
+
+func TestAssistantSilenceUsesOnlyAuthorAudioAndDoesNotRestartForLateFinal(t *testing.T) {
+	h := newAssistantHarness(t)
+	h.final("ana", "wake", "Hey Bot", 0, 1)
+	h.final("ana", "first", "Explica Go", 1, 2)
+	assertCapturing := func() {
+		t.Helper()
+		h.a.mu.Lock()
+		defer h.a.mu.Unlock()
+		if h.a.request == nil || h.a.request.responding {
+			t.Fatal("responded before author silence and all finals")
+		}
+	}
+	h.a.tick(h.now.Add(6900 * time.Millisecond))
+	assertCapturing()
+	// Resumed audio resets the silence interval even before transcription arrives.
+	audio := h.audio["ana"]
+	audio.audioMu.Lock()
+	audio.frames, audio.speechFrame = 8*sampleRate, 6800*sampleRate/1000
+	audio.lastSpeech = h.now.Add(6800 * time.Millisecond)
+	audio.audioMu.Unlock()
+	h.final("bob", "other", "Continua a falar", 0, 12)
+	h.a.tick(h.now.Add(11799 * time.Millisecond))
+	assertCapturing()
+	// Silence has elapsed, but the final for the author's resumed speech is pending.
+	h.a.tick(h.now.Add(11800 * time.Millisecond))
+	assertCapturing()
+	h.a.event("ana", audio, realtimeEvent{Type: "final", SessionID: 1, DiscordID: "ana", RecordingID: 10, Generation: 2, Identity: "last", Start: 6, End: 6.8, Text: "com um exemplo."}, h.now.Add(12*time.Second))
+	h.a.tick(h.now.Add(12 * time.Second))
+	h.a.mu.Lock()
+	responding := h.a.request != nil && h.a.request.responding
+	h.a.mu.Unlock()
+	if !responding {
+		t.Fatal("late final or another participant restarted the author's silence interval")
+	}
+	h.answers <- "Resposta."
+	h.wait(t, h.waiting)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.questions) != 1 || h.questions[0] != "Explica Go com um exemplo." {
+		t.Fatalf("incomplete question: %v", h.questions)
+	}
+}
+
+func TestAssistantConfigurableSilence(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  time.Duration
+	}{
+		{"", 5 * time.Second},
+		{"1.25", 1250 * time.Millisecond},
+		{"8", 8 * time.Second},
+		{"NaN", 5 * time.Second},
+		{"Inf", 5 * time.Second},
+		{"0", 5 * time.Second},
+		{"21", 5 * time.Second},
+		{"invalid", 5 * time.Second},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			t.Setenv("ASSISTANT_SILENCE_SECONDS", tc.value)
+			h := newAssistantHarness(t)
+			if h.a.silence != tc.want {
+				t.Fatalf("silence=%s want=%s", h.a.silence, tc.want)
+			}
+			h.final("ana", "question", "Hey Bot Explica Go?", 0, 2)
+			deadline := h.now.Add(2*time.Second + tc.want)
+			h.a.tick(deadline.Add(-time.Millisecond))
+			h.a.mu.Lock()
+			capturing := h.a.request != nil && !h.a.request.responding
+			h.a.mu.Unlock()
+			if !capturing {
+				t.Fatal("closed before configured silence elapsed")
+			}
+			h.a.tick(deadline)
+			h.answers <- "Resposta."
+			h.wait(t, h.waiting)
+		})
 	}
 }

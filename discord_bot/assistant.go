@@ -6,7 +6,9 @@ import (
 	"log"
 	"math"
 	"net/url"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,7 +24,7 @@ type assistantSettings struct {
 	Revision  int64   `json:"revision"`
 }
 
-const assistantSilence = 5 * time.Second
+const assistantDefaultSilence = 5 * time.Second
 
 type assistantWord struct {
 	Text         string  `json:"text"`
@@ -62,7 +64,6 @@ type assistantRequest struct {
 	stream        *assistantStream
 	activation    time.Time
 	openedAt      time.Time
-	lastFinal     time.Time
 	questionEnded time.Time
 	boundary      float64
 	text          string
@@ -75,6 +76,7 @@ type assistantController struct {
 	state             *voiceConnectionState
 	session           *discordgo.Session
 	settings          assistantSettings
+	silence           time.Duration
 	configured        bool
 	stopped           bool
 	streams           map[string]*assistantStream
@@ -91,7 +93,11 @@ type assistantController struct {
 }
 
 func newAssistantController(s *discordgo.Session, state *voiceConnectionState) *assistantController {
-	a := &assistantController{state: state, session: s, streams: map[string]*assistantStream{}, busyAt: map[string]time.Time{}}
+	seconds, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv("ASSISTANT_SILENCE_SECONDS")), 64)
+	if err != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds < 0.5 || seconds > 20 {
+		seconds = assistantDefaultSilence.Seconds()
+	}
+	a := &assistantController{state: state, session: s, silence: time.Duration(seconds * float64(time.Second)), streams: map[string]*assistantStream{}, busyAt: map[string]time.Time{}}
 	a.send = func(channel, text string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -310,7 +316,8 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 		// Partial text never enters the question; its timing keeps quiet speech
 		// and unfinished provider output from being mistaken for silence.
 		if event.End > max(stream.through, stream.speechThrough) && event.End > stream.speechFloor {
-			stream.speechThrough, stream.lastSpeechAt = event.End, now
+			stream.speechThrough = event.End
+			stream.lastSpeechAt = audio.startedAt.Add(time.Duration(event.End * float64(time.Second)))
 		}
 		return
 	}
@@ -377,7 +384,6 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 		}
 		// A repeated wake phrase is acknowledgement, never another request.
 		text := assistantQuestionTokens(tokens, phrase)
-		a.request.lastFinal = now
 		a.request.text = strings.TrimSpace(a.request.text + " " + text)
 		if len(a.request.text) > 2000 {
 			a.reset()
@@ -385,7 +391,7 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 		}
 		return
 	}
-	if len(stream.window) > 0 && tokens[0].Start > stream.window[len(stream.window)-1].End+assistantSilence.Seconds() {
+	if len(stream.window) > 0 && tokens[0].Start > stream.window[len(stream.window)-1].End+a.silence.Seconds() {
 		stream.window = nil
 	}
 	combined := append(stream.window, tokens...)
@@ -393,7 +399,7 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 	// 2001 words suffice to reject questions beyond the existing 2000-byte limit.
 	windowStart := max(0, len(combined)-2001)
 	for j := windowStart + 1; j < len(combined); j++ {
-		if combined[j].Start > combined[j-1].End+assistantSilence.Seconds() {
+		if combined[j].Start > combined[j-1].End+a.silence.Seconds() {
 			windowStart = j
 		}
 	}
@@ -405,7 +411,7 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 		}
 		contiguousSpeech := true
 		for j := i + 1; j < end; j++ {
-			if combined[j].Start > combined[j-1].End+assistantSilence.Seconds() {
+			if combined[j].Start > combined[j-1].End+a.silence.Seconds() {
 				contiguousSpeech = false
 			}
 		}
@@ -424,12 +430,12 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 		boundary := combined[end-1].End
 		// Include speech on either side, without replaying an earlier utterance.
 		prefixStart := i
-		for prefixStart > 0 && combined[prefixStart].Start <= combined[prefixStart-1].End+assistantSilence.Seconds() {
+		for prefixStart > 0 && combined[prefixStart].Start <= combined[prefixStart-1].End+a.silence.Seconds() {
 			prefixStart--
 		}
 		question := append([]assistantWord(nil), combined[prefixStart:i]...)
 		question = append(question, combined[end:]...)
-		a.request = &assistantRequest{id: a.serial, user: user, stream: stream, activation: audio.startedAt.Add(time.Duration(boundary * float64(time.Second))), openedAt: now, lastFinal: now, boundary: boundary, text: assistantQuestionTokens(question, phrase)}
+		a.request = &assistantRequest{id: a.serial, user: user, stream: stream, activation: audio.startedAt.Add(time.Duration(boundary * float64(time.Second))), openedAt: now, boundary: boundary, text: assistantQuestionTokens(question, phrase)}
 		stream.window = nil
 		if len(a.request.text) > 2000 {
 			a.reset()
@@ -568,16 +574,19 @@ func (a *assistantController) tick(now time.Time) {
 		return
 	}
 	quietSince := lastSpeech
-	for _, activity := range []time.Time{request.stream.lastSpeechAt, request.lastFinal} {
+	recognizedEnd := request.stream.audio.startedAt.Add(time.Duration(request.stream.wordThrough * float64(time.Second)))
+	// These are audio times, not transcript arrival times. Late results do not
+	// restart the author's silence interval; recognized words cover quiet speech.
+	for _, activity := range []time.Time{request.stream.lastSpeechAt, recognizedEnd} {
 		if activity.After(quietSince) {
 			quietSince = activity
 		}
 	}
-	if !hasSpeech || now.Sub(quietSince) < assistantSilence {
+	if !hasSpeech || now.Sub(quietSince) < a.silence {
 		return
 	}
 	if request.stream.through+0.02 < speech {
-		if now.Sub(quietSince) >= assistantSilence+5*time.Second {
+		if now.Sub(quietSince) >= a.silence+5*time.Second {
 			a.reset()
 			a.notice(request.user, "Os finais Realtime não chegaram a tempo. Repete a pergunta.")
 		}
@@ -590,7 +599,7 @@ func (a *assistantController) tick(now time.Time) {
 	}
 	request.responding = true
 	request.questionEnded = lastSpeech
-	if recognizedEnd := request.stream.audio.startedAt.Add(time.Duration(request.stream.wordThrough * float64(time.Second))); recognizedEnd.After(request.questionEnded) {
+	if recognizedEnd.After(request.questionEnded) {
 		request.questionEnded = recognizedEnd
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
