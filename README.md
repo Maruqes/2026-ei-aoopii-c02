@@ -118,7 +118,9 @@ Batch continua a servir as gravações, mas nunca ativa o assistente.
 Os limites encerram apenas o pedido: a escuta volta a ficar disponível na chamada.
 
 O limite de reservas Realtime existente mantém-se. `/assistant status` e avisos de
-cobertura identificam quem está em Batch ou tem um stream falhado. Não se garante
+cobertura identificam quem está sem reserva Realtime. Os avisos aguardam a primeira
+sincronização e 15 segundos de estado estável, com no máximo um aviso por minuto.
+Não se garante
 cobertura para todos sem confirmar a capacidade da conta. Silêncio enviado para
 fechar enunciados também consome minutos Realtime; consulta `/keys` e os logs
 `assistant activation`/`assistant response` para medir consumo e latência.

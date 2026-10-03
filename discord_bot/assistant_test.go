@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -301,5 +303,134 @@ func TestAssistantEmptyDestinationAndReplacementStream(t *testing.T) {
 	defer h.a.mu.Unlock()
 	if h.a.stopped || len(h.a.streams) != 0 {
 		t.Fatal("moving must return to waiting for fresh streams")
+	}
+}
+
+func TestAssistantCoverageDoesNotAnnounceStartupOrRetiredFailure(t *testing.T) {
+	for _, mode := range []string{"startup", "retired-failure"} {
+		t.Run(mode, func(t *testing.T) {
+			h := newAssistantHarness(t)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if strings.HasSuffix(r.URL.Path, "/streaming") {
+					_, _ = w.Write([]byte(`{"enabled":true,"assignments":{"ana":{"token":"ana"},"bob":{"token":"bob"}}}`))
+				} else {
+					_, _ = w.Write([]byte(`{"enabled":true,"phrase":"Hey Bot","revision":0}`))
+				}
+			}))
+			defer server.Close()
+			h.a.state.transcriptionClient = testAPIClient(server)
+			messages := make(chan string, 10)
+			h.a.send = func(channel, text string) error { messages <- text; return nil }
+			if mode == "startup" {
+				h.a.state.streaming.mu.Lock()
+				h.a.state.streaming.grants = nil
+				h.a.state.streaming.mu.Unlock()
+			} else {
+				if _, err := h.a.state.streaming.sync(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				h.a.fail("ana", h.audio["ana"])
+				h.a.fail("bob", h.audio["bob"])
+			}
+			h.a.refresh("guild")
+			h.a.updateCoverage(h.now.Add(20 * time.Second))
+			select {
+			case message := <-messages:
+				t.Fatalf("false coverage alarm: %s", message)
+			case <-time.After(50 * time.Millisecond):
+			}
+		})
+	}
+}
+
+func TestAssistantCoverageWaitsForStableLossAndLimitsNotices(t *testing.T) {
+	h := newAssistantHarness(t)
+	c := h.a.state.streaming
+	c.mu.Lock()
+	c.synced = true
+	c.mu.Unlock()
+	messages := make(chan string, 10)
+	h.a.send = func(channel, text string) error { messages <- text; return nil }
+	setCovered := func(ana, bob bool) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.grants = map[string]streamGrant{}
+		if ana {
+			c.grants["ana"] = streamGrant{Token: "ana"}
+		}
+		if bob {
+			c.grants["bob"] = streamGrant{Token: "bob"}
+		}
+	}
+	assertQuiet := func() {
+		t.Helper()
+		select {
+		case msg := <-messages:
+			t.Fatalf("unexpected alarm: %s", msg)
+		default:
+		}
+	}
+	expectNotice := func(want string) {
+		t.Helper()
+		select {
+		case msg := <-messages:
+			if !strings.Contains(msg, want) {
+				t.Fatalf("wrong coverage: %s", msg)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("persistent outage was not announced")
+		}
+	}
+	h.a.updateCoverage(h.now)
+	setCovered(false, false)
+	h.a.updateCoverage(h.now.Add(time.Second))
+	h.a.updateCoverage(h.now.Add(10 * time.Second))
+	setCovered(true, true)
+	h.a.updateCoverage(h.now.Add(12 * time.Second))
+	h.a.updateCoverage(h.now.Add(30 * time.Second))
+	assertQuiet()
+	setCovered(true, false)
+	h.a.updateCoverage(h.now.Add(31 * time.Second))
+	h.a.updateCoverage(h.now.Add(46 * time.Second))
+	expectNotice("<@bob>")
+	h.a.updateCoverage(h.now.Add(50 * time.Second))
+	assertQuiet()
+	// A short recovery must not re-arm an identical outage warning.
+	setCovered(true, true)
+	h.a.updateCoverage(h.now.Add(51 * time.Second))
+	setCovered(true, false)
+	h.a.updateCoverage(h.now.Add(55 * time.Second))
+	h.a.updateCoverage(h.now.Add(71 * time.Second))
+	assertQuiet()
+	// A changed persistent roster is announced, at most once per minute.
+	setCovered(false, false)
+	h.a.updateCoverage(h.now.Add(72 * time.Second))
+	h.a.updateCoverage(h.now.Add(88 * time.Second))
+	assertQuiet()
+	h.a.updateCoverage(h.now.Add(106 * time.Second))
+	expectNotice("<@ana>, <@bob>")
+}
+
+func TestAssistantCoverageRechecksQueuedWarningAfterRecovery(t *testing.T) {
+	h := newAssistantHarness(t)
+	c := h.a.state.streaming
+	c.mu.Lock()
+	c.synced = true
+	c.grants = nil
+	c.mu.Unlock()
+	messages := make(chan string, 1)
+	h.a.send = func(channel, text string) error { messages <- text; return nil }
+	h.a.publishMu.Lock()
+	h.a.updateCoverage(h.now)
+	h.a.updateCoverage(h.now.Add(16 * time.Second))
+	c.mu.Lock()
+	c.grants = map[string]streamGrant{"ana": {Token: "ana"}, "bob": {Token: "bob"}}
+	c.mu.Unlock()
+	h.a.publishMu.Unlock()
+	select {
+	case message := <-messages:
+		t.Fatalf("queued stale notice: %s", message)
+	case <-time.After(50 * time.Millisecond):
 	}
 }

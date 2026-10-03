@@ -61,18 +61,21 @@ type assistantRequest struct {
 	cancel        context.CancelFunc
 }
 type assistantController struct {
-	publishMu  sync.Mutex
-	mu         sync.Mutex
-	state      *voiceConnectionState
-	session    *discordgo.Session
-	settings   assistantSettings
-	configured bool
-	stopped    bool
-	streams    map[string]*assistantStream
-	request    *assistantRequest
-	serial     uint64
-	busyAt     map[string]time.Time
-	coverage   string
+	publishMu         sync.Mutex
+	mu                sync.Mutex
+	state             *voiceConnectionState
+	session           *discordgo.Session
+	settings          assistantSettings
+	configured        bool
+	stopped           bool
+	streams           map[string]*assistantStream
+	request           *assistantRequest
+	serial            uint64
+	busyAt            map[string]time.Time
+	coverage          string
+	coverageCandidate string
+	coverageSince     time.Time
+	coverageNoticeAt  time.Time
 	// Injectable effects keep timing/state tests independent of Discord and paid providers.
 	send func(string, string) error
 	ask  func(context.Context, string) (string, error)
@@ -173,6 +176,8 @@ func (a *assistantController) relocate() {
 	a.streams = map[string]*assistantStream{}
 	a.busyAt = map[string]time.Time{}
 	a.coverage = ""
+	a.coverageCandidate = ""
+	a.coverageSince = time.Time{}
 }
 func (a *assistantController) begin(user string, audio *realtimeAudioClient) {
 	a.mu.Lock()
@@ -196,6 +201,12 @@ func (a *assistantController) notice(user, text string) {
 		defer a.publishMu.Unlock()
 		a.mu.Lock()
 		valid := !a.stopped && serial == a.serial && a.settings.Enabled
+		if user == "" {
+			// Coverage can recover while this notice waits for another Discord send.
+			_, uncovered, ready := a.state.streaming.coverageSnapshot()
+			sort.Strings(uncovered)
+			valid = valid && ready && strings.Join(uncovered, ", ") == a.coverage
+		}
 		a.mu.Unlock()
 		if !valid {
 			return
@@ -485,26 +496,42 @@ func (a *assistantController) refresh(guildID string) {
 	if a.state.transcriptionClient.getJSON(ctx, "/v1/guilds/"+url.PathEscape(guildID)+"/assistant", &config) == nil {
 		a.configure(config)
 	}
+	a.updateCoverage(time.Now())
+}
+
+func (a *assistantController) updateCoverage(now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if !a.configured || !a.settings.Enabled || a.stopped {
 		return
 	}
-	uncovered := []string{}
-	for _, user := range a.state.streaming.roster() {
-		if a.state.streaming.grant(user).Token == "" || (a.streams[user] != nil && a.streams[user].failed) {
-			uncovered = append(uncovered, "<@"+user+">")
-		}
+	_, uncovered, ready := a.state.streaming.coverageSnapshot()
+	if !ready {
+		a.coverageCandidate = ""
+		a.coverageSince = time.Time{}
+		return
 	}
 	sort.Strings(uncovered)
 	coverage := strings.Join(uncovered, ", ")
-	if coverage == a.coverage {
+	if a.coverageSince.IsZero() || coverage != a.coverageCandidate {
+		a.coverageCandidate = coverage
+		a.coverageSince = now
+		return
+	}
+	// Provider recovery suppresses assignments for 10s; don't announce that transient.
+	if now.Sub(a.coverageSince) < 15*time.Second || coverage == a.coverage {
+		return
+	}
+	if coverage == "" {
+		a.coverage = ""
+		return
+	}
+	if a.destination() == "" || (!a.coverageNoticeAt.IsZero() && now.Sub(a.coverageNoticeAt) < time.Minute) {
 		return
 	}
 	a.coverage = coverage
-	if coverage != "" && a.destination() != "" {
-		a.notice("", "Hey Bot sem Realtime para: "+coverage+". Estas pessoas não podem ativar o assistente.")
-	}
+	a.coverageNoticeAt = now
+	a.notice("", "Hey Bot sem Realtime para: "+coverage+". Estas pessoas não podem ativar o assistente.")
 }
 
 func assistantCommand() *discordgo.ApplicationCommand {
@@ -587,17 +614,9 @@ func assistantHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		if config.ChannelID == nil && state.summaryChannelID != "" {
 			channel = "<#" + state.summaryChannelID + ">"
 		}
-		covered, uncovered := []string{}, []string{}
+		covered, uncovered, ready := state.streaming.coverageSnapshot()
 		if state.assistant != nil {
 			state.assistant.mu.Lock()
-		}
-		for _, user := range state.streaming.roster() {
-			failed := state.assistant != nil && state.assistant.streams[user] != nil && state.assistant.streams[user].failed
-			if state.streaming.grant(user).Token != "" && !failed {
-				covered = append(covered, "<@"+user+">")
-			} else {
-				uncovered = append(uncovered, "<@"+user+">")
-			}
 		}
 		if state.assistant != nil {
 			if !state.assistant.canRespond() {
@@ -606,6 +625,9 @@ func assistantHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			state.assistant.mu.Unlock()
 		}
 		coverage = fmt.Sprintf("Realtime: %d/%d · Cobertos: %s · Sem Realtime: %s", len(covered), len(covered)+len(uncovered), strings.Join(covered, ", "), strings.Join(uncovered, ", "))
+		if !ready {
+			coverage = "Realtime: a aguardar sincronização das reservas."
+		}
 	}
 	respondLongText(s, i, fmt.Sprintf("Hey Bot ativo: %t · Frase: %s · Destino: %s\n%s", config.Enabled, config.Phrase, channel, coverage))
 }

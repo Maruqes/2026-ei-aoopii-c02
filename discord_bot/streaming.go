@@ -96,6 +96,7 @@ type streamingStatus struct {
 
 // Arrival order belongs to participants, never to speaking updates or SSRCs.
 type streamingController struct {
+	synced    bool
 	mu        sync.RWMutex
 	syncMu    sync.Mutex
 	order     []string
@@ -160,6 +161,7 @@ func (c *streamingController) reset(ids []string, channelIDs ...string) {
 	c.order = nil
 	c.present = map[string]bool{}
 	c.grants = map[string]streamGrant{}
+	c.synced = false
 	for _, id := range ids {
 		if !c.present[id] {
 			c.present[id] = true
@@ -187,6 +189,25 @@ func (c *streamingController) roster() []string {
 	}
 	return ids
 }
+
+// Read roster and reservations together, so a refresh cannot mix two sync results.
+// A retired WAV failure does not revoke a reservation that can open a new stream.
+func (c *streamingController) coverageSnapshot() (covered, uncovered []string, ready bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, id := range c.order {
+		if isUserCapturePaused(id) {
+			continue
+		}
+		if c.grants[id].Token != "" {
+			covered = append(covered, "<@"+id+">")
+		} else {
+			uncovered = append(uncovered, "<@"+id+">")
+		}
+	}
+	return covered, uncovered, c.synced && !c.stopped
+}
+
 func (c *streamingController) grant(id string) streamGrant {
 	if c == nil {
 		return streamGrant{}
@@ -232,6 +253,7 @@ func (c *streamingController) sync(ctx context.Context) (*streamingStatus, error
 		log.Printf("streaming queue session=%d count=%d", state.sessionID, response.Queued)
 	}
 	c.queued = response.Queued
+	c.synced = true
 	c.grants = response.Assignments
 	c.exhausted = response.Exhausted
 	c.mu.Unlock()
