@@ -34,6 +34,7 @@ from .chatgpt_control import require_chatgpt_admin
 from .chatgpt_llm import ChatGPTClient
 from .config import Settings
 from .docs_client import LocalMarkdownProfileClient
+from .group_memory import install_group_memory_routes, start_group_memory_loop
 from .llm import (
     LLMClient,
     OllamaClient,
@@ -146,6 +147,11 @@ def create_app() -> FastAPI:
         workers.start()
         stop = threading.Event()
         service.state.recovery_stop = stop
+        if settings.group_memory_enabled:
+            start_group_memory_loop(
+                repository=repository, llm_factory=lambda: get_llm_client(get_settings()),
+                docs=get_docs_client(settings), settings=settings, stop_event=stop,
+            )
 
         def recover_sessions() -> None:
             while not stop.is_set():
@@ -743,8 +749,10 @@ def create_app() -> FastAPI:
         )
 
     install_assistant_routes(
-        service, get_repository=get_repository, get_llm_client=get_llm_client
+        service, get_repository=get_repository, get_llm_client=get_llm_client,
+        get_docs_client=get_docs_client,
     )
+    install_group_memory_routes(service, get_repository=get_repository, get_settings=get_settings)
 
     @service.post("/v1/guilds/{guild_id}/oracle", response_model=GuildOracleResponse)
     def ask_guild_oracle(

@@ -89,9 +89,10 @@ type assistantController struct {
 	coverageCandidate string
 	coverageSince     time.Time
 	coverageNoticeAt  time.Time
+	proactiveCancel   context.CancelFunc
 	// Injectable effects keep timing/state tests independent of Discord and paid providers.
 	send  func(string, string) error
-	ask   func(context.Context, string) (string, error)
+	ask   func(context.Context, string, string) (string, error)
 	speak func(context.Context, string) error
 }
 
@@ -117,11 +118,15 @@ func newAssistantController(s *discordgo.Session, state *voiceConnectionState) *
 		}
 		return nil
 	}
-	a.ask = func(ctx context.Context, question string) (string, error) {
+	a.ask = func(ctx context.Context, userID, question string) (string, error) {
 		var result struct {
 			Answer string `json:"answer"`
 		}
-		err := state.transcriptionClient.postJSON(ctx, "/v1/assistant/question", map[string]string{"question": question}, &result)
+		user := state.userInfo(userID)
+		err := state.transcriptionClient.postJSON(ctx, "/v1/assistant/question", map[string]any{
+			"question": question, "session_id": state.sessionID, "discord_id": userID,
+			"username": user.Username, "display_name": user.DisplayName,
+		}, &result)
 		if err == nil && strings.TrimSpace(result.Answer) == "" {
 			err = fmt.Errorf("empty assistant answer")
 		}
@@ -179,6 +184,10 @@ func (a *assistantController) canRespond() bool {
 	return err == nil && permissions&(discordgo.PermissionViewChannel|discordgo.PermissionSendMessages) == (discordgo.PermissionViewChannel|discordgo.PermissionSendMessages)
 }
 func (a *assistantController) reset() {
+	if a.proactiveCancel != nil {
+		a.proactiveCancel()
+		a.proactiveCancel = nil
+	}
 	if a.request != nil && a.request.cancel != nil {
 		a.request.cancel()
 	}
@@ -336,12 +345,18 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 		// Partial text never enters the question; its timing keeps quiet speech
 		// and unfinished provider output from being mistaken for silence.
 		if event.End > max(stream.through, stream.speechThrough) && event.End > stream.speechFloor {
+			if a.proactiveCancel != nil {
+				a.proactiveCancel()
+			}
 			stream.speechThrough = event.End
 			stream.lastSpeechAt = audio.startedAt.Add(time.Duration(event.End * float64(time.Second)))
 		}
 		return
 	}
 	stream.seen[event.Identity] = true
+	if event.End > max(stream.through, stream.speechThrough) && a.proactiveCancel != nil {
+		a.proactiveCancel()
+	}
 	// WebSocket delivery is ordered; approximate metadata envelopes may overlap.
 	// Empty flush markers and entirely late finals must not cancel a live capture.
 	if len(event.Words) == 0 && event.End <= stream.through {
@@ -628,7 +643,7 @@ func (a *assistantController) tick(now time.Time) {
 	}
 	request.cancel = cancel
 	go func() {
-		answer, err := a.ask(ctx, request.text)
+		answer, err := a.ask(ctx, request.user, request.text)
 		cancel()
 		a.publishMu.Lock()
 		a.mu.Lock()

@@ -36,7 +36,7 @@ func newAssistantHarness(t *testing.T) *assistantHarness {
 		h.messages = append(h.messages, channel+":"+text)
 		return nil
 	}
-	h.a.ask = func(ctx context.Context, text string) (string, error) {
+	h.a.ask = func(ctx context.Context, userID, text string) (string, error) {
 		h.mu.Lock()
 		h.questions = append(h.questions, text)
 		h.mu.Unlock()
@@ -625,10 +625,16 @@ func TestAssistantSendsWholeSlowQuestionAcrossDelayedFinals(t *testing.T) {
 			t.Errorf("wrong endpoint: %s", r.URL.Path)
 		}
 		var body struct {
-			Question string `json:"question"`
+			Question  string `json:"question"`
+			SessionID int64  `json:"session_id"`
+			DiscordID string `json:"discord_id"`
+			Username  string `json:"username"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Error(err)
+		}
+		if body.SessionID != 1 || body.DiscordID != "ana" || body.Username != "ana" {
+			t.Errorf("missing speaker identity: %+v", body)
 		}
 		received <- body.Question
 		w.Header().Set("Content-Type", "application/json")

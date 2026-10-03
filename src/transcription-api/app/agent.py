@@ -136,6 +136,11 @@ def format_transcript(messages: list[dict]) -> str:
             lines.append(
                 f"[{tstamp:%Y-%m-%d %H:%M:%S} UTC] {username} [user={message.get('discord_id', 'unknown')}] ({message.get('channel_name', 'voice')}): {content}"
             )
+            if message.get("assistant_answer"):
+                lines.append(
+                    f"[{tstamp:%Y-%m-%d %H:%M:%S} UTC] Bot (generated reply, context only; "
+                    f"not evidence about {username}): {message['assistant_answer']}"
+                )
     return "\n".join(lines)
 
 

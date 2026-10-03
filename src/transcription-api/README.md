@@ -472,7 +472,36 @@ ensaio real deve usar uma chamada controlada, uma key e debug ligado; validar PT
 vagas e flush, depois várias keys. Desligar debug no fim. O ensaio real requer áudio e
 acesso à Speechmatics e não é substituído pelos testes simulados.
 
-### Contrato Hey Bot
+### Memória contínua e reações
+
+`GROUP_MEMORY_ENABLED=true` inicia um worker que verifica janelas fechadas a cada
+15 segundos. Cada janela dura `GROUP_MEMORY_BULK_MINUTES` (1–60, default 5).
+O primeiro arranque considera os últimos `GROUP_MEMORY_CONTEXT_BULKS` (1–3, default 3)
+blocos; o ponto inicial, os blocos e a origem das observações ficam em Postgres.
+O worker agrupa por receção (`messages.observed_at`), preservando `tstamp` como data
+original da fala: uma recuperação Batch tardia não perde a observação. Janelas vazias
+não chamam o LLM. Resumos/lore sobrevivem a reinícios e entram no contexto de
+`/oracle` e “Olá macaco”; termos da pergunta também procuram blocos antigos.
+
+Perfis usam apenas as mensagens de cada membro, com os locks existentes e uma
+observação identificada por bloco. Falhas de geração deixam as fontes por processar;
+falhas de perfil ficam pendentes. `/forget` invalida os blocos derivados dos servidores
+afetados para os reconstruir apenas com membros restantes, mesmo após substituição
+de transcrições. Blocos recentes alimentam piadas/callbacks; intervenções antigas,
+repetidas ou sem novidade são suprimidas. O mínimo entre intervenções geradas é
+`GROUP_MEMORY_REACTION_COOLDOWN_MINUTES` (default 10).
+
+`GET /v1/guilds/{guild}/memory` inspeciona os blocos. `GET /v1/memory/reactions`
+devolve as reações recentes pendentes; o bot verifica destino/permissões e disponibilidade,
+depois faz `POST /v1/memory/reactions/{id}/claim` e publica texto, opcionalmente com
+meme GIPHY (`GIPHY_API_KEY` no bot). Faz `POST .../{id}/result` com `sent`/`failed`.
+A claim é atómica; não repete envios de resultado ambíguo nem claims após um crash.
+Uma reação expira um bloco depois do seu fim. Voz reutiliza o TTS existente, espera
+silêncio Realtime e música parada e é cancelada por nova fala. Sem monitorização
+completa, texto continua disponível. Não existe acesso à loja/favoritos privados de GIFs.
+`GROUP_MEMORY_REACTIONS_ENABLED=false` mantém a memória sem publicar reações.
+
+### Contrato Hey Bot (pedidos explícitos)
 
 `GET/POST /v1/guilds/{guild}/assistant` lê/altera `enabled`, `phrase` e `channel_id`
 na tabela de settings existente. A revisão monotónica invalida configurações antigas;
@@ -480,9 +509,17 @@ a gravação devolve sucesso apenas depois do commit. A preferência streaming p
 independente; uma linha criada só para o assistente herda o default streaming do ambiente.
 
 `POST /v1/assistant/question` recebe `{"question":"Explica polimorfismo?"}` e devolve
-`question`/`answer`. Usa o cliente LLM selecionado, um prompt geral em PT-PT e timeout
-de 30 segundos, sem leitura de contexto do servidor nem tools. É um endpoint interno,
-como os restantes endpoints da API; as permissões Discord são verificadas no bot.
+`question`/`answer`. O bot envia também `session_id`, `discord_id`, `username` e
+`display_name`: a API guarda a pergunta e a resposta na tabela `messages` com origem
+`assistant`, consulta mensagens e perfis da memória do servidor e inicia a atualização
+do perfil/lore do autor em segundo plano. As respostas geradas ficam identificadas
+como contexto do bot e não são evidência biográfica. Atualizações falhadas continuam
+pendentes para `/syncprofiles` ou a sincronização periódica; a conversa já guardada
+fica disponível nas perguntas seguintes e em `/oracle`. Os perfis continuam a agregar
+observações do membro entre servidores, como nas atualizações de voz e texto.
+Sem identidade de sessão/autor, mantém uma resposta geral sem guardar memória.
+Usa o cliente LLM selecionado, PT-PT e timeout de geração de 30 segundos, sem tools.
+É um endpoint interno; as permissões Discord são verificadas no bot.
 
 O WebSocket agora devolve `ready` com `recording_id`/`generation` e eventos `final`
 apenas depois de persistir cada segmento novo. Cada final inclui `session_id`,

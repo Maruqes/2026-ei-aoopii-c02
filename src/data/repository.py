@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import zlib
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -138,7 +139,10 @@ def format_context_message_row(row: dict, *, time_only: bool = False) -> str:
         prefix += f" ({channel_name})"
     if source_type:
         prefix += f" [{source_type}]"
-    return f"{prefix} {username}: {content}"
+    line = f"{prefix} {username}: {content}"
+    if row.get("assistant_answer"):
+        line += f"\n{prefix} Bot (generated reply, not member evidence): {row['assistant_answer']}"
+    return line
 
 
 def display_name_from_row(
@@ -265,6 +269,24 @@ class DataRepository:
                     "SELECT COUNT(*)::int FROM messages WHERE user_id = %s", (user_id,)
                 )
                 messages_deleted = int(cur.fetchone()[0])
+
+                cur.execute(
+                    "SELECT DISTINCT COALESCE(m.guild_id, vs.guild_id) FROM messages m "
+                    "LEFT JOIN voice_sessions vs ON vs.id = m.session_id WHERE m.user_id = %s "
+                    "UNION SELECT guild_id FROM group_memory_bulks WHERE %s = ANY(member_ids)",
+                    (user_id, user_id),
+                )
+                for guild in sorted(row[0] for row in cur.fetchall() if row[0]):
+                    cur.execute("SELECT pg_advisory_xact_lock(%s,%s)", (104, zlib.crc32(guild.encode()) & 0x7fffffff))
+
+                # Derived group lore can quote this member in later bulks: rebuild those guilds.
+                cur.execute(
+                    "DELETE FROM group_memory_bulks WHERE guild_id IN ("
+                    "SELECT COALESCE(m.guild_id, vs.guild_id) FROM messages m "
+                    "LEFT JOIN voice_sessions vs ON vs.id = m.session_id WHERE m.user_id = %s "
+                    "UNION SELECT guild_id FROM group_memory_bulks WHERE %s = ANY(member_ids))",
+                    (user_id, user_id),
+                )
 
                 cur.execute("DELETE FROM messages WHERE user_id = %s", (user_id,))
                 cur.execute("DELETE FROM user_profiles WHERE user_id = %s", (user_id,))
@@ -420,6 +442,33 @@ class DataRepository:
             except Exception:
                 conn.rollback()
                 raise
+
+    def insert_assistant_question(
+        self, *, session: VoiceSession, discord_id: str, username: str,
+        display_name: str | None, question: str,
+    ) -> TextMessageInsertResult:
+        with closing(connect(self.database_url)) as conn:
+            user_id = self._upsert_user(conn, discord_id, username, display_name)
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO messages (user_id, session_id, source_type, guild_id, "
+                    "channel_id, channel_name, content, tstamp) "
+                    "VALUES (%s, %s, 'assistant', %s, %s, %s, %s, clock_timestamp()) RETURNING id",
+                    (user_id, session.id, session.guild_id, session.voice_channel_id,
+                     session.channel_name, question),
+                )
+                message_id = int(cur.fetchone()[0])
+            conn.commit()
+            return TextMessageInsertResult(user_id=user_id, message_id=message_id)
+
+    def save_assistant_answer(self, message_id: int, answer: str) -> None:
+        with closing(connect(self.database_url)) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE messages SET assistant_answer = %s WHERE id = %s AND source_type = 'assistant'",
+                    (answer, message_id),
+                )
+            conn.commit()
 
     def _upsert_user(
         self,
@@ -783,6 +832,7 @@ class DataRepository:
             return "\n".join(lines), len(rows), limited
 
     def get_guild_oracle_context(self, guild_id: str, question: str = "") -> str:
+        from .group_memory import recent_bulks
         with closing(connect(self.database_url)) as conn:
             sections: list[str] = []
             cur = conn.cursor()
@@ -813,7 +863,7 @@ class DataRepository:
             cur.execute(
                 """
                 SELECT m.tstamp, u.discord_id, u.username, u.display_name,
-                       m.channel_name, m.content, m.source_type
+                       m.channel_name, m.content, m.source_type, m.assistant_answer
                 FROM messages m
                 JOIN users u ON u.id = m.user_id
                 LEFT JOIN voice_sessions vs ON vs.id = m.session_id
@@ -832,6 +882,7 @@ class DataRepository:
                     "channel_name": row[4],
                     "content": row[5],
                     "source_type": row[6],
+                    "assistant_answer": row[7],
                 }
                 for row in cur.fetchall()
             ]
@@ -884,7 +935,7 @@ class DataRepository:
                     for term in terms
                 ]
                 cur.execute(
-                    "SELECT m.tstamp, u.username, m.channel_name, m.content FROM messages m "
+                    "SELECT m.tstamp, u.username, m.channel_name, m.content, m.assistant_answer FROM messages m "
                     "JOIN users u ON u.id = m.user_id LEFT JOIN voice_sessions vs ON vs.id = m.session_id "
                     "WHERE (m.guild_id = %s OR vs.guild_id = %s) AND ("
                     + predicates
@@ -899,6 +950,7 @@ class DataRepository:
                             "username": r[1],
                             "channel_name": r[2],
                             "content": r[3],
+                            "assistant_answer": r[4],
                         }
                     )
                     for r in cur.fetchall()
@@ -909,6 +961,37 @@ class DataRepository:
                         "Messages matching the question (newest first):\n"
                         + "\n".join(relevant),
                     )
+            cur.execute(
+                "SELECT u.username, u.display_name, p.summary, p.interests, "
+                "p.communication_style, p.known_facts, p.recent_updates FROM user_profiles p "
+                "JOIN users u ON u.id = p.user_id WHERE EXISTS ("
+                "SELECT 1 FROM messages m LEFT JOIN voice_sessions vs ON vs.id = m.session_id "
+                "WHERE m.user_id = u.id AND (m.guild_id = %s OR vs.guild_id = %s)) "
+                "ORDER BY p.last_updated_at DESC NULLS LAST LIMIT 50",
+                (guild_id.strip(), guild_id.strip()),
+            )
+            profiles = [
+                f"{row[1] or row[0]}: " + "\n".join(str(value) for value in row[2:] if value)
+                for row in cur.fetchall() if any(row[2:])
+            ]
+            if profiles:
+                sections.append("Member profile memory:\n" + "\n\n".join(profiles))
+            bulks = recent_bulks(self, guild_id, 3)
+            if bulks:
+                sections.insert(0, "Recent group memory bulks (UTC):\n" + "\n\n".join(
+                    f"{b['start_at'].isoformat()} – {b['end_at'].isoformat()}:\n{b['summary']}\nLore: {b['lore']}"
+                    for b in reversed(bulks)
+                ))
+            if terms:
+                predicates = " OR ".join("(summary ILIKE %s OR lore ILIKE %s)" for _ in terms)
+                cur.execute(
+                    "SELECT start_at, summary, lore FROM group_memory_bulks WHERE guild_id = %s AND ("
+                    + predicates + ") ORDER BY end_at DESC LIMIT 10",
+                    (guild_id.strip(), *(pattern for pattern in patterns for _ in range(2))),
+                )
+                matching = [f"{row[0].isoformat()}: {row[1]}\nLore: {row[2]}" for row in cur.fetchall()]
+                if matching:
+                    sections.insert(0, "Group lore matching the question:\n" + "\n\n".join(matching))
             return "\n\n".join(sections).strip()
 
     def get_recordings_for_cleanup(self, filenames: list[str]) -> dict[str, list[dict]]:
@@ -1430,7 +1513,7 @@ class DataRepository:
                 conn.rollback()
                 raise
 
-    def get_pending_text_profiles(self) -> list[PendingTextProfile]:
+    def get_pending_text_profiles(self, user_id: int | None = None) -> list[PendingTextProfile]:
         with closing(connect(self.database_url)) as conn:
             cur = conn.cursor()
             cur.execute(
@@ -1441,7 +1524,8 @@ class DataRepository:
                 FROM messages m
                 JOIN users u ON u.id = m.user_id
                 LEFT JOIN user_profiles p ON p.user_id = u.id
-                WHERE m.source_type = 'text'
+                WHERE m.source_type IN ('text', 'assistant')
+                  AND (%s::bigint IS NULL OR m.user_id = %s)
                   AND m.content <> ''
                   AND (
                       p.last_text_seen_at IS NULL
@@ -1449,7 +1533,8 @@ class DataRepository:
                   )
                 GROUP BY u.id, u.discord_id, u.username, u.display_name, p.last_text_seen_at
                 ORDER BY latest_message_at ASC
-                """
+                """,
+                (user_id, user_id),
             )
             return [
                 PendingTextProfile(
@@ -1469,9 +1554,9 @@ class DataRepository:
         with closing(connect(self.database_url)) as conn:
             cur = conn.cursor()
             cur.execute(
-                "SELECT m.tstamp, u.discord_id, u.username, u.display_name, m.channel_name, m.content "
+                "SELECT m.tstamp, u.discord_id, u.username, u.display_name, m.channel_name, m.content, m.assistant_answer "
                 "FROM messages m JOIN users u ON u.id = m.user_id "
-                "WHERE m.user_id = %s AND m.source_type = 'text' AND m.content <> '' "
+                "WHERE m.user_id = %s AND m.source_type IN ('text', 'assistant') AND m.content <> '' "
                 "AND (%s::timestamptz IS NULL OR m.tstamp > %s) "
                 "AND (%s::timestamptz IS NULL OR m.tstamp <= %s) ORDER BY m.tstamp ASC, m.id ASC",
                 (user_id, after, after, until, until),
@@ -1484,6 +1569,7 @@ class DataRepository:
                     "display_name": row[3],
                     "channel_name": row[4],
                     "content": row[5],
+                    "assistant_answer": row[6],
                 }
                 for row in cur.fetchall()
             ]

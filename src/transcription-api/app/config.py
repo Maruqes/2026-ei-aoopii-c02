@@ -150,6 +150,11 @@ class Settings:
     local_profile_dir: Path = Path("profiles")
     text_profile_sync_enabled: bool = True
     text_profile_sync_interval_hours: int = 12
+    group_memory_enabled: bool = True
+    group_memory_bulk_minutes: int = 5
+    group_memory_context_bulks: int = 3
+    group_memory_reactions_enabled: bool = True
+    group_memory_reaction_cooldown_minutes: int = 10
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -289,4 +294,9 @@ class Settings:
             text_profile_sync_interval_hours=env_int(
                 "TEXT_PROFILE_SYNC_INTERVAL_HOURS", 12
             ),
+            group_memory_enabled=env_bool("GROUP_MEMORY_ENABLED", True),
+            group_memory_bulk_minutes=max(1, min(60, env_int("GROUP_MEMORY_BULK_MINUTES", 5))),
+            group_memory_context_bulks=max(1, min(3, env_int("GROUP_MEMORY_CONTEXT_BULKS", 3))),
+            group_memory_reactions_enabled=env_bool("GROUP_MEMORY_REACTIONS_ENABLED", True),
+            group_memory_reaction_cooldown_minutes=max(1, env_int("GROUP_MEMORY_REACTION_COOLDOWN_MINUTES", 10)),
         )

@@ -30,6 +30,7 @@ class GeneratedProfile:
 
 
 class LLMClient(Protocol):
+    def analyze_group_bulk(self, *, observations: str, previous_bulks: str, reaction_allowed: bool) -> dict: ...
     def list_models(self) -> list[str]: ...
 
     def test_model(self) -> str: ...
@@ -73,7 +74,9 @@ class LLMClient(Protocol):
         language: str = "pt",
     ) -> str: ...
 
-    def answer_question(self, *, question: str, language: str = "pt") -> str: ...
+    def answer_question(
+        self, *, question: str, language: str = "pt", guild_context: str = ""
+    ) -> str: ...
 
 
 class ConversationClient:
@@ -81,14 +84,71 @@ class ConversationClient:
 
     context_chars = 24000
 
-    def answer_question(self, *, question: str, language: str = "pt") -> str:
+    def analyze_group_bulk(self, *, observations: str, previous_bulks: str, reaction_allowed: bool) -> dict:
+        system = (
+            "You maintain a Discord group's living memory in time bulks. "
+            + evidence_rules() + response_language_instruction("pt") + roast_style()
+            + "Return JSON with string fields summary, lore, reaction_text, gif_query and boolean speak. "
+            "summary records topics, decisions, people, unresolved plans and exact useful quotes in this NEW bulk. "
+            "lore records new group incidents, running jokes and corrections, with attribution; "
+            "do not invent or upgrade one remark into a recurring pattern. If extending the same time window, "
+            "merge its previous summary/lore; otherwise preserve previous bulks as context only. "
+            "Bot replies and previous jokes are generated context, not independent proof. "
+            "Use the last 1-3 bulks to make an occasional short, specific joke, callback or useful observation. "
+            "React only if something in the NEW bulk earns it; otherwise reaction_text/gif_query are empty and speak false. "
+            "Do not repeat previous reactions, force jokes, interrupt serious/sensitive conversations, or invent events. "
+            "No commands, actions or claims that you did something. Keep reaction_text under 600 characters. "
+            "Set speak true only for a short joke worth saying aloud; gif_query is an optional generic emotion/meme "
+            "MEME search in English (such as 'this is fine dog', 'surprised pikachu', 'confused math lady'), "
+            "matched to the actual incident, not arbitrary decorative GIFs. No people's names or private facts, max 80 characters. "
+            "summary and lore each at most 2400 characters. Reaction permitted: " + str(reaction_allowed)
+        )
+        evidence = self._distill(
+            "Previous bulks (including generated reactions):\n" + previous_bulks + "\n\nNEW bulk:\n" + observations,
+            max_chars=self._evidence_budget(system, ""),
+        )
+        raw = self._chat(system=system, user=evidence, json_format=True)
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("Bulk analysis must be an object")
+        for key, limit in (("summary", 2400), ("lore", 2400), ("reaction_text", 600), ("gif_query", 80)):
+            if not isinstance(data.get(key), str) or len(data[key]) > limit:
+                raise ValueError(f"Invalid bulk field: {key}")
+            data[key] = data[key].strip()
+        if not data["summary"] or not isinstance(data.get("speak"), bool):
+            raise ValueError("Bulk analysis requires a summary and boolean speak")
+        if not reaction_allowed or not data["reaction_text"]:
+            data.update(reaction_text="", gif_query="", speak=False)
+        return data
+
+    def answer_question(
+        self, *, question: str, language: str = "pt", guild_context: str = ""
+    ) -> str:
         system = (
             "You are a helpful general voice assistant. Answer the question concisely. "
-            "You cannot execute actions, access server history, search the internet or call tools. "
+            "You cannot execute actions, search the internet or call tools. "
             "Never claim to have done those things. Explain uncertainty when relevant. "
+            "You know server history only through the supplied group memory. "
             + response_language_instruction(language) + discord_answer_style()
         )
-        answer = clean_answer(self._chat(system=system, user=question))
+        user = question
+        if guild_context:
+            system += (
+                evidence_rules()
+                + "Use the supplied group memory when relevant, and answer general questions normally. "
+                "Bot replies are generated context, never proof of facts about members. "
+                "Do not treat a repeated transcript of an assistant question as independent evidence. "
+            )
+            evidence = self._distill(
+                guild_context,
+                language=language,
+                question=question,
+                max_chars=self._evidence_budget(
+                    system, guild_oracle_user(guild_context="", question=question)
+                ),
+            )
+            user = guild_oracle_user(guild_context=evidence, question=question)
+        answer = clean_answer(self._chat(system=system, user=user))
         if not answer:
             raise ValueError("Assistant returned an empty answer")
         return answer
@@ -126,6 +186,7 @@ class ConversationClient:
             "Keep distinct substantive topics, names, timestamps/dates, exact short quotes worth recalling, "
             "decisions, owners, deadlines, unresolved disagreements and running jokes. "
             "Preserve attribution and distinguish a suggestion from an agreement. "
+            "Keep bot replies labelled as generated context, never as evidence about members. "
             "Do not add jokes, judgments, or turn one-off remarks into recurring habits. "
             f"Return compact bullets, at most {min(1800, max(32, target // 3))} characters. "
             "When a question is supplied, prioritize relevant evidence while retaining the topic map."
@@ -593,7 +654,8 @@ def anthropologist_profile_system(source: str) -> str:
         + "The existing profile is memory, not unquestionable truth. Preserve supported facts not contradicted "
         "by new evidence; revise explicit corrections and retire outdated interpretations. Do not erase useful "
         "history merely because today's conversation is about another subject. Focus on the target member's "
-        "own statements; other speakers provide context, not facts to transfer to the target. Distinguish "
+        "own statements; other speakers and bot replies are context only, never facts about the target. "
+        "Assistant questions may also appear in voice transcripts; duplicates are not independent evidence. Distinguish "
         "direct self-reports, observed behavior and tentative interpretations. One remark is not a recurring "
         "habit: require repeated independent evidence for patterns. Jokes, sarcasm, hypothetical plans and "
         "ASR noise are not biographical facts. Do not infer medical conditions, politics, sexuality or private "

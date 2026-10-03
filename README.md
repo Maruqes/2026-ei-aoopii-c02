@@ -98,8 +98,10 @@ Com Realtime ativo (`/streaming mode:on`), o assistente fica disponível por def
 para humanos com reserva na chamada. Diz «Olá macaco» para ouvir «Diz» e receber
 a confirmação no chat e
 faz a pergunta; também aceita «Olá macaco, explica polimorfismo…». Depois de responder,
-a próxima pergunta exige novamente a frase. O assistente geral responde em português,
-sem consultar o histórico do servidor ou executar comandos.
+a próxima pergunta exige novamente a frase. O assistente responde em português e
+consulta a memória do servidor. Cada conversa fica guardada e atualiza o perfil e
+a lore de quem falou em segundo plano, sem esperar pelo fim da chamada. As respostas
+do bot são contexto identificado, nunca factos sobre a pessoa. Não executa comandos.
 
 - `/assistant status`: estado, frase, destino e participantes com/sem Realtime.
 - `/assistant phrase value:"Olá macaco"`: frase com 2–5 palavras, até 50 caracteres.
@@ -113,6 +115,21 @@ intercaladas e palavras juntas/separadas: «olha macaco», «olá meu macaco» e
 mesmo dividida entre finais; uma pausa superior ao tempo de silêncio configurado
 separa enunciados.
 `/assistant phrase value:"outra frase"` altera a frase usada pelo servidor.
+
+A memória também acompanha a conversa sem a frase de ativação: a cada bloco fechado
+de `GROUP_MEMORY_BULK_MINUTES` (5 por defeito), guarda temas, decisões e lore, e atualiza
+os perfis dos participantes. `GROUP_MEMORY_CONTEXT_BULKS=3` dá às reações os últimos
+3 blocos (aceita 1–3); o histórico guardado continua pesquisável em `/oracle`.
+O bot pode comentar ou fazer uma piada por texto e, numa pausa da chamada, por voz.
+Espera pelo assistente, pela música e pela fala; uma nova fala cancela a voz espontânea.
+Sem cobertura Realtime completa, publica apenas texto. Não obriga a fazer uma piada
+por bloco e respeita `GROUP_MEMORY_REACTION_COOLDOWN_MINUTES=10`.
+
+GIFs são memes escolhidos para o incidente, como “this is fine”, usando pesquisa
+GIPHY com `GIPHY_API_KEY`. A integração não acede aos favoritos ou ao seletor privado
+de GIFs do Discord; sem chave, continua com texto/voz. `ASSISTANT_VOICE_ENABLED=false`
+desliga voz. `GROUP_MEMORY_REACTIONS_ENABLED=false` desliga as intervenções mantendo
+memória e perfis; `/assistant disable` silencia as reações desse servidor.
 
 Alterações exigem **Gerir Servidor**, são persistidas e cancelam pedidos pendentes.
 O destino inicial é o canal de resumo da chamada; sem acesso a um destino válido,

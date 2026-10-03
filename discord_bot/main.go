@@ -1240,6 +1240,7 @@ func main() {
 	noticeContext, stopNotices := context.WithCancel(context.Background())
 	defer stopNotices()
 	go runCreditNotices(noticeContext, dg, botAPIClient)
+	go runGroupReactions(noticeContext, dg, botAPIClient)
 
 	fmt.Printf("%s %s\n", botText("Bot online. Lingua:", "Bot online. Language:"), currentBotLanguage().label())
 	stop := make(chan os.Signal, 1)

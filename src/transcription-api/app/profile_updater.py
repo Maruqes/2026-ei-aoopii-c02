@@ -45,9 +45,15 @@ def run_text_profile_sync(
     repository: DataRepository,
     llm: LLMClient,
     docs: LocalMarkdownProfileClient,
+    user_id: int | None = None,
 ) -> int:
     updated = 0
-    for pending in repository.get_pending_text_profiles():
+    pending_profiles = (
+        repository.get_pending_text_profiles(user_id)
+        if user_id is not None
+        else repository.get_pending_text_profiles()
+    )
+    for pending in pending_profiles:
         try:
             if update_text_profile(
                 repository=repository, llm=llm, docs=docs, pending=pending
@@ -90,44 +96,68 @@ def update_text_profile(
             )
             return False
 
-        current_profile = repository.get_user_profile_by_user_id(pending.user_id)
-        username = display_profile_name(current_profile, pending)
-        existing_doc_text = docs.read_doc_text(
-            current_profile.google_doc_id if current_profile else None
-        )
-        observations = (
-            f"Observation context: Text observations from {format_channel_list(messages)}\n\n"
-            f"{format_transcript(messages)}"
-        )
-        generated = llm.update_profile_from_text(
-            username=username,
-            existing_profile=current_profile,
-            existing_doc_text=existing_doc_text,
-            observations=observations,
-        )
-        stored_doc = docs.upsert_profile_doc(
-            doc_id=(current_profile.google_doc_id if current_profile else None)
-            or f"user-{pending.discord_id}.md",
-            username=username,
-            profile=generated,
-            observed_on=normalize_timestamp(pending.latest_message_at).date(),
-            observation_id=f"text-{pending.user_id}-{normalize_timestamp(pending.latest_message_at).isoformat()}",
-        )
-        repository.upsert_user_profile(
+        update_observed_profile(
+            repository=repository,
+            llm=llm,
+            docs=docs,
             user_id=pending.user_id,
-            anthropologist_title=generated.anthropologist_title,
-            summary=generated.summary,
-            interests=generated.interests,
-            communication_style=generated.communication_style,
-            known_facts=generated.persona_notes,
-            recent_updates=generated.recent_updates,
-            google_doc_id=stored_doc.doc_id,
-            google_doc_url=stored_doc.url,
+            discord_id=pending.discord_id,
+            username=display_profile_name(current_profile, pending),
+            observations=(
+                f"Observation context: Text observations from {format_channel_list(messages)}\n\n"
+                f"{format_transcript(messages)}"
+            ),
+            observed_at=pending.latest_message_at,
+            observation_id=f"text-{pending.user_id}-{normalize_timestamp(pending.latest_message_at).isoformat()}",
         )
         repository.mark_user_text_profile_seen(
             pending.user_id, pending.latest_message_at
         )
         return True
+
+
+def update_observed_profile(
+    *,
+    repository,
+    llm,
+    docs,
+    user_id: int,
+    discord_id: str,
+    username: str,
+    observations: str,
+    observed_at: datetime,
+    observation_id: str,
+) -> None:
+    """Caller holds the existing per-member profile lock (namespace 103)."""
+    current_profile = repository.get_user_profile_by_user_id(user_id)
+    existing_doc_text = docs.read_doc_text(
+        current_profile.google_doc_id if current_profile else None
+    )
+    generated = llm.update_profile_from_text(
+        username=username,
+        existing_profile=current_profile,
+        existing_doc_text=existing_doc_text,
+        observations=observations,
+    )
+    stored_doc = docs.upsert_profile_doc(
+        doc_id=(current_profile.google_doc_id if current_profile else None)
+        or f"user-{discord_id}.md",
+        username=username,
+        profile=generated,
+        observed_on=normalize_timestamp(observed_at).date(),
+        observation_id=observation_id,
+    )
+    repository.upsert_user_profile(
+        user_id=user_id,
+        anthropologist_title=generated.anthropologist_title,
+        summary=generated.summary,
+        interests=generated.interests,
+        communication_style=generated.communication_style,
+        known_facts=generated.persona_notes,
+        recent_updates=generated.recent_updates,
+        google_doc_id=stored_doc.doc_id,
+        google_doc_url=stored_doc.url,
+    )
 
 
 def is_profile_signal(content: str) -> bool:

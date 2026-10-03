@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import closing
+from datetime import datetime, timezone
 
 import pytest
 from app import assistant_routes, main
 from app.assistant_routes import AssistantChanges
 from app.config import Settings
-from app.llm import ConversationClient
+from app.docs_client import LocalMarkdownProfileClient
+from app.llm import ConversationClient, GeneratedProfile, LoreEvent
+from app.profile_updater import run_text_profile_sync
 from app.realtime import final_words
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -69,6 +72,41 @@ def test_word_positions_preserve_punctuation():
     ]
 
 
+@pytest.mark.parametrize("repeats", [1, 300])
+def test_general_answer_reads_memory_without_turning_bot_words_into_facts(repeats):
+    class Client(ConversationClient):
+        context_chars = 4000
+
+        def _chat(self, **kwargs):
+            assert (
+                len(kwargs["system"]) + len(kwargs["user"]) + 128 <= self.context_chars
+            )
+            if kwargs["user"].startswith('{"slice":'):
+                return "Ana: Estou a aprender Go."
+            self.input = kwargs
+            return "Falaste sobre Go."
+
+    client = Client()
+    assert (
+        client.answer_question(
+            question="Do que falámos?",
+            guild_context="Ana: Estou a aprender Go.\n" * repeats,
+        )
+        == "Falaste sobre Go."
+    )
+    assert "Ana: Estou a aprender Go." in client.input["user"]
+    assert "Bot replies are generated context, never proof" in client.input["system"]
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [{"session_id": 1}, {"discord_id": "123"}, {"session_id": 0, "discord_id": "123"}],
+)
+def test_question_memory_requires_complete_identity(identity):
+    with pytest.raises(ValidationError):
+        assistant_routes.AssistantQuestion(question="Pergunta?", **identity)
+
+
 def test_settings_persist_atomically_and_preserve_streaming(repository):
     defaults = repository.assistant_settings("guild")
     assert defaults == {
@@ -112,6 +150,9 @@ def client_for(repository, tmp_path, llm):
     app.dependency_overrides[main.get_repository] = lambda: repository
     app.dependency_overrides[main.get_settings] = lambda: settings
     app.dependency_overrides[main.get_llm_client] = lambda: llm
+    app.dependency_overrides[main.get_docs_client] = lambda: LocalMarkdownProfileClient(
+        profile_dir=tmp_path
+    )
     return closing(TestClient(app))
 
 
@@ -150,6 +191,152 @@ def test_settings_api_and_question_without_server_history(repository, tmp_path):
         ({"question": "Explica polimorfismo?", "language": "pt"}, 30, 0)
     ]
     assert llm.timeout_seconds == 90
+
+
+class MemoryLLM(LLM):
+    fail_profile = False
+
+    def __init__(self):
+        self.calls = []
+        self.observations = []
+
+    def update_profile_from_text(self, **kwargs):
+        self.observations.append(kwargs)
+        if self.fail_profile:
+            raise RuntimeError("Temporary profile failure")
+        return GeneratedProfile(
+            "Programadora",
+            "Está a aprender Go.",
+            "Go",
+            "Direta",
+            "Partilha projetos com o grupo.",
+            "Conversou com o bot sobre Go.",
+            LoreEvent("Conversa sobre Go", ["Disse: Estou a aprender Go."], [], [], []),
+        )
+
+
+def assistant_session(repository, guild="guild"):
+    return repository.create_voice_session(
+        guild_id=guild,
+        voice_channel_id="voice",
+        channel_name="Sala",
+        summary_channel_id="chat",
+        started_at=datetime.now(timezone.utc),
+    )
+
+
+def test_assistant_exchange_updates_profile_lore_and_followup_memory(
+    repository, tmp_path
+):
+    session = assistant_session(repository)
+    llm = MemoryLLM()
+    payload = {"session_id": session.id, "discord_id": "123", "username": "Ana"}
+    with client_for(repository, tmp_path, llm) as client:
+        assert (
+            client.post(
+                "/v1/assistant/question",
+                json=payload | {"question": "Estou a aprender Go."},
+            ).status_code
+            == 200
+        )
+        profile = repository.get_user_profile_by_discord_id("123")
+        assert profile.interests == "Go"
+        assert profile.last_text_seen_at is not None
+        doc = LocalMarkdownProfileClient(profile_dir=tmp_path).read_doc_text(
+            profile.google_doc_id
+        )
+        assert "Conversa sobre Go" in doc and "Estou a aprender Go." in doc
+        assert (
+            "Bot (generated reply, context only" in llm.observations[0]["observations"]
+        )
+        assert (
+            client.post(
+                "/v1/assistant/question", json=payload | {"question": "Do que falámos?"}
+            ).status_code
+            == 200
+        )
+    memory = llm.calls[1][0]["guild_context"]
+    assert "Estou a aprender Go." in memory
+    assert "Bot (generated reply, not member evidence): Resposta." in memory
+    assert "Member profile memory:" in memory
+    assert not repository.get_pending_text_profiles()
+    assert repository.get_guild_oracle_context("other") == ""
+    from data.apply_migrations import apply_migrations
+
+    apply_migrations(repository.database_url)
+    assert "Estou a aprender Go." in repository.get_guild_oracle_context("guild")
+    assert repository.delete_user_by_discord_id("123")["messages_deleted"] == 2
+    assert repository.get_guild_oracle_context("guild") == ""
+
+
+def test_assistant_profile_failure_preserves_pending_evidence_for_retry(
+    repository, tmp_path
+):
+    session = assistant_session(repository)
+    llm = MemoryLLM()
+    llm.fail_profile = True
+    with client_for(repository, tmp_path, llm) as client:
+        assert (
+            client.post(
+                "/v1/assistant/question",
+                json={
+                    "question": "Estou a aprender Go.",
+                    "session_id": session.id,
+                    "discord_id": "123",
+                    "username": "Ana",
+                },
+            ).status_code
+            == 200
+        )
+    assert repository.get_pending_text_profiles()
+    assert "Estou a aprender Go." in repository.get_guild_oracle_context("guild")
+    llm.fail_profile = False
+    docs = LocalMarkdownProfileClient(profile_dir=tmp_path)
+    assert run_text_profile_sync(repository=repository, llm=llm, docs=docs) == 1
+    assert run_text_profile_sync(repository=repository, llm=llm, docs=docs) == 0
+    assert docs.read_doc_text("user-123.md").count("Conversa sobre Go") == 1
+
+
+def test_assistant_rejects_unknown_session(repository, tmp_path):
+    llm = MemoryLLM()
+    with client_for(repository, tmp_path, llm) as client:
+        assert (
+            client.post(
+                "/v1/assistant/question",
+                json={
+                    "question": "Estou a aprender Go.",
+                    "session_id": 99999,
+                    "discord_id": "123",
+                    "username": "Ana",
+                },
+            ).status_code
+            == 404
+        )
+    assert llm.calls == []
+    assert not repository.get_pending_text_profiles()
+
+
+def test_assistant_answer_timeout_keeps_member_evidence(repository, tmp_path):
+    class TimeoutLLM(MemoryLLM):
+        def answer_question(self, **kwargs):
+            raise TimeoutError()
+
+    session = assistant_session(repository)
+    with client_for(repository, tmp_path, TimeoutLLM()) as client:
+        assert (
+            client.post(
+                "/v1/assistant/question",
+                json={
+                    "question": "Estou a aprender Go.",
+                    "session_id": session.id,
+                    "discord_id": "123",
+                    "username": "Ana",
+                },
+            ).status_code
+            == 504
+        )
+    assert repository.get_pending_text_profiles()
+    assert "Estou a aprender Go." in repository.get_guild_oracle_context("guild")
 
 
 def test_question_api_timeout(repository, tmp_path, monkeypatch):
