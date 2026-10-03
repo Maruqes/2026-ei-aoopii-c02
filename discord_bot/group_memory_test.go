@@ -71,10 +71,72 @@ func TestHumanSpeechCancelsProactiveVoice(t *testing.T) {
 	}
 }
 
+func TestProactiveVoiceUsesCurrentCallSilenceWithoutWaitingForFinals(t *testing.T) {
+	h := newAssistantHarness(t)
+	h.a.voiceEnabled = true
+	h.a.state.streaming.synced = true
+	// PCM can detect noise or trailing speech that the provider never transcribes.
+	h.audio["ana"].frames = 2 * sampleRate
+	h.audio["ana"].speechFrame = 2 * sampleRate
+	h.audio["ana"].lastSpeech = h.now.Add(2 * time.Second)
+	h.a.mu.Lock()
+	defer h.a.mu.Unlock()
+	if h.a.proactiveReady(h.now.Add(3*time.Second), true) {
+		t.Fatal("spoke before the silence interval")
+	}
+	if !h.a.proactiveReady(h.now.Add(10*time.Second), true) {
+		t.Fatal("quiet call was blocked by a missing final")
+	}
+	// Departed participants leave their old assistant streams behind.
+	h.a.state.streaming.leave("bob")
+	h.a.streams["bob"].failed = true
+	if !h.a.proactiveReady(h.now.Add(10*time.Second), true) {
+		t.Fatal("departed participant blocked voice")
+	}
+}
+
+func TestEmptyFinalDoesNotInterruptProactiveVoice(t *testing.T) {
+	h := newAssistantHarness(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.a.proactiveCancel = cancel
+	h.audio["ana"].frames = 2 * sampleRate
+	h.a.event("ana", h.audio["ana"], realtimeEvent{Type: "final", SessionID: 1, DiscordID: "ana", RecordingID: 10, Generation: 2, Identity: "flush", End: 2}, h.now)
+	if ctx.Err() != nil {
+		t.Fatal("empty provider flush interrupted voice")
+	}
+}
+
+func TestDelayedTranscriptDoesNotCutCurrentProactiveVoice(t *testing.T) {
+	h := newAssistantHarness(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.a.proactiveCancel = cancel
+	h.a.proactiveStartedAt = h.now.Add(10 * time.Second)
+	h.final("ana", "delayed", "Falámos de Go", 0, 2)
+	if ctx.Err() != nil {
+		t.Fatal("old transcript interrupted current voice")
+	}
+	h.final("ana", "new", "Agora estou a falar", 10, 12)
+	if ctx.Err() == nil {
+		t.Fatal("new human speech did not interrupt voice")
+	}
+}
+
 func TestProactiveReactionClaimsOnceBeforePublishing(t *testing.T) {
 	h := newAssistantHarness(t)
 	h.a.state.assistant = h.a
 	h.a.state.streaming.synced = true
+	h.a.voiceEnabled = true
+	var spoken int
+	h.a.speak = func(ctx context.Context, text string) error {
+		spoken++
+		deadline, ok := ctx.Deadline()
+		if text != "Esse plano está no modo this is fine." || !ok || time.Until(deadline) < time.Minute {
+			t.Fatal("voice lost reaction text or sufficient synthesis/playback time")
+		}
+		return nil
+	}
 	setVoiceConnection("proactive-test", h.a.state)
 	t.Cleanup(func() { voiceMu.Lock(); delete(voiceConnections, "proactive-test"); voiceMu.Unlock() })
 	var claims, results atomic.Int32
@@ -91,11 +153,11 @@ func TestProactiveReactionClaimsOnceBeforePublishing(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	reaction := groupReaction{ID: 1, GuildID: "proactive-test", ChannelID: "chat", Text: "Esse plano está no modo this is fine."}
+	reaction := groupReaction{ID: 1, GuildID: "proactive-test", ChannelID: "chat", Text: "Esse plano está no modo this is fine.", Speak: true}
 	client := testAPIClient(server)
 	deliverGroupReaction(context.Background(), nil, client, reaction)
 	deliverGroupReaction(context.Background(), nil, client, reaction)
-	if claims.Load() != 2 || results.Load() != 1 || len(h.messages) != 1 {
-		t.Fatalf("claims=%d results=%d messages=%v", claims.Load(), results.Load(), h.messages)
+	if claims.Load() != 2 || results.Load() != 1 || len(h.messages) != 1 || spoken != 1 {
+		t.Fatalf("claims=%d results=%d messages=%v spoken=%d", claims.Load(), results.Load(), h.messages, spoken)
 	}
 }

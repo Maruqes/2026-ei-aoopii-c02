@@ -65,10 +65,17 @@ func (a *assistantController) proactiveReady(now time.Time, speak bool) bool {
 	if a.state.music != nil && a.state.music.IsBusy() {
 		return false
 	}
-	for _, stream := range a.streams {
-		_, speechThrough, lastSpeech := stream.audio.progress()
-		if stream.failed || stream.through+0.02 < max(speechThrough, stream.speechThrough) {
+	for user, stream := range a.streams {
+		if !a.eligible(user) {
+			continue
+		}
+		_, _, lastSpeech := stream.audio.progress()
+		if stream.failed {
 			return false
+		}
+		// A bulk reaction needs a quiet call, not a final for every PCM noise peak.
+		if recognizedEnd := stream.audio.startedAt.Add(time.Duration(stream.wordThrough * float64(time.Second))); stream.wordThrough > 0 && recognizedEnd.After(lastSpeech) {
+			lastSpeech = recognizedEnd
 		}
 		if stream.lastSpeechAt.After(lastSpeech) {
 			lastSpeech = stream.lastSpeechAt
@@ -138,7 +145,7 @@ func deliverGroupReaction(ctx context.Context, s *discordgo.Session, client *Tra
 		gif, gifErr := searchMemeGIF(gifCtx, http.DefaultClient, "https://api.giphy.com/v1/gifs/search", os.Getenv("GIPHY_API_KEY"), reaction.GIFQuery)
 		gifCancel()
 		if gifErr == nil && gif != "" {
-			content += "\n\nGIF via GIPHY: " + gif
+			content += "\n\n" + gif
 		}
 	}
 	if assistant != nil {
@@ -160,8 +167,9 @@ func deliverGroupReaction(ctx context.Context, s *discordgo.Session, client *Tra
 	if assistant != nil && err == nil && reaction.Speak && assistant.voiceEnabled {
 		assistant.mu.Lock()
 		if assistant.proactiveReady(time.Now(), true) {
-			voiceCtx, voiceCancel = context.WithTimeout(ctx, 30*time.Second)
+			voiceCtx, voiceCancel = context.WithTimeout(ctx, 2*time.Minute)
 			assistant.proactiveCancel = voiceCancel
+			assistant.proactiveStartedAt = time.Now()
 		}
 		assistant.mu.Unlock()
 	}

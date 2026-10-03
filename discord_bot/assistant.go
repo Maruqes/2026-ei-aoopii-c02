@@ -72,24 +72,25 @@ type assistantRequest struct {
 	cancel        context.CancelFunc
 }
 type assistantController struct {
-	publishMu         sync.Mutex
-	mu                sync.Mutex
-	state             *voiceConnectionState
-	session           *discordgo.Session
-	settings          assistantSettings
-	silence           time.Duration
-	voiceEnabled      bool
-	configured        bool
-	stopped           bool
-	streams           map[string]*assistantStream
-	request           *assistantRequest
-	serial            uint64
-	busyAt            map[string]time.Time
-	coverage          string
-	coverageCandidate string
-	coverageSince     time.Time
-	coverageNoticeAt  time.Time
-	proactiveCancel   context.CancelFunc
+	publishMu          sync.Mutex
+	mu                 sync.Mutex
+	state              *voiceConnectionState
+	session            *discordgo.Session
+	settings           assistantSettings
+	silence            time.Duration
+	voiceEnabled       bool
+	configured         bool
+	stopped            bool
+	streams            map[string]*assistantStream
+	request            *assistantRequest
+	serial             uint64
+	busyAt             map[string]time.Time
+	coverage           string
+	coverageCandidate  string
+	coverageSince      time.Time
+	coverageNoticeAt   time.Time
+	proactiveCancel    context.CancelFunc
+	proactiveStartedAt time.Time
 	// Injectable effects keep timing/state tests independent of Discord and paid providers.
 	send  func(string, string) error
 	ask   func(context.Context, string, string) (string, error)
@@ -341,11 +342,12 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 		}
 		return
 	}
+	interruptsVoice := a.proactiveCancel != nil && a.eligible(user) && event.End > max(stream.through, stream.speechThrough) && event.End > stream.speechFloor && audio.startedAt.Add(time.Duration(event.End*float64(time.Second))).After(a.proactiveStartedAt)
 	if event.Type == "speech" {
 		// Partial text never enters the question; its timing keeps quiet speech
 		// and unfinished provider output from being mistaken for silence.
 		if event.End > max(stream.through, stream.speechThrough) && event.End > stream.speechFloor {
-			if a.proactiveCancel != nil {
+			if interruptsVoice {
 				a.proactiveCancel()
 			}
 			stream.speechThrough = event.End
@@ -354,7 +356,7 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 		return
 	}
 	stream.seen[event.Identity] = true
-	if event.End > max(stream.through, stream.speechThrough) && a.proactiveCancel != nil {
+	if (len(event.Words) > 0 || strings.TrimSpace(event.Text) != "") && interruptsVoice {
 		a.proactiveCancel()
 	}
 	// WebSocket delivery is ordered; approximate metadata envelopes may overlap.
