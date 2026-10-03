@@ -56,51 +56,6 @@ func (m *SSRCUserMap) GetBySSRC(ssrc uint32) (SSRCUser, bool) {
 	return user, ok
 }
 
-func (m *SSRCUserMap) GetByDiscordID(discordID string) (SSRCUser, bool) {
-	if m == nil || discordID == "" {
-		return SSRCUser{}, false
-	}
-
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	user, ok := m.byDiscordID[discordID]
-	return user, ok
-}
-
-func (m *SSRCUserMap) SSRCByDiscordID(discordID string) (uint32, bool) {
-	user, ok := m.GetByDiscordID(discordID)
-	if !ok {
-		return 0, false
-	}
-	return user.SSRC, true
-}
-
-func (m *SSRCUserMap) DiscordIDBySSRC(ssrc uint32) (string, bool) {
-	user, ok := m.GetBySSRC(ssrc)
-	if !ok {
-		return "", false
-	}
-	return user.DiscordID, true
-}
-
-func (m *SSRCUserMap) DeleteBySSRC(ssrc uint32) {
-	if m == nil {
-		return
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	user, ok := m.bySSRC[ssrc]
-	if !ok {
-		return
-	}
-
-	delete(m.bySSRC, ssrc)
-	delete(m.byDiscordID, user.DiscordID)
-}
-
 func (m *SSRCUserMap) DeleteByDiscordID(discordID string) {
 	if m == nil || discordID == "" {
 		return

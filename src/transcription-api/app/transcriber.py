@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from .speechmatics_errors import NoCredits, ProviderError, error_kind, key_health
 from .speechmatics_usage import (
     SpeechmaticsAPIKey,
     fetch_speechmatics_key_usages,
@@ -436,8 +437,13 @@ class SpeechmaticsTranscriber:
         )
 
     def _select_api_key(self) -> SpeechmaticsAPIKey:
-        if len(self.api_keys) == 1:
-            return self.api_keys[0]
+        healthy = [key for key in self.api_keys if key_health.healthy(key.value)]
+        if not healthy:
+            if key_health.exhausted(self.api_keys):
+                raise NoCredits()
+            raise RuntimeError("No usable Speechmatics key")
+        if len(healthy) == 1:
+            return healthy[0]
         with self._key_lock:
             if time.monotonic() - self._usage_cached_at > 60:
                 self._usage_cache = fetch_speechmatics_key_usages(
@@ -447,7 +453,7 @@ class SpeechmaticsTranscriber:
                     since=self.usage_since,
                 )
                 self._usage_cached_at = time.monotonic()
-            available = [row for row in self._usage_cache if row.available]
+            available = [row for row in self._usage_cache if row.available and key_health.healthy(row.key.value)]
             if available:
                 # Usage reporting lags; rotate equally-used keys instead of always selecting the first.
                 selected = min(
@@ -463,7 +469,7 @@ class SpeechmaticsTranscriber:
                     "Speechmatics usage unavailable; attempting a configured key without assuming zero usage"
                 )
                 selected = min(
-                    self.api_keys,
+                    healthy,
                     key=lambda key: self._selection_count.get(key.name, 0),
                 )
             self._selection_count[selected.name] = (
@@ -478,6 +484,7 @@ class SpeechmaticsTranscriber:
         job_id: str | None,
         key_name: str | None,
         save_job: Callable[[str, str], None],
+        is_active: Callable[[], bool] | None = None,
     ) -> TranscriptionResult:
         if job_id:
             selected = next(
@@ -489,15 +496,27 @@ class SpeechmaticsTranscriber:
                 )
         else:
             selected = self._select_api_key()
-        # A persisted remote job is polled after restart, never blindly submitted again.
-        return asyncio.run(
-            asyncio.wait_for(
-                self._transcribe(
-                    audio_path, selected, job_id=job_id, save_job=save_job
-                ),
-                timeout=self.timeout_seconds + 30,
-            )
-        )
+        # Try another account only on a concrete exhausted-credit response.
+        attempted: set[str] = set()
+        while True:
+            attempted.add(selected.value)
+            try:
+                return asyncio.run(asyncio.wait_for(
+                    self._transcribe(audio_path, selected, job_id=job_id, save_job=save_job, is_active=is_active),
+                    timeout=self.timeout_seconds + 30,
+                ))
+            except Exception as exc:
+                kind = error_kind(exc)
+                key_health.mark(selected.value, kind)
+                if kind != "no_credits":
+                    raise
+                available = [key for key in self.api_keys if key.value not in attempted and key_health.healthy(key.value)]
+                if not available:
+                    if key_health.exhausted(self.api_keys):
+                        raise NoCredits() from None
+                    raise
+                selected, job_id = available[0], None
+
 
     async def _transcribe(
         self,
@@ -506,6 +525,7 @@ class SpeechmaticsTranscriber:
         *,
         job_id: str | None = None,
         save_job: Callable[[str, str], None] | None = None,
+        is_active: Callable[[], bool] | None = None,
     ) -> TranscriptionResult:
         from speechmatics.batch import AsyncClient, Transcript, TranscriptionConfig
 
@@ -519,25 +539,44 @@ class SpeechmaticsTranscriber:
 
         logger.info("speechmatics batch client opening key=%s", api_key.name)
         async with client_factory(api_key=api_key.value, url=self.batch_url) as client:
-            if save_job is not None:
-                if not job_id:
-                    job = await client.submit_job(
-                        str(audio_path), transcription_config=config
+            async def recognize():
+                nonlocal job_id
+                if save_job is not None:
+                    if not job_id:
+                        job = await client.submit_job(
+                            str(audio_path), transcription_config=config
+                        )
+                        job_id = job.id
+                        save_job(job_id, api_key.name)
+                    transcript = await client.wait_for_completion(
+                        job_id,
+                        polling_interval=self.polling_interval_seconds,
+                        timeout=self.timeout_seconds,
                     )
-                    job_id = job.id
-                    save_job(job_id, api_key.name)
-                transcript = await client.wait_for_completion(
-                    job_id,
-                    polling_interval=self.polling_interval_seconds,
-                    timeout=self.timeout_seconds,
-                )
-            else:
-                transcript = await client.transcribe(
-                    str(audio_path),
-                    transcription_config=config,
-                    polling_interval=self.polling_interval_seconds,
-                    timeout=self.timeout_seconds,
-                )
+                else:
+                    transcript = await client.transcribe(
+                        str(audio_path),
+                        transcription_config=config,
+                        polling_interval=self.polling_interval_seconds,
+                        timeout=self.timeout_seconds,
+                    )
+                return transcript
+
+            task = asyncio.create_task(recognize())
+            try:
+                while not task.done():
+                    if is_active is not None and not await asyncio.to_thread(is_active):
+                        raise ProviderError("cancelled")
+                    await asyncio.wait({task}, timeout=0.5)
+                transcript = await task
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                if job_id and is_active is not None and not await asyncio.to_thread(is_active):
+                    try:
+                        await asyncio.wait_for(client.delete_job(job_id, force=True), 2)
+                    except Exception:
+                        logger.warning("Remote cancellation unavailable key=%s", api_key.name)
 
         if not isinstance(transcript, Transcript):
             raise RuntimeError(

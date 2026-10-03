@@ -350,3 +350,81 @@ PYTHONPATH=src:src/transcription-api .venv/bin/pytest -q src/transcription-api/t
 To include integration tests, set `TEST_DATABASE_URL` to a disposable Postgres database.
 Tests create/drop their own schemas and use simulated providers; no Discord or paid AI
 credentials are needed. Go tests require the Opus and opusfile development libraries.
+
+## Realtime
+
+Configuração na API (também exposta no Compose):
+
+```dotenv
+TRANSCRIPTION_PROVIDER=speechmatics
+TRANSCRIPTION_STREAMING_ENABLED=false
+TRANSCRIPTION_STREAMING_DEBUG=false
+SPEECHMATICS_REALTIME_URL=wss://eu.rt.speechmatics.com/v2/
+SPEECHMATICS_REALTIME_MODEL=enhanced
+SPEECHMATICS_REALTIME_LANGUAGE=pt
+```
+
+As keys Batch existentes são reutilizadas apenas no Python. Cada segredo distinto tem
+no máximo duas reservas, assumindo uma conta por segredo conforme a decisão do projeto.
+O limite real do fornecedor é por conta; `quota_exceeded`/close `4005` implica fallback,
+**não** descarte. Só `timelimit_exceeded`/close `4006` ou HTTP `402` confirma falta de
+créditos. Percentagens do orçamento e consultas de uso não são saldo de créditos.
+
+O bot envia a presença ordenada a `POST /v1/sessions/{id}/streaming`. A API reserva slots
+atomicamente no seu único event loop. `GET/POST /v1/guilds/{guild}/streaming` lê/grava o
+modo por servidor; o ambiente define apenas o default. Use uma única réplica e um único
+worker Uvicorn. Uma segunda chamada continua em gravação sem criar outro pool.
+
+`/v1/streaming/audio` é um WebSocket interno na mesma rede privada da API existente.
+A primeira mensagem JSON contém sessão, utilizador, filename WAV, timestamp absoluto
+e token da participação. A API espera `RecognitionStarted` antes de confirmar `ready`.
+Frames binários contêm sequência uint64 little endian e PCM S16LE mono a 48 kHz.
+O Go faz downmix em int32, copia o buffer Opus e enfileira até 100 chunks por epoch;
+fila cheia aborta esse transporte e mantém o WAV para Batch. Heartbeats, limites de
+mensagem e timeouts impedem crescimento ilimitado e operações de rede no loop de captura.
+
+Cada WAV é uma unidade e epoch independentes; a reserva sobrevive ao fecho por silêncio,
+rotação e novo SSRC. As fronteiras de promoção e modo fecham o WAV anterior antes de
+criar o seguinte. A API guarda finais idempotentes com `recording_id` e geração; parciais
+só aparecem no terminal se debug estiver ligado. `EndOfStream` inclui a sequência final;
+o commit exige `EndOfTranscript` e correspondência entre frames enviados e WAV fechado.
+
+Uma falha deixa a unidade em `fallback_pending`. A admissão Batch invalida a geração
+Realtime; o commit Batch substitui as mensagens dessa unidade e recalcula os chunks na
+mesma transação. Resumos finais e perfis aguardam unidades e jobs pendentes. `/recap`
+pode consultar finais provisórios; `/forget` pausa captura, invalida unidades, cancela
+polling remoto e elimina WAVs/sidecars antes de confirmar. Delete remoto é tentado com
+`force=True`; mesmo que falhe, resultados atrasados não podem recriar dados.
+
+O outbox de segurança é escrito antes de abrir Realtime. Ao reiniciar o bot, WAVs com
+header incompleto são reparados antes do replay. Ao reiniciar a API, unidades Realtime
+ficam em fallback; o worker recupera ficheiros estáveis há pelo menos 15 segundos.
+Unidades concluídas ou descartadas não são transcritas novamente por restart ou `/retry`.
+
+Todas as keys confirmadas sem créditos provocam descarte terminal em Postgres **antes**
+da limpeza. Workers interrompem polling e tentam cancelar jobs remotos; a limpeza de
+ficheiros confinada à pasta de gravações é idempotente e repetida após falha/restart.
+Um worker do bot recupera avisos de créditos pendentes, usando nonce por episódio e
+confirmação persistida para evitar repetição. Discord só deduplica nonces por alguns
+minutos; uma falha simultânea prolongada do bot e da confirmação após envio pode exigir
+reconciliação manual desse aviso. `/streaming mode:on` ou uma nova chamada reavalia as
+keys sem recuperar áudio descartado.
+
+`GET /v1/speechmatics/realtime-usage` reporta horas locais de PCM enviadas por key,
+separadas do reporte Batch existente. Reserva em silêncio não conta como áudio; um WAV
+recuperado por Batch pode consumir ambos os produtos. Logs normais não contêm texto
+transcrito nem credenciais. Os códigos seguem a
+[referência Realtime da Speechmatics](https://docs.speechmatics.com/api-ref/realtime-transcription-websocket).
+
+Verificação sem fornecedor pago nem Discord real:
+
+```bash
+# Definir TEST_DATABASE_URL apenas para um Postgres descartável.
+TEST_DATABASE_URL=postgresql://... PYTHONPATH=src:src/transcription-api python -m pytest -q src/transcription-api/tests
+(cd discord_bot && go test -race ./...)
+```
+
+Os testes usam um servidor WebSocket local e Postgres isolado por schema. O primeiro
+ensaio real deve usar uma chamada controlada, uma key e debug ligado; validar PT-PT,
+vagas e flush, depois várias keys. Desligar debug no fim. O ensaio real requer áudio e
+acesso à Speechmatics e não é substituído pelos testes simulados.

@@ -50,3 +50,22 @@ account usage. See configuration, recovery details and test commands in the
 - `src/data/`: Postgres migrations, persistence and guild context retrieval.
 - `docker-compose.yml`: local Postgres, transcription API and Discord bot.
 - `BrunoAPI/`: local API request examples.
+
+## Transcrição Realtime (opcional)
+
+Com `TRANSCRIPTION_PROVIDER=speechmatics` e keys configuradas, `/streaming mode:on`
+ativa Realtime na chamada atual e guarda a preferência do servidor em Postgres.
+`/streaming mode:off` volta a gravações Batch; `mode:status` mostra modo, vagas e fila.
+O comando exige **Gerir Servidor** e responde de forma efémera. O valor inicial
+`TRANSCRIPTION_STREAMING_ENABLED=false` aplica-se apenas a servidores sem preferência.
+
+Cada segredo de key distinto dá duas reservas; utilizadores humanos são admitidos por
+ordem de entrada e mantêm a reserva em silêncio. O excedente usa Batch até à promoção.
+Realtime usa `enhanced/pt`, independentemente dos defaults Batch `melia-1/multi`.
+O WAV temporário permanece até à confirmação durável; falhas recuperáveis usam Batch,
+substituindo apenas o texto provisório daquele WAV. Créditos esgotados em todas as keys
+suspendem a transcrição da chamada, eliminam áudio pendente e preservam texto confirmado.
+
+Executar **um único processo da API** para este pool de reservas. Streaming vem desligado
+por defeito; não é necessário mudar o comportamento de autojoin. Para detalhes de operação,
+recuperação, debug e testes, consultar [a documentação da API](src/transcription-api/README.md#realtime).

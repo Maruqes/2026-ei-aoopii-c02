@@ -39,6 +39,8 @@ type WAVWriter struct {
 }
 
 type userAudioRecording struct {
+	realtime         *realtimeAudioClient
+	streamToken      string
 	wav              *WAVWriter
 	path             string
 	startedAt        time.Time
@@ -313,7 +315,18 @@ func closeAndTranscribeRecording(recording *userAudioRecording, info voiceUserIn
 		recording.startedAt.UTC().Format(time.RFC3339Nano),
 	)
 
+	clearLive := func() {
+		if transcriptions != nil {
+			transcriptions.submissionMu.Lock()
+			delete(transcriptions.liveAudio, recording.path+".request.json")
+			transcriptions.submissionMu.Unlock()
+		}
+	}
 	if err := recording.wav.Close(); err != nil {
+		clearLive()
+		if recording.realtime != nil {
+			recording.realtime.close()
+		}
 		log.Printf("erro ao fechar WAV de user=%s: %v", user.DiscordID, err)
 		if recording.wav.dataSize == 0 {
 			_ = os.Remove(recording.path)
@@ -322,6 +335,11 @@ func closeAndTranscribeRecording(recording *userAudioRecording, info voiceUserIn
 	}
 
 	if recording.wav.dataSize == 0 {
+		clearLive()
+		if recording.realtime != nil {
+			recording.realtime.close()
+		}
+		_ = os.Remove(recording.path + ".request.json")
 		log.Printf("WAV sem áudio para user=%s file=%s; transcrição ignorada", user.DiscordID, recording.path)
 		return os.Remove(recording.path)
 	}
@@ -339,7 +357,12 @@ func closeAndTranscribeRecording(recording *userAudioRecording, info voiceUserIn
 		log.Printf("cliente de transcricao nil; WAV ignorado user=%s file=%s", user.DiscordID, recording.path)
 		return nil
 	}
+	if recording.realtime != nil {
+		recording.realtime.close()
+	}
 	transcriptions.QueueTranscription(TranscriptionRequest{
+		Realtime:           recording.realtime,
+		SafetyWAV:          recording.realtime != nil,
 		SessionID:          recording.sessionID,
 		AudioPath:          recording.path,
 		DiscordID:          user.DiscordID,
@@ -381,6 +404,15 @@ func ListenAndWriteOpusToWAV(
 	if len(stopSignals) > 0 {
 		stopSignal = stopSignals[0]
 	}
+	var streaming *streamingController
+	voiceMu.Lock()
+	for _, state := range voiceConnections {
+		if state.sessionID == sessionID && state.vc == vc {
+			streaming = state.streaming
+			break
+		}
+	}
+	voiceMu.Unlock()
 	idleTicker := time.NewTicker(2 * time.Second)
 	defer idleTicker.Stop()
 	for {
@@ -389,7 +421,7 @@ func ListenAndWriteOpusToWAV(
 			return closeUserRecordings(userRecordings, transcriptions)
 		case tick := <-idleTicker.C:
 			for id, recording := range userRecordings {
-				if !recording.lastPacketAt.IsZero() && tick.Sub(recording.lastPacketAt) >= recordingIdleTimeout() {
+				if !recording.lastPacketAt.IsZero() && tick.Sub(recording.lastPacketAt) >= recordingIdleTimeout() || recording.streamToken != streaming.grant(id).Token || streaming.suspended() {
 					delete(userRecordings, id)
 					if err := closeAndTranscribeRecording(recording, voiceUserInfo{}, transcriptions); err != nil {
 						log.Printf("Could not flush idle recording: %v", err)
@@ -405,6 +437,10 @@ func ListenAndWriteOpusToWAV(
 				log.Printf("evento recebido: finalizar todas as gravações ativas count=%d stop=%v", len(userRecordings), event.stopListening)
 				if err := closeUserRecordings(userRecordings, transcriptions); err != nil {
 					return err
+				}
+				if event.ack != nil {
+					event.ack <- nil
+					close(event.ack)
 				}
 				if event.stopListening {
 					return nil
@@ -456,7 +492,7 @@ func ListenAndWriteOpusToWAV(
 				}
 			}
 
-			if discordID == "" || discordID == vc.UserID || isUserCapturePaused(discordID) {
+			if discordID == "" || discordID == vc.UserID || isUserCapturePaused(discordID) || streaming.suspended() || !streaming.participantPresent(discordID) {
 				continue
 			}
 
@@ -480,7 +516,7 @@ func ListenAndWriteOpusToWAV(
 					continue
 				}
 			}
-			if shouldRotateRecording(recording, packetAt, packet.SSRC) || shouldRotateForRTPGap(plan) {
+			if shouldRotateRecording(recording, packetAt, packet.SSRC) || shouldRotateForRTPGap(plan) || (recording != nil && recording.streamToken != streaming.grant(discordID).Token) {
 				delete(userRecordings, discordID)
 				if err := closeAndTranscribeRecording(recording, voiceUserInfo{}, transcriptions); err != nil {
 					return err
@@ -543,6 +579,25 @@ func ListenAndWriteOpusToWAV(
 					user:      getRecordingUserInfo(discordID, lookupUserInfo),
 					channel:   getCurrentChannelName(currentChannelName, vc.ChannelID),
 					sessionID: sessionID,
+				}
+				if grant := streaming.grant(discordID); grant.Token != "" && transcriptions != nil {
+					request := TranscriptionRequest{SessionID: sessionID, AudioPath: outPath, DiscordID: discordID,
+						Username: recording.user.Username, DisplayName: recording.user.DisplayName,
+						ChannelName: recording.channel, RecordingStartedAt: packetAt, SafetyWAV: true}
+					// Persist before opening Realtime: a crash still leaves a recoverable WAV and owner.
+					if err := persistTranscription(request); err == nil {
+						_ = persistSessionFinish(sessionID, currentBotLanguage().apiValue())
+						transcriptions.submissionMu.Lock()
+						if transcriptions.liveAudio == nil {
+							transcriptions.liveAudio = map[string]bool{}
+						}
+						transcriptions.liveAudio[transcriptionOutboxPath(request)] = true
+						transcriptions.submissionMu.Unlock()
+						recording.streamToken = grant.Token
+						recording.realtime = newRealtimeAudioClient(transcriptions, request, grant)
+					} else {
+						log.Printf("Realtime outbox failed user=%s; using Batch", discordID)
+					}
 				}
 				userRecordings[discordID] = recording
 				log.Printf("a gravar user=%s para %s", discordID, outPath)
@@ -660,25 +715,17 @@ func (recording *userAudioRecording) writeRTPPacket(
 		return err
 	}
 
+	if recording.realtime != nil {
+		recording.realtime.silence(silenceFrames)
+		recording.realtime.enqueue(recoveredPCM)
+		recording.realtime.enqueue(pcm[:samples])
+	}
 	recording.ssrc = ssrc
 	recording.nextRTPSequence = sequence + 1
 	recording.nextRTPTimestamp = timestamp + uint32(frames)
 	recording.hasRTPSequence = true
 	recording.hasRTPTimestamp = true
 	return nil
-}
-
-func (recording *userAudioRecording) padToElapsed(endAt time.Time) error {
-	if recording == nil || recording.wav == nil || recording.startedAt.IsZero() || !endAt.After(recording.startedAt) {
-		return nil
-	}
-
-	elapsedFrames := endAt.Sub(recording.startedAt).Nanoseconds() * sampleRate / int64(time.Second)
-	missingFrames := elapsedFrames - recording.wav.FramesWritten()
-	if missingFrames <= 0 {
-		return nil
-	}
-	return recording.wav.WriteSilence(int(missingFrames))
 }
 
 func getRecordingUserInfo(discordID string, lookupUserInfo func(string) voiceUserInfo) voiceUserInfo {

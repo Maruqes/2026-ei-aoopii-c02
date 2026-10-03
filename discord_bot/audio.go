@@ -20,6 +20,7 @@ import (
 )
 
 type voiceConnectionState struct {
+	streaming           *streamingController
 	vc                  *discordgo.VoiceConnection
 	music               *MusicPlayer
 	ssrcUsers           *SSRCUserMap
@@ -76,7 +77,7 @@ func newVoiceConnectionState(
 	summaryChannelID string,
 	onMusicError ...func(MusicTrack, error),
 ) *voiceConnectionState {
-	return &voiceConnectionState{
+	state := &voiceConnectionState{
 		vc:                  vc,
 		music:               NewMusicPlayer(vc, onMusicError...),
 		ssrcUsers:           ssrcUsers,
@@ -89,6 +90,8 @@ func newVoiceConnectionState(
 		users:               make(map[string]voiceUserInfo),
 		channelName:         channelName,
 	}
+	state.streaming = newStreamingController(state)
+	return state
 }
 
 func setVoiceConnection(guildID string, state *voiceConnectionState) {
@@ -101,30 +104,6 @@ func getVoiceConnection(guildID string) *voiceConnectionState {
 	voiceMu.Lock()
 	defer voiceMu.Unlock()
 	return voiceConnections[guildID]
-}
-
-func getSSRCUserMap(guildID string) *SSRCUserMap {
-	current := getVoiceConnection(guildID)
-	if current == nil {
-		return nil
-	}
-	return current.ssrcUsers
-}
-
-func getSSRCByDiscordID(guildID string, discordID string) (uint32, bool) {
-	ssrcUsers := getSSRCUserMap(guildID)
-	if ssrcUsers == nil {
-		return 0, false
-	}
-	return ssrcUsers.SSRCByDiscordID(discordID)
-}
-
-func getDiscordIDBySSRC(guildID string, ssrc uint32) (string, bool) {
-	ssrcUsers := getSSRCUserMap(guildID)
-	if ssrcUsers == nil {
-		return "", false
-	}
-	return ssrcUsers.DiscordIDBySSRC(ssrc)
 }
 
 func clearVoiceConnection(guildID string, vc *discordgo.VoiceConnection) {
@@ -498,6 +477,7 @@ func receiveAudio(s *discordgo.Session, guildID string, state *voiceConnectionSt
 	registerRecordingState(state)
 	defer unregisterRecordingState(state)
 	defer clearVoiceConnection(guildID, state.vc)
+	go state.streaming.run()
 
 	err := ListenAndWriteOpusToWAV(
 		state.vc,
@@ -529,6 +509,11 @@ func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 				current.queueAllRecordingsFinish()
 				clearVoiceConnection(vs.GuildID, current.vc)
 			}
+		} else if current := getVoiceConnection(vs.GuildID); current != nil && current.streaming != nil && current.streaming.currentChannel() != vs.ChannelID {
+			current.queueCloseAllRecordings()
+			current.streaming.reset(voiceSnapshot(s, vs.GuildID, vs.ChannelID, vs.UserID), vs.ChannelID)
+			current.ssrcUsers.Reset()
+			current.setChannelName(resolveVoiceChannelName(s, vs.ChannelID))
 		}
 		return
 	}
@@ -538,6 +523,20 @@ func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 
 	guildID := vs.GuildID
 	current := getVoiceConnection(guildID)
+	if current == nil && isHumanVoiceMember(s, guildID, vs.UserID, vs.Member) {
+		observePendingVoiceArrival(vs)
+	}
+	// Record arrival before user lookup or any network work; mute/SSRC changes do not rejoin.
+	if current != nil && current.streaming != nil {
+		if vs.ChannelID == current.vc.ChannelID {
+			if isHumanVoiceMember(s, guildID, vs.UserID, vs.Member) {
+				current.streaming.join(vs.UserID)
+			}
+		} else {
+			current.streaming.leave(vs.UserID)
+			current.queueUserRecordingFinish(voiceUserInfo{DiscordID: vs.UserID})
+		}
+	}
 	userInfo := resolveVoiceUserInfo(s, guildID, vs.UserID, vs.Member)
 	if current != nil {
 		current.rememberUser(userInfo)
@@ -575,6 +574,7 @@ func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 		} else {
 			current.ssrcUsers.Reset()
 			current.setChannelName(resolveVoiceChannelName(s, channelID))
+			current.streaming.reset(voiceSnapshot(s, guildID, channelID, current.vc.UserID), channelID)
 			current.startLeaveTimer(guildID, botLeaveDuration())
 			log.Printf("bot movido para canal %s no servidor %s", channelID, guildID)
 		}
@@ -588,6 +588,9 @@ func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 		return
 	}
 	if existing := getVoiceConnection(guildID); existing != nil {
+		if existing.vc.ChannelID == channelID && isHumanVoiceMember(s, guildID, vs.UserID, vs.Member) {
+			existing.streaming.join(vs.UserID)
+		}
 		return
 	}
 
@@ -619,6 +622,7 @@ func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 		}
 	})
 	state.rememberUser(userInfo)
+	initializeVoiceArrivalOrder(state.streaming, guildID, channelID, voiceSnapshot(s, guildID, channelID, vc.UserID))
 
 	vc.AddHandler(func(vc *discordgo.VoiceConnection, vs *discordgo.VoiceSpeakingUpdate) {
 		if vs == nil || vs.UserID == "" || vs.SSRC == 0 {

@@ -75,24 +75,25 @@ func textForLanguage(lang botLanguage, pt string, en string) string {
 }
 
 var commandNames = map[string]map[botLanguage]string{
-	"digest":   {botLanguagePT: "digest", botLanguageEN: "digest"},
-	"retry":    {botLanguagePT: "retry", botLanguageEN: "retry"},
-	"ping":     {botLanguagePT: "ping", botLanguageEN: "ping"},
-	"start":    {botLanguagePT: "start", botLanguageEN: "start"},
-	"stop":     {botLanguagePT: "stop", botLanguageEN: "stop"},
-	"profile":  {botLanguagePT: "profile", botLanguageEN: "profile"},
-	"prompt":   {botLanguagePT: "prompt", botLanguageEN: "prompt"},
-	"sync":     {botLanguagePT: "sync", botLanguageEN: "sync"},
-	"models":   {botLanguagePT: "models", botLanguageEN: "models"},
-	"effort":   {botLanguagePT: "effort", botLanguageEN: "effort"},
-	"health":   {botLanguagePT: "health", botLanguageEN: "health"},
-	"keys":     {botLanguagePT: "keys", botLanguageEN: "keys"},
-	"forget":   {botLanguagePT: "forget", botLanguageEN: "forget"},
-	"timeout":  {botLanguagePT: "timeout", botLanguageEN: "timeout"},
-	"recap":    {botLanguagePT: "recap", botLanguageEN: "recap"},
-	"oracle":   {botLanguagePT: "oracle", botLanguageEN: "oracle"},
-	"guess":    {botLanguagePT: "guess", botLanguageEN: "guess"},
-	"language": {botLanguagePT: "language", botLanguageEN: "language"},
+	"streaming": {botLanguagePT: "streaming", botLanguageEN: "streaming"},
+	"digest":    {botLanguagePT: "digest", botLanguageEN: "digest"},
+	"retry":     {botLanguagePT: "retry", botLanguageEN: "retry"},
+	"ping":      {botLanguagePT: "ping", botLanguageEN: "ping"},
+	"start":     {botLanguagePT: "start", botLanguageEN: "start"},
+	"stop":      {botLanguagePT: "stop", botLanguageEN: "stop"},
+	"profile":   {botLanguagePT: "profile", botLanguageEN: "profile"},
+	"prompt":    {botLanguagePT: "prompt", botLanguageEN: "prompt"},
+	"sync":      {botLanguagePT: "sync", botLanguageEN: "sync"},
+	"models":    {botLanguagePT: "models", botLanguageEN: "models"},
+	"effort":    {botLanguagePT: "effort", botLanguageEN: "effort"},
+	"health":    {botLanguagePT: "health", botLanguageEN: "health"},
+	"keys":      {botLanguagePT: "keys", botLanguageEN: "keys"},
+	"forget":    {botLanguagePT: "forget", botLanguageEN: "forget"},
+	"timeout":   {botLanguagePT: "timeout", botLanguageEN: "timeout"},
+	"recap":     {botLanguagePT: "recap", botLanguageEN: "recap"},
+	"oracle":    {botLanguagePT: "oracle", botLanguageEN: "oracle"},
+	"guess":     {botLanguagePT: "guess", botLanguageEN: "guess"},
+	"language":  {botLanguagePT: "language", botLanguageEN: "language"},
 }
 
 var optionNames = map[string]map[botLanguage]string{
@@ -151,7 +152,11 @@ func buildApplicationCommands(lang botLanguage) []*discordgo.ApplicationCommand 
 		}
 	}
 
+	manage := int64(discordgo.PermissionManageServer)
 	commands := []*discordgo.ApplicationCommand{
+		{Name: "streaming", Description: "Set Realtime transcription mode or inspect the FIFO queue.", DefaultMemberPermissions: &manage,
+			Options: []*discordgo.ApplicationCommandOption{{Name: "mode", Type: discordgo.ApplicationCommandOptionString, Description: "on, off or status", Required: true,
+				Choices: []*discordgo.ApplicationCommandOptionChoice{{Name: "on", Value: "on"}, {Name: "off", Value: "off"}, {Name: "status", Value: "status"}}}}},
 		{Name: "play", Description: textForLanguage(lang, "Toca o áudio de um vídeo do YouTube na tua call.", "Play a YouTube video's audio in your voice channel."), Options: []*discordgo.ApplicationCommandOption{
 			{Type: discordgo.ApplicationCommandOptionString, Name: "url", Description: textForLanguage(lang, "Link do vídeo do YouTube (até 1 hora).", "YouTube video link (up to 1 hour)."), Required: true},
 		}},

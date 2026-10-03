@@ -11,7 +11,7 @@ from data.repository import (
 )
 
 from .docs_client import LocalMarkdownProfileClient
-from .llm import GeneratedProfile, LLMClient, LoreEvent
+from .llm import LLMClient
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -157,21 +157,3 @@ def normalize_timestamp_value(value) -> datetime:
     if isinstance(value, datetime):
         return normalize_timestamp(value)
     return normalize_timestamp(datetime.fromisoformat(str(value)))
-
-
-def blank_profile() -> GeneratedProfile:
-    return GeneratedProfile(
-        anthropologist_title="",
-        summary="",
-        interests="",
-        communication_style="",
-        persona_notes="",
-        recent_updates="",
-        lore_event=LoreEvent(
-            title="",
-            new_observations=[],
-            reinforced_patterns=[],
-            changed_interpretations=[],
-            weakened_or_retired_patterns=[],
-        ),
-    )

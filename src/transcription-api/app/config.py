@@ -101,6 +101,11 @@ class Settings:
     speechmatics_usage_limit_hours: float = 0.0
     speechmatics_usage_since: str = ""
     speechmatics_api_keys: tuple[tuple[str, str], ...] = ()
+    transcription_streaming_enabled: bool = False
+    transcription_streaming_debug: bool = False
+    speechmatics_realtime_url: str = "wss://eu.rt.speechmatics.com/v2/"
+    speechmatics_realtime_model: str = "enhanced"
+    speechmatics_realtime_language: str = "pt"
     upload_tmp_dir: Path = Path(".tmp/uploads")
     recordings_dir: Path = Path("discord_bot/recordings")
     keep_uploads: bool = False
@@ -196,6 +201,11 @@ class Settings:
             ),
             speechmatics_usage_since=env_str("SPEECHMATICS_USAGE_SINCE"),
             speechmatics_api_keys=env_speechmatics_api_keys(),
+            transcription_streaming_enabled=env_bool("TRANSCRIPTION_STREAMING_ENABLED"),
+            transcription_streaming_debug=env_bool("TRANSCRIPTION_STREAMING_DEBUG"),
+            speechmatics_realtime_url=env_str("SPEECHMATICS_REALTIME_URL", "wss://eu.rt.speechmatics.com/v2/"),
+            speechmatics_realtime_model=env_str("SPEECHMATICS_REALTIME_MODEL", "enhanced"),
+            speechmatics_realtime_language=env_str("SPEECHMATICS_REALTIME_LANGUAGE", "pt"),
             upload_tmp_dir=Path(os.getenv("UPLOAD_TMP_DIR", ".tmp/uploads")),
             recordings_dir=Path(os.getenv("RECORDINGS_DIR", "discord_bot/recordings")),
             keep_uploads=env_bool("KEEP_UPLOADS", False),

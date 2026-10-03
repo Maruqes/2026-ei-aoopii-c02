@@ -25,6 +25,7 @@ from data.repository import (  # noqa: E402
     UserProfile,
     VoiceSession,
     format_context_message_row,
+    normalize_timestamp,
 )
 
 from .agent import SessionAgent
@@ -77,13 +78,14 @@ from .schemas import (
     UserProfileResponse,
     VoiceSessionResponse,
 )
+from .speechmatics_errors import NoCredits, key_health
 from .speechmatics_usage import (
     SpeechmaticsAPIKey,
     SpeechmaticsKeyUsage,
     fetch_speechmatics_key_usages,
-    format_speechmatics_key_usage,
     speechmatics_key_usage_score,
 )
+from .streaming_routes import install_streaming_routes
 from .transcriber import (
     SpeechmaticsTranscriber,
     Transcriber,
@@ -127,6 +129,7 @@ def create_app() -> FastAPI:
         settings = get_settings()
         apply_migrations(settings.database_url)
         repository = DataRepository(settings.database_url)
+        repository.recover_realtime_units()
         workers = RecordingWorkers(
             repository=repository,
             settings=settings,
@@ -311,7 +314,7 @@ def create_app() -> FastAPI:
             receipt = repository.recording_receipt(
                 recording_path.name, discord_id.strip(), session_id
             )
-            if receipt is None or receipt["status"] != "completed":
+            if receipt is None or receipt["status"] not in {"completed", "discarded_no_credits"}:
                 validate_recording_file(recording_path, settings)
             repository.start_recording(
                 session_id=session_id,
@@ -522,6 +525,7 @@ def create_app() -> FastAPI:
     def create_session(
         request: CreateSessionRequest,
         repository: DataRepository = Depends(get_repository),
+        settings: Settings = Depends(get_settings),
     ) -> VoiceSessionResponse:
         validate_metadata(
             request.guild_id, request.voice_channel_id, request.channel_name
@@ -533,6 +537,7 @@ def create_app() -> FastAPI:
             summary_channel_id=request.summary_channel_id,
             started_at=request.started_at or datetime.now(timezone.utc),
         )
+        key_health.reset(configured_speechmatics_api_keys(settings))
         return voice_session_response(session)
 
     @service.post(
@@ -586,12 +591,21 @@ def create_app() -> FastAPI:
         settings: Settings = Depends(get_settings),
     ) -> ForgetUserResponse:
         try:
-            result = repository.delete_user_by_discord_id(
-                discord_id,
-                remove_recording=lambda filename: remove_recording_files(
-                    settings.recordings_dir, filename, include_request=True
-                ),
-            )
+            repository.invalidate_user_recordings(discord_id)
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    result = repository.delete_user_by_discord_id(
+                        discord_id,
+                        remove_recording=lambda filename: remove_recording_files(
+                            settings.recordings_dir, filename, include_request=True
+                        ),
+                    )
+                    break
+                except ValueError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.1)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         if result is None:
@@ -773,6 +787,9 @@ def create_app() -> FastAPI:
             session_id=session.id, status="finished", summary=None, agent_error=None
         )
 
+    install_streaming_routes(service, get_settings=get_settings, get_repository=get_repository,
+        configured_keys=configured_speechmatics_api_keys,
+        validate_filename=validate_recording_filename, resolve_path=resolve_recording_path)
     return service
 
 
@@ -829,37 +846,6 @@ def get_transcriber(settings: Settings = Depends(get_settings)) -> Transcriber:
     )
 
 
-def log_speechmatics_usage(settings: Settings) -> None:
-    if settings.transcription_provider != "speechmatics":
-        return
-    api_keys = configured_speechmatics_api_keys(settings)
-    if not api_keys:
-        logger.warning("speechmatics usage skipped: no SPEECHMATICS_API_KEY configured")
-        return
-
-    try:
-        rows = fetch_speechmatics_key_usages(
-            api_keys=api_keys,
-            batch_url=settings.speechmatics_batch_url,
-            limit_hours=settings.speechmatics_usage_limit_hours,
-        )
-    except Exception as exc:
-        logger.warning("speechmatics usage unavailable: %s", exc)
-        return
-
-    for row in rows:
-        logger.info("speechmatics usage %s", format_speechmatics_key_usage(row))
-
-    available_rows = [row for row in rows if row.available]
-    if not available_rows:
-        logger.warning(
-            "speechmatics usage selected_key unavailable: no key usage available"
-        )
-        return
-    selected = min(available_rows, key=speechmatics_key_usage_score)
-    logger.info("speechmatics usage selected_key=%s", selected.key.name)
-
-
 def configured_speechmatics_api_keys(
     settings: Settings,
 ) -> tuple[SpeechmaticsAPIKey, ...]:
@@ -874,7 +860,7 @@ def configured_speechmatics_api_keys(
                 name="SPEECHMATICS_API_KEY", value=settings.speechmatics_api_key.strip()
             )
         )
-    return tuple({key.value: key for key in reversed(keys)}.values())
+    return tuple({key.value: key for key in reversed(keys)}.values())[::-1]
 
 
 def get_speechmatics_key_usages(
@@ -1126,12 +1112,12 @@ def process_recording_file(
                 )
 
             def save_job(job_id: str, key: str) -> None:
+                repository.save_provider_job(recording_id, job_id, key)
                 temporary = sidecar.with_suffix(".tmp")
                 temporary.write_text(
                     json.dumps({"job_id": job_id, "key_name": key}), encoding="utf-8"
                 )
                 temporary.replace(sidecar)
-                repository.save_provider_job(recording_id, job_id, key)
 
             if provider_job_id:
                 repository.save_provider_job(
@@ -1142,6 +1128,7 @@ def process_recording_file(
                 job_id=provider_job_id,
                 key_name=provider_key_name,
                 save_job=save_job,
+                is_active=lambda: repository.recording_is_live(recording_id),
             )
         else:
             transcription_result = transcriber.transcribe(recording_path)
@@ -1196,6 +1183,13 @@ def process_recording_file(
                 recording_path.name,
                 held_recording_id=recording_id if recording_lock_held else None,
             )
+    except NoCredits:
+        if session_id is not None:
+            repository.discard_session_audio(session_id)
+            RecordingCleanup(repository=repository, settings=settings).sweep()
+        else:
+            repository.mark_recording_failed(recording_id, "Speechmatics credits exhausted")
+        logger.warning("Speechmatics exhausted session=%s; pending audio discarded", session_id)
     except Exception as exc:
         error_msg = (
             type(exc).__name__
@@ -1207,7 +1201,7 @@ def process_recording_file(
             logger.exception(
                 "Could not persist recording failure; durable worker will recover it"
             )
-        logger.exception(
+        logger.warning(
             "job transcricao erro file=%s discord_id=%s elapsed_ms=%d",
             recording_path,
             discord_id,
@@ -1221,7 +1215,7 @@ def process_recording_file(
 def messages_from_segments(
     recording_started_at: datetime, result: TranscriptionResult
 ) -> list[MessageInsert]:
-    started_at = normalize_datetime(recording_started_at)
+    started_at = normalize_timestamp(recording_started_at)
     return [
         MessageInsert(
             content=segment.text,
@@ -1230,12 +1224,6 @@ def messages_from_segments(
         for segment in result.segments
         if segment.text.strip()
     ]
-
-
-def normalize_datetime(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
 
 
 def maybe_schedule_session_agent(

@@ -49,7 +49,11 @@ func handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	data := i.ApplicationCommandData()
 	name := strings.ToLower(data.Name)
 	if needsDeferredResponse(i) {
-		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseDeferredChannelMessageWithSource}); err != nil {
+		flags := discordgo.MessageFlags(0)
+		if name == "streaming" {
+			flags = discordgo.MessageFlagsEphemeral
+		}
+		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseDeferredChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: flags}}); err != nil {
 			return
 		}
 	}
@@ -60,6 +64,8 @@ func handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	switch {
 	case isMusicCommand(name):
 		musicHook(s, i)
+	case commandMatches(name, "streaming"):
+		streamingHook(s, i)
 	case commandMatches(name, "ping"):
 		pingHook(s, i)
 	case commandMatches(name, "start"):
@@ -1242,6 +1248,9 @@ func main() {
 		log.Fatalf("erro ao ligar bot: %v", err)
 	}
 	defer dg.Close()
+	noticeContext, stopNotices := context.WithCancel(context.Background())
+	defer stopNotices()
+	go runCreditNotices(noticeContext, dg, botAPIClient)
 
 	fmt.Printf("%s %s\n", botText("Bot online. Lingua:", "Bot online. Language:"), currentBotLanguage().label())
 	stop := make(chan os.Signal, 1)
@@ -1264,7 +1273,7 @@ func needsDeferredResponse(i *discordgo.InteractionCreate) bool {
 		return false
 	}
 	switch i.ApplicationCommandData().Name {
-	case "start", "stop", "timeout", "language", "profile", "models", "effort", "health", "keys", "forget", "recap", "guess", "digest", "retry", "play", "pause", "skip", "queue", "musicstop":
+	case "streaming", "start", "stop", "timeout", "language", "profile", "models", "effort", "health", "keys", "forget", "recap", "guess", "digest", "retry", "play", "pause", "skip", "queue", "musicstop":
 		return true
 	}
 	return false
@@ -1319,7 +1328,7 @@ func canManageServer(i *discordgo.InteractionCreate) bool {
 }
 func requiresManageServer(command string) bool {
 	switch command {
-	case "start", "stop", "sync", "timeout", "language", "retry", "effort":
+	case "start", "stop", "sync", "timeout", "language", "retry", "effort", "streaming":
 		return true
 	}
 	return false

@@ -30,10 +30,13 @@ type TranscriptionClient struct {
 	submissionMu    sync.Mutex
 	submissions     map[int64]*sessionSubmissions
 	inflight        map[string]bool
+	liveAudio       map[string]bool
 	userSubmissions map[string]*sessionSubmissions
 }
 
 type TranscriptionRequest struct {
+	Realtime           *realtimeAudioClient `json:"-"`
+	SafetyWAV          bool                 `json:"SafetyWAV,omitempty"`
 	SessionID          int64
 	AudioPath          string
 	DiscordID          string
@@ -279,6 +282,7 @@ func (c *TranscriptionClient) QueueTranscription(request TranscriptionRequest) {
 		return
 	}
 	c.inflight[path] = true
+	delete(c.liveAudio, path)
 	group := c.submissionGroupLocked(request.SessionID)
 	group.pending++
 	group.notify()
@@ -329,6 +333,9 @@ func (c *TranscriptionClient) SubmitTranscription(ctx context.Context, request T
 	}
 
 	request = request.withFallbacks()
+	if request.Realtime != nil {
+		request.Realtime.wait(ctx)
+	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	started := time.Now()
@@ -893,6 +900,12 @@ func (c *TranscriptionClient) ReplayTranscriptions() {
 			log.Printf("Invalid outbox file=%s", path)
 			continue
 		}
+		if request.SafetyWAV {
+			if err := repairInterruptedWAV(request.AudioPath); err != nil && !os.IsNotExist(err) {
+				log.Printf("Could not repair safety WAV file=%s", request.AudioPath)
+				continue
+			}
+		}
 		c.QueueTranscription(request)
 		if request.SessionID > 0 {
 			if _, exists := sessions[request.SessionID]; !exists {
@@ -942,6 +955,12 @@ func (c *TranscriptionClient) RetrySession(ctx context.Context, guildID string, 
 		}
 		var request TranscriptionRequest
 		if err := json.Unmarshal(payload, &request); err == nil && request.SessionID == sessionID {
+			c.submissionMu.Lock()
+			live := c.liveAudio[transcriptionOutboxPath(request)]
+			c.submissionMu.Unlock()
+			if live {
+				continue
+			}
 			c.QueueTranscription(request)
 		}
 	}

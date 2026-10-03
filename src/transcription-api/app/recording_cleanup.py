@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import struct
 import threading
+import time
 from contextlib import ExitStack
 from pathlib import Path
 
@@ -71,7 +73,7 @@ class RecordingCleanup:
             rows = snapshot or self.repository.get_recordings_for_cleanup(
                 [filename]
             ).get(filename, [])
-            if not rows or any(row["status"] != "completed" for row in rows):
+            if not rows or any(row["status"] not in {"completed", "discarded_no_credits"} for row in rows):
                 return False
             with ExitStack() as stack:
                 for row in sorted(rows, key=lambda value: value["id"]):
@@ -88,9 +90,9 @@ class RecordingCleanup:
                     row["id"] for row in rows
                 }:
                     return False
-                if any(row["status"] != "completed" for row in current):
+                if any(row["status"] not in {"completed", "discarded_no_credits"} for row in current):
                     return False
-                remove_recording_files(self.directory, filename)
+                remove_recording_files(self.directory, filename, include_request=any(row["status"] == "discarded_no_credits" for row in current))
                 return True
         except Exception:
             # Transcription is already committed. Storage errors must never turn it into a failed job.
@@ -100,6 +102,13 @@ class RecordingCleanup:
             return False
 
     def sweep(self) -> None:
+        if hasattr(self.repository, "discarded_cleanup_jobs"):
+            for recording_id, filename in self.repository.discarded_cleanup_jobs():
+                try:
+                    remove_recording_files(self.directory, filename, include_request=True)
+                    self.repository.acknowledge_discard_cleanup(recording_id)
+                except Exception:
+                    logger.warning("Discard cleanup pending unit=%s", recording_id)
         if not self.directory.exists():
             return
         candidates = set()
@@ -123,3 +132,30 @@ class RecordingCleanup:
                 if self.stop.is_set():
                     return
                 self.cleanup_completed_file(filename, rows)
+
+
+def recover_realtime_wavs(repository, directory: Path) -> None:
+    """A stale fallback WAV has no live capture writer; repair crash-truncated headers."""
+    for recording_id, filename in repository.recoverable_realtime_units():
+        try:
+            path = recording_paths(directory, filename)[0]
+            if time.time() - path.stat().st_mtime < 15:
+                continue
+            with path.open("r+b") as wav:
+                header = bytearray(wav.read(44))
+                size = path.stat().st_size - 44
+                if (len(header) != 44 or header[:4] != b"RIFF" or header[8:12] != b"WAVE"
+                        or header[36:40] != b"data" or size < 0 or size % 4 or size > 2**32 - 37):
+                    raise ValueError("Invalid safety WAV")
+                struct.pack_into("<I", header, 4, size + 36)
+                struct.pack_into("<I", header, 40, size)
+                wav.seek(0)
+                wav.write(header)
+                wav.flush()
+            repository.admit_realtime_recovery(recording_id)
+            logger.info("Realtime WAV recovered unit=%s", recording_id)
+        except FileNotFoundError:
+            # Retain the unit for operator inspection/retry; never fake completion.
+            pass
+        except Exception:
+            logger.warning("Realtime recovery deferred unit=%s", recording_id)

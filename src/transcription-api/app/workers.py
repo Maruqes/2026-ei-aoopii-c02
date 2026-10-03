@@ -5,6 +5,8 @@ import threading
 from datetime import datetime
 from typing import Callable
 
+from .recording_cleanup import recover_realtime_wavs
+
 logger = logging.getLogger("uvicorn.error")
 
 
@@ -44,6 +46,8 @@ class RecordingWorkers:
         while not self.stop.is_set():
             worked = False
             try:
+                if hasattr(self.repository, "recoverable_realtime_units"):
+                    recover_realtime_wavs(self.repository, self.settings.recordings_dir)
                 for job in self.repository.get_recording_jobs():
                     if self.stop.is_set():
                         return

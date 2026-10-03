@@ -8,7 +8,6 @@ from pathlib import Path
 from .config import Settings
 
 _lock = threading.RLock()
-_selected_models: dict[str, str] = {}
 REASONING_EFFORTS = (
     "default",
     "none",
@@ -58,26 +57,22 @@ def current_model(settings: Settings) -> str:
         stored_models = _load_selected_models(settings.llm_model_selection_file)
         return stored_models.get(
             settings.llm_provider,
-            _selected_models.get(settings.llm_provider, configured_model(settings)),
+            configured_model(settings),
         )
 
 
-def select_model(provider: str, model: str, storage_path: Path | None = None) -> None:
+def select_model(provider: str, model: str, storage_path: Path) -> None:
     value = model.strip()
     if not value:
         raise ValueError("Model is required")
     with _lock:
-        if storage_path is not None:
-            stored_models = _load_selected_models(storage_path)
-            stored_models[provider] = value
-            _save_selected_models(storage_path, stored_models)
-        else:
-            _selected_models[provider] = value
+        stored_models = _load_selected_models(storage_path)
+        stored_models[provider] = value
+        _save_selected_models(storage_path, stored_models)
 
 
 def clear_selected_model(provider: str, storage_path: Path) -> None:
     with _lock:
-        _selected_models.pop(provider, None)
         stored = _load_selected_models(storage_path)
         stored.pop(provider, None)
         _save_selected_models(storage_path, stored)

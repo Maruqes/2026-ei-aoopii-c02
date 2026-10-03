@@ -5,6 +5,7 @@ psycopg2-binary
 openai-whisper
 webrtcvad-wheels
 speechmatics-batch
+websockets>=14,<17
 openai
 PyJWT[crypto]>=2.10,<3
 httpx
