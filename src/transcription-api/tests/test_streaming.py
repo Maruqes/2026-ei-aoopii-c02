@@ -550,7 +550,7 @@ def test_pool_retries_another_key_and_enforces_concurrent_atomic_admission(monke
         realtime.open_provider(Settings(database_url="unused"), pool, reservation)
     )
     assert len(attempts) == 2
-    assert reservation.key == keys(2)[1]
+    assert (reservation.key.name, reservation.key.value) == (keys(2)[1].name, keys(2)[1].value)
     for key in pool.keys:
         assert pool.occupancy(key) <= 2
     with pytest.raises(Exception, match="unreserved"):

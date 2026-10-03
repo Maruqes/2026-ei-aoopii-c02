@@ -1059,7 +1059,7 @@ class DataRepository:
             cur = conn.cursor()
             cur.execute(
                 "SELECT id, session_id, recording_filename, metadata, provider_job_id, provider_key_name "
-                "FROM voice_recordings WHERE status IN ('pending', 'transcribing') AND metadata IS NOT NULL ORDER BY id LIMIT 100"
+                "FROM voice_recordings WHERE status IN ('pending', 'transcribing') AND metadata IS NOT NULL AND (retry_after IS NULL OR retry_after <= NOW()) ORDER BY id LIMIT 100"
             )
             return [
                 dict(
@@ -1083,7 +1083,7 @@ class DataRepository:
             cur = conn.cursor()
             cur.execute(
                 "UPDATE voice_recordings SET status = 'transcribing', updated_at = NOW() "
-                "WHERE id = %s AND status IN ('pending', 'transcribing') RETURNING id",
+                "WHERE id = %s AND status IN ('pending', 'transcribing') AND (retry_after IS NULL OR retry_after <= NOW()) RETURNING id",
                 (recording_id,),
             )
             claimed = cur.fetchone() is not None
@@ -1125,7 +1125,7 @@ class DataRepository:
             cur = conn.cursor()
             cur.execute(
                 "SELECT provider_key_name, SUM(duration_seconds) / 3600.0 FROM voice_recordings "
-                "WHERE status = 'completed' AND provider_key_name IS NOT NULL "
+                "WHERE status = 'completed' AND provider_key_name IS NOT NULL AND COALESCE(metadata->>'transcription_provider', 'speechmatics') = 'speechmatics' "
                 "AND provider_completed_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' "
                 "AND provider_completed_at < (date_trunc('day', NOW() AT TIME ZONE 'UTC') + INTERVAL '1 day') AT TIME ZONE 'UTC' "
                 "GROUP BY provider_key_name"
@@ -1510,6 +1510,83 @@ class DataRepository:
                 raise
 
 
+    def session_has_remote_jobs(self, session_id):
+        with closing(connect(self.database_url)) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT EXISTS(SELECT 1 FROM voice_recordings WHERE session_id = %s "
+                            "AND status IN ('pending', 'transcribing', 'fallback_pending') AND (provider_job_id IS NOT NULL OR "
+                            "EXISTS(SELECT 1 FROM voice_transcription_attempts a WHERE a.recording_id = voice_recordings.id "
+                            "AND a.product = 'batch' AND a.status IN ('active', 'completed'))))", (session_id,))
+                return cur.fetchone()[0]
+
+    def transcription_order(self, guild_id: str) -> list[str] | None:
+        with closing(connect(self.database_url)) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT provider_order FROM guild_transcription_settings WHERE guild_id = %s", (guild_id,))
+                row = cur.fetchone()
+                return row[0] if row else None
+
+    def set_transcription_order(self, guild_id: str, order) -> None:
+        with closing(connect(self.database_url)) as conn:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO guild_transcription_settings(guild_id, provider_order) VALUES (%s, %s) "
+                            "ON CONFLICT(guild_id) DO UPDATE SET provider_order = EXCLUDED.provider_order, updated_at = NOW()",
+                            (guild_id, list(order)))
+            conn.commit()
+
+    def existing_transcription_attempt(self, recording_id, provider, remote_id):
+        with closing(connect(self.database_url)) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, model, quota_group FROM voice_transcription_attempts WHERE recording_id = %s "
+                            "AND provider = %s AND product = 'batch' AND remote_id = %s ORDER BY id DESC LIMIT 1",
+                            (recording_id, provider, remote_id))
+                row = cur.fetchone()
+                return dict(zip(('id', 'model', 'group'), row)) if row else None
+
+    def start_transcription_attempt(self, recording_id, product, provider, key_name, group, model):
+        with closing(connect(self.database_url)) as conn:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO voice_transcription_attempts(recording_id, generation, product, provider, key_name, quota_group, model) "
+                            "SELECT id, generation, %s, %s, %s, %s, %s FROM voice_recordings WHERE id = %s "
+                            "AND status IN ('streaming', 'pending', 'transcribing') RETURNING id",
+                            (product, provider, key_name, group, model, recording_id))
+                row = cur.fetchone()
+            conn.commit()
+        if row is None:
+            raise ValueError("Recording cancelled")
+        return row[0]
+
+    def checkpoint_transcription_attempt(self, attempt_id, seconds, status='active', error=None, remote_id=None):
+        with closing(connect(self.database_url)) as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE voice_transcription_attempts SET sent_seconds = GREATEST(sent_seconds, %s), "
+                            "status = %s, error = %s, remote_id = COALESCE(%s, remote_id), updated_at = NOW() WHERE id = %s",
+                            (seconds, status, error, remote_id, attempt_id))
+            conn.commit()
+
+    def set_recording_provider(self, recording_id, provider, model, group, reason=None):
+        with closing(connect(self.database_url)) as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE voice_recordings SET result_provider = %s, result_model = %s, provider_group = %s, "
+                            "recovery_reason = COALESCE(%s, recovery_reason) WHERE id = %s AND status IN ('pending', 'transcribing', 'streaming')",
+                            (provider, model, group, reason, recording_id))
+            conn.commit()
+
+    def defer_recording(self, recording_id, reason):
+        with closing(connect(self.database_url)) as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE voice_recordings SET status = 'pending', error = %s, retry_after = NOW() + INTERVAL '15 seconds' "
+                            "WHERE id = %s AND status IN ('pending', 'transcribing')", (reason, recording_id))
+            conn.commit()
+
+    def local_provider_usage(self, since):
+        with closing(connect(self.database_url)) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT provider, product, key_name, quota_group, model, SUM(sent_seconds) / 3600 "
+                            "FROM voice_transcription_attempts WHERE started_at >= %s::date AT TIME ZONE 'UTC' "
+                            "GROUP BY provider, product, key_name, quota_group, model", (since,))
+                return [dict(zip(('provider', 'product', 'key_name', 'group', 'model', 'used_hours'), row)) for row in cur.fetchall()]
+
     def streaming_preference(self, guild_id: str, default: bool) -> bool:
         with closing(connect(self.database_url)) as conn:
             with conn.cursor() as cur:
@@ -1721,6 +1798,7 @@ class DataRepository:
                 cur.execute(
                     "UPDATE voice_recordings SET status = 'fallback_pending', generation = generation + 1 WHERE status = 'streaming'"
                 )
+                cur.execute("UPDATE voice_transcription_attempts SET status = 'interrupted', error = 'restart' WHERE status = 'active'")
             conn.commit()
 
     def discard_session_audio(self, session_id: int) -> None:
@@ -1811,7 +1889,7 @@ class DataRepository:
         with closing(connect(self.database_url)) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT realtime_key_name, SUM(realtime_seconds) / 3600 FROM voice_recordings WHERE realtime_key_name IS NOT NULL GROUP BY realtime_key_name"
+                    "SELECT realtime_key_name, SUM(realtime_seconds) / 3600 FROM voice_recordings WHERE realtime_key_name IS NOT NULL AND COALESCE(metadata->>'transcription_provider', 'speechmatics') = 'speechmatics' GROUP BY realtime_key_name"
                 )
                 return dict(cur.fetchall())
 
@@ -1821,7 +1899,7 @@ class DataRepository:
                 cur.execute(
                     "SELECT realtime_key_name, COALESCE(metadata->>'speechmatics_realtime_model', 'unknown'), "
                     "SUM(realtime_seconds) / 3600 FROM voice_recordings "
-                    "WHERE realtime_key_name IS NOT NULL AND created_at >= %s::date AT TIME ZONE 'UTC' "
+                    "WHERE realtime_key_name IS NOT NULL AND COALESCE(metadata->>'transcription_provider', 'speechmatics') = 'speechmatics' AND created_at >= %s::date AT TIME ZONE 'UTC' "
                     "AND created_at < (date_trunc('day', NOW() AT TIME ZONE 'UTC') + INTERVAL '1 day') AT TIME ZONE 'UTC' "
                     "GROUP BY realtime_key_name, metadata->>'speechmatics_realtime_model'",
                     (since,),

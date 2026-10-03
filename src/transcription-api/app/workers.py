@@ -32,7 +32,7 @@ class RecordingWorkers:
         # A single local model is shared and must not be loaded/transcribed concurrently.
         count = (
             1
-            if self.settings.transcription_provider == "whisper"
+            if self.settings.transcription_provider == "whisper" and not self.settings.transcription_provider_order
             else self.settings.transcription_workers
         )
         for index in range(count):

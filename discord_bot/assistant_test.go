@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -28,6 +29,7 @@ func newAssistantHarness(t *testing.T) *assistantHarness {
 	state := &voiceConnectionState{sessionID: 1, summaryChannelID: "chat"}
 	state.streaming = newStreamingController(state)
 	h.a = newAssistantController(nil, state)
+	h.a.voiceEnabled = false
 	h.a.send = func(channel, text string) error {
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -814,5 +816,90 @@ func TestAssistantConfigurableSilence(t *testing.T) {
 			h.answers <- "Resposta."
 			h.wait(t, h.waiting)
 		})
+	}
+}
+
+func TestAssistantSpeaksAcknowledgementAndAnswerWithChatFallback(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		t.Run(fmt.Sprint(failed), func(t *testing.T) {
+			h := newAssistantHarness(t)
+			h.a.voiceEnabled = true
+			spoken := make(chan string, 2)
+			h.a.speak = func(ctx context.Context, text string) error {
+				spoken <- text
+				if failed {
+					return errors.New("synthesis failed")
+				}
+				return nil
+			}
+			h.final("ana", "wake", "Hey Bot", 0, 1)
+			select {
+			case text := <-spoken:
+				if text != "Diz" {
+					t.Fatal(text)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("missing voice acknowledgement")
+			}
+			h.final("ana", "question", "Explica Go?", 1, 2)
+			h.a.tick(h.now.Add(7 * time.Second))
+			h.answers <- "Go é uma linguagem."
+			h.wait(t, h.waiting)
+			select {
+			case text := <-spoken:
+				if text != "Go é uma linguagem." {
+					t.Fatal(text)
+				}
+			default:
+				t.Fatal("missing spoken answer")
+			}
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			found := false
+			for _, message := range h.messages {
+				found = found || strings.Contains(message, "Go é uma linguagem.")
+			}
+			if !found {
+				t.Fatal("voice failure lost chat answer")
+			}
+		})
+	}
+}
+
+func TestAssistantDisableCancelsSpokenAnswerWithoutWaitingForPlayback(t *testing.T) {
+	h := newAssistantHarness(t)
+	h.a.voiceEnabled = true
+	started, stopped := make(chan struct{}), make(chan struct{})
+	h.a.speak = func(ctx context.Context, text string) error {
+		if text == "Diz" {
+			return nil
+		}
+		close(started)
+		<-ctx.Done()
+		close(stopped)
+		return ctx.Err()
+	}
+	h.final("ana", "question", "Hey Bot Explica Go?", 0, 2)
+	h.a.tick(h.now.Add(7 * time.Second))
+	h.answers <- "Resposta."
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("spoken answer never started")
+	}
+	changed := make(chan struct{})
+	go func() {
+		h.a.configure(assistantSettings{Enabled: false, Phrase: "Hey Bot", Revision: 1})
+		close(changed)
+	}()
+	select {
+	case <-changed:
+	case <-time.After(time.Second):
+		t.Fatal("configuration waited for speech playback")
+	}
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("disabled assistant kept speaking")
 	}
 }

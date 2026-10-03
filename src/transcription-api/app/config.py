@@ -41,26 +41,30 @@ def env_csv(name: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
-def env_speechmatics_api_keys() -> tuple[tuple[str, str], ...]:
+def env_api_keys(prefix: str) -> tuple[tuple[str, str], ...]:
     keys: list[tuple[str, str]] = []
-    base_key = env_str("SPEECHMATICS_API_KEY")
+    base_key = env_str(prefix)
     if base_key:
-        keys.append(("SPEECHMATICS_API_KEY", base_key))
+        keys.append((prefix, base_key))
 
     for name, value in os.environ.items():
-        if not re.fullmatch(r"SPEECHMATICS_API_KEY_.+", name):
+        if not re.fullmatch(re.escape(prefix) + r"_.+", name):
             continue
         value = value.strip()
         if value:
             keys.append((name, value))
 
-    return tuple(sorted(keys, key=lambda item: _speechmatics_key_sort(item[0])))
+    return tuple(sorted(keys, key=lambda item: _api_key_sort(item[0], prefix)))
 
 
-def _speechmatics_key_sort(name: str) -> tuple[int, int, str]:
-    if name == "SPEECHMATICS_API_KEY":
+def env_speechmatics_api_keys() -> tuple[tuple[str, str], ...]:
+    return env_api_keys("SPEECHMATICS_API_KEY")
+
+
+def _api_key_sort(name: str, prefix: str) -> tuple[int, int, str]:
+    if name == prefix:
         return (0, 0, name)
-    suffix = name.removeprefix("SPEECHMATICS_API_KEY_")
+    suffix = name.removeprefix(prefix + "_")
     if suffix.isdigit():
         return (1, int(suffix), name)
     return (2, 0, name)
@@ -70,6 +74,19 @@ def _speechmatics_key_sort(name: str) -> tuple[int, int, str]:
 class Settings:
     database_url: str
     transcription_provider: str = "whisper"
+    transcription_provider_order: tuple[str, ...] = ()
+    deepgram_api_key: str = ""
+    deepgram_api_keys: tuple[tuple[str, str], ...] = ()
+    # name, project, streaming ceiling, batch ceiling; no secrets here.
+    deepgram_key_groups: tuple[tuple[str, str, int, int], ...] = ()
+    deepgram_api_base_url: str = "https://api.deepgram.com/v1"
+    deepgram_realtime_url: str = "wss://api.deepgram.com/v1/listen"
+    deepgram_model: str = "nova-3"
+    deepgram_language: str = "pt-PT"
+    deepgram_keyterms: tuple[str, ...] = ()
+    deepgram_endpointing_ms: int = 500
+    deepgram_streaming_limit: int = 150
+    deepgram_batch_limit: int = 50
     whisper_model: str = "large-v3"
     whisper_device: str = "auto"
     whisper_language: str = "pt"
@@ -146,9 +163,35 @@ class Settings:
         if not math.isfinite(cleanup_interval):
             cleanup_interval = 60
 
+        from .providers import parse_order
+
+        order = env_str("TRANSCRIPTION_PROVIDER_ORDER")
+        deepgram_keys = env_api_keys("DEEPGRAM_API_KEY")
+        groups = []
+        for name, _ in deepgram_keys:
+            suffix = name.removeprefix("DEEPGRAM_API_KEY")
+            groups.append((
+                name,
+                env_str("DEEPGRAM_PROJECT_ID" + suffix, env_str("DEEPGRAM_PROJECT_ID")),
+                max(1, env_int("DEEPGRAM_STREAMING_LIMIT" + suffix, env_int("DEEPGRAM_STREAMING_LIMIT", 150))),
+                max(1, env_int("DEEPGRAM_BATCH_LIMIT" + suffix, env_int("DEEPGRAM_BATCH_LIMIT", 50))),
+            ))
+
         return cls(
             database_url=database_url,
             transcription_provider=env_str("TRANSCRIPTION_PROVIDER", "whisper").lower(),
+            transcription_provider_order=parse_order(order) if order else (),
+            deepgram_api_key=env_str("DEEPGRAM_API_KEY"),
+            deepgram_api_keys=deepgram_keys,
+            deepgram_key_groups=tuple(groups),
+            deepgram_api_base_url=env_str("DEEPGRAM_API_BASE_URL", "https://api.deepgram.com/v1").rstrip("/"),
+            deepgram_realtime_url=env_str("DEEPGRAM_REALTIME_URL", "wss://api.deepgram.com/v1/listen"),
+            deepgram_model=env_str("DEEPGRAM_MODEL", "nova-3"),
+            deepgram_language=env_str("DEEPGRAM_LANGUAGE", "pt-PT"),
+            deepgram_keyterms=env_csv("DEEPGRAM_KEYTERMS"),
+            deepgram_endpointing_ms=max(1, env_int("DEEPGRAM_ENDPOINTING_MS", 500)),
+            deepgram_streaming_limit=max(1, env_int("DEEPGRAM_STREAMING_LIMIT", 150)),
+            deepgram_batch_limit=max(1, env_int("DEEPGRAM_BATCH_LIMIT", 50)),
             whisper_model=os.getenv("WHISPER_MODEL", "large-v3"),
             whisper_device=os.getenv("WHISPER_DEVICE", "auto").strip().lower(),
             whisper_language=env_str("WHISPER_LANGUAGE", "pt"),

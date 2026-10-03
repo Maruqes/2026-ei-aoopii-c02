@@ -131,6 +131,8 @@ class UserProfileResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
+    transcription_provider_order: list[str] = Field(default_factory=list)
+    transcription_providers_in_use: list[str] = Field(default_factory=list)
     sessions_pending: int = 0
     sessions_failed: int = 0
     voice_profiles_pending: int = 0

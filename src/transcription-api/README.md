@@ -337,6 +337,16 @@ API_REQUEST_TIMEOUT=5m
 
 Short WAV slices are submitted during a call. Pauses close the current slice and the next
 slice receives its own UTC timestamp, saving long silence without shifting the transcript.
+Discord audio is decoded once into per-member stereo PCM WAV (48 kHz, 16 bit),
+without another lossy encoding. A 60 ms window reorders RTP packets per speaker
+before Opus decoding and removes duplicates; missing packets use the existing
+bounded Opus FEC/PLC recovery. Buffered audio is flushed at recording boundaries.
+Realtime silence waits for that window and discounts padding from RTP gaps.
+If late speech overlaps silence already sent upstream, the bot replaces those
+trailing zeros in the WAV and falls back to Batch, preserving the full speech
+instead of dropping it or extending the recording. This cannot restore microphone
+clipping, background noise or speech lost beyond recovery; recognition quality
+still requires a real call trial.
 The bot waits for recording admission before finishing a session. Failed submissions stay
 in `.request.json` outbox files; startup replays them. Finish intent markers recover a crash
 between admission and session finish. API retries are bounded; `/recap` remains available
@@ -491,3 +501,64 @@ de abrir novo stream na próxima fala. Esses frames enviados contam no uso Realt
 Os logs do assistente medem até à publicação, desde o tempo áudio da frase e desde a
 última fala PCM ou palavra final da pergunta; não registam perguntas ou respostas. Uma publicação
 Discord falhada não é repetida automaticamente.
+
+
+## Deepgram and Speechmatics
+
+Set `DEEPGRAM_API_KEY` (or numbered `DEEPGRAM_API_KEY_01`, `_02`, …) in `.env`, then
+set `TRANSCRIPTION_PROVIDER_ORDER=deepgram,speechmatics`. Rebuild/restart the API and
+bot with `make up`. Migration `009_transcription_providers.sql` is applied on API
+startup. Secrets and project associations are read only by the Python API.
+
+`/stt status` shows the effective order; `/stt order providers:speechmatics,deepgram`
+switches it without restarting. The four choices include either provider alone.
+Preferences persist per server, override the environment, and apply to new WAV units.
+A healthy stream finishes its current unit before changing provider. `/streaming`
+controls streaming independently, and `/keys` shows both providers even when one is
+only a fallback. With an empty/absent order, the legacy `TRANSCRIPTION_PROVIDER`
+continues to select Whisper or one remote provider.
+
+Deepgram uses Nova-3, `pt-PT`, mono 48 kHz streaming, and mono WAV uploads derived
+from the original safety recording. `DEEPGRAM_KEYTERMS` supplies comma-separated
+terms to both modes. REST and WebSocket URLs must use the same host/region; for EU
+use `https://api.eu.deepgram.com/v1` and `wss://api.eu.deepgram.com/v1/listen`.
+
+Deepgram limits are shared per project, not multiplied per key. Unknown associations
+share one group and also observe an aggregate ceiling. Configure `DEEPGRAM_PROJECT_ID`
+and optional suffix overrides (`DEEPGRAM_PROJECT_ID_02`,
+`DEEPGRAM_STREAMING_LIMIT_02`, `DEEPGRAM_BATCH_LIMIT_02`) only for actual account
+associations/quotas. The default local ceilings are 150 streams and 50 WAV requests.
+When management permissions identify a project, counters merge and the smallest
+configured group ceiling wins. Speechmatics retains its local two-streams-per-key
+configuration. Admission counters require one API process.
+
+Capacity errors cool down the affected product/group for ten seconds; invalid
+credentials affect the key/mode, and confirmed credit failures affect the billing
+group. Fallback works in either order. If all streams are occupied, capture continues
+as WAV and participants wait FIFO. A failed stream immediately ends its WAV unit,
+recovers it through the durable queue, and gets a fresh assignment. Batch recovery
+replaces the unit's text atomically and never sends old speech to the assistant.
+Only confirmed exhaustion of every allowed configured provider, without pending
+remote work/results, permits the existing credit-discard policy. Authentication and
+temporary failures preserve pending audio; temporary failures retry after 15 seconds.
+`/streaming on` explicitly revalidates locally rejected credentials after correction.
+
+Deepgram successful REST results and request IDs are atomically saved in
+`<recording>.deepgram.json` before final DB persistence; they can be reused after
+restart. Speechmatics job IDs/old sidecars retain their original key identity.
+A lost HTTP response can require a second billed request. `/forget`, normal cleanup,
+and credit cleanup include both providers' sidecars and derived WAVs.
+
+`/keys` separates locally sent streaming/WAV hours from provider-reported project
+usage. Project balances/usage require management permissions; unknown values stay
+unavailable, and a management failure never disables transcription. Shared balances
+and remote Speechmatics usage must not be added per key. Cost estimates use dated
+PAYG tariffs (including configured Deepgram keyterms), and exclude grants, discounts
+and taxes. `/health` and `/streaming status` also identify active providers.
+
+Validation uses local REST/WebSocket simulators and a disposable PostgreSQL database:
+`TEST_DATABASE_URL=... pytest` and `cd discord_bot && go test -race ./...`.
+Before choosing a provider on recognition quality, compare the same real PT-PT audio
+against a human reference; the simulators validate protocol/recovery, not accuracy.
+Rollback: choose Speechmatics alone with `/stt order`, or disable streaming. Complete
+Deepgram units before downgrading the binary; leave the additive migration in place.

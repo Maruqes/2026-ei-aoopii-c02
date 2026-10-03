@@ -45,6 +45,11 @@ class TranscriptionResult:
     segments: list[TranscriptionSegment]
     provider_completed_at: datetime | None = None
     duration_seconds: float | None = None
+    provider: str | None = None
+    model: str | None = None
+    key_name: str | None = None
+    group: str | None = None
+    request_id: str | None = None
 
 
 class Transcriber(Protocol):

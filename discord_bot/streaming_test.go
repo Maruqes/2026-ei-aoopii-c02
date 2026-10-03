@@ -357,19 +357,19 @@ func TestRealtimeDTXSilenceUsesSameWAVClockAndKeepsSpeechBoundary(t *testing.T) 
 		t.Fatal(err)
 	}
 	frames, speech, _ := rt.progress()
-	if frames != 1 || speech != 0.02 || writer.FramesWritten() != sampleRate {
+	if frames != 0.94 || speech != 0.02 || writer.FramesWritten() != sampleRate-2880 {
 		t.Fatalf("audio clocks: frames=%f speech=%f WAV=%d", frames, speech, writer.FramesWritten())
 	}
 	if err = recording.padRealtimeSilence(recording.lastPacketAt.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if writer.FramesWritten() != sampleRate {
+	if writer.FramesWritten() != sampleRate-2880 {
 		t.Fatal("duplicated silence")
 	}
 	if err = recording.padRealtimeSilence(recording.lastPacketAt.Add(2 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if writer.FramesWritten() != 2*sampleRate {
+	if writer.FramesWritten() != 2*sampleRate-2880 {
 		t.Fatal("missing continuous DTX")
 	}
 }

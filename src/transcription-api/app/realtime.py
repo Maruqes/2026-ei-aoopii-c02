@@ -1,4 +1,4 @@
-"""Single-process reservations and the internal PCM → Speechmatics bridge."""
+"""Single-process reservations and the internal PCM → provider bridge."""
 
 from __future__ import annotations
 
@@ -16,13 +16,21 @@ from datetime import datetime, timedelta
 
 from fastapi import WebSocket, WebSocketDisconnect
 from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosedOK
 
+from .deepgram import (
+    deepgram_error,
+    deepgram_message_error,
+    normalize_event,
+    streaming_url,
+    validate_interval,
+)
+from .providers import ProviderKey, ProviderRegistry, effective_order, environment_order
 from .recording_cleanup import RecordingCleanup
 from .speechmatics_errors import (
     NoCredits,
     ProviderError,
     error_kind,
-    key_health,
     message_error,
 )
 
@@ -38,25 +46,33 @@ class Reservation:
     retiring: bool = False
     retire_at: float = 0
     retry_at: float = 0
+    order: tuple[str, ...] = ("speechmatics",)
 
 
 class RealtimePool:
     """All methods run on the API event loop; no await between admission and mutation."""
 
-    def __init__(self, keys):
-        self.keys = tuple({key.value: key for key in reversed(keys)}.values())[::-1]
+    def __init__(self, keys, registry=None):
+        self.registry = registry or ProviderRegistry(keys=tuple(
+            ProviderKey(k.name, k.value, group=k.name) for k in
+            tuple({key.value: key for key in reversed(keys)}.values())[::-1]))
+        self.keys = self.registry.keys
+        self.order = ("speechmatics",)
         self.session_id: int | None = None
         self.reservations: dict[str, Reservation] = {}
         self.last_roster = 0.0
 
     def reconcile(
-        self, session_id: int, users: list[str], enabled: bool
+        self, session_id: int, users: list[str], enabled: bool, order=None
     ) -> dict[str, dict]:
         now = time.monotonic()
+        if order is not None:
+            self.order = tuple(order)
         # A dead bot cannot hold the pool forever. Live streams still count until closed.
         if self.session_id != session_id and now - self.last_roster > 15:
             for token, reservation in list(self.reservations.items()):
                 if not reservation.active:
+                    self.registry.release(token)
                     del self.reservations[token]
                 else:
                     reservation.retiring = True
@@ -73,6 +89,7 @@ class RealtimePool:
                     reservation.retire_at = now + 5
                 reservation.retiring = True
                 if not reservation.active:
+                    self.registry.release(token)
                     del self.reservations[token]
         for user in users if enabled else []:
             if any(
@@ -80,15 +97,11 @@ class RealtimePool:
                 for r in self.reservations.values()
             ):
                 continue
-            available = [
-                key
-                for key in self.keys
-                if key_health.healthy(key.value) and self.occupancy(key) < 2
-            ]
-            if not available:
+            token = str(uuid.uuid4())
+            key = self.registry.reserve(token, self.order, "streaming")
+            if key is None:
                 break  # FIFO, no overtaking while waiting.
-            key = min(available, key=lambda k: (self.occupancy(k), self.keys.index(k)))
-            reservation = Reservation(user, key, str(uuid.uuid4()))
+            reservation = Reservation(user, key, token, order=self.order)
             self.reservations[reservation.token] = reservation
             logger.info(
                 "Realtime assigned session=%s user=%s key=%s slot=%s",
@@ -98,7 +111,7 @@ class RealtimePool:
                 self.occupancy(key),
             )
         return {
-            r.discord_id: {"token": r.token, "key_name": r.key.name}
+            r.discord_id: {"token": r.token, "key_name": r.key.name, "provider": r.key.provider, "group": self.registry.group(r.key)}
             for r in self.reservations.values()
             if not r.retiring and r.retry_at <= now
         }
@@ -122,46 +135,52 @@ class RealtimePool:
     def release_epoch(self, r: Reservation) -> None:
         r.active = False
         if r.retiring:
+            self.registry.release(r.token)
             self.reservations.pop(r.token, None)
+        else:
+            # A healthy stream changes owner only at a completed WAV boundary.
+            self.registry.release(r.token)
+            key = self.registry.reserve(r.token, self.order, "streaming")
+            if key is None:
+                self.reservations.pop(r.token, None)
+            else:
+                r.key, r.order = key, self.order
 
     def alternate(self, r: Reservation, attempted: set[str]) -> bool:
-        available = [
-            k
-            for k in self.keys
-            if k.value not in attempted
-            and key_health.healthy(k.value)
-            and self.occupancy(k) < 2
-        ]
-        if not available:
+        self.registry.release(r.token)
+        key = self.registry.reserve(r.token, r.order, "streaming", attempted)
+        if key is None:
             return False
-        r.key = min(available, key=lambda k: (self.occupancy(k), self.keys.index(k)))
+        r.key = key
         return True
 
 
-def valid_configuration(settings, keys) -> bool:
-    return (
-        settings.transcription_provider == "speechmatics"
-        and bool(keys)
-        and settings.speechmatics_realtime_model in {"enhanced", "standard"}
-        and settings.speechmatics_realtime_language == "pt"
-    )
+def valid_configuration(settings, keys, order=None) -> bool:
+    order = order or environment_order(settings)
+    return any(
+        getattr(k, "provider", "speechmatics") in order and (
+            getattr(k, "provider", "speechmatics") == "deepgram" or
+            (settings.speechmatics_realtime_model in {"enhanced", "standard"}
+             and settings.speechmatics_realtime_language == "pt")) for k in keys)
 
 
 async def open_provider(settings, pool, reservation):
     attempted: set[str] = set()
+    deadline = time.monotonic() + 12
     while True:
         key = reservation.key
-        attempted.add(key.value)
+        attempted.add(key.name)
         upstream = None
         try:
-            if not key_health.healthy(key.value):
-                raise ProviderError(
-                    "no_credits" if key_health.exhausted([key]) else "invalid_key"
-                )
+            state = pool.registry.state(key, "streaming")
+            if state != "healthy":
+                raise ProviderError(state)
+            if time.monotonic() >= deadline:
+                raise ProviderError("recoverable")
             upstream = await connect(
-                settings.speechmatics_realtime_url,
-                additional_headers={"Authorization": "Bearer " + key.value},
-                open_timeout=10,
+                streaming_url(settings) if key.provider == "deepgram" else settings.speechmatics_realtime_url,
+                additional_headers={"Authorization": ("Token " if key.provider == "deepgram" else "Bearer ") + key.value},
+                open_timeout=min(4, max(0.1, deadline - time.monotonic())),
                 close_timeout=2,
                 ping_interval=15,
                 ping_timeout=15,
@@ -169,6 +188,8 @@ async def open_provider(settings, pool, reservation):
                 max_queue=16,
                 write_limit=65536,
             )
+            if key.provider == "deepgram":
+                return upstream
             await upstream.send(
                 json.dumps(
                     {
@@ -182,11 +203,12 @@ async def open_provider(settings, pool, reservation):
                             "language": settings.speechmatics_realtime_language,
                             "model": settings.speechmatics_realtime_model,
                             "enable_partials": True,
+                            **({"additional_vocab": [{"content": t} for t in settings.speechmatics_additional_vocab]} if settings.speechmatics_additional_vocab else {}),
                         },
                     }
                 )
             )
-            async with asyncio.timeout(10):
+            async with asyncio.timeout(min(4, max(0.1, deadline - time.monotonic()))):
                 while True:
                     event = json.loads(await upstream.recv())
                     if event.get("message") == "RecognitionStarted":
@@ -196,19 +218,19 @@ async def open_provider(settings, pool, reservation):
         except Exception as exc:
             if upstream is not None:
                 await upstream.close()
-            kind = error_kind(exc)
-            key_health.mark(key.value, kind)
+            kind = exc.kind if isinstance(exc, ProviderError) else (deepgram_error(exc) if key.provider == "deepgram" else error_kind(exc))
+            pool.registry.mark(key, "streaming", kind)
             logger.warning(
                 "Realtime start failed user=%s key=%s reason=%s",
                 reservation.discord_id,
                 key.name,
                 kind,
             )
-            if kind in {"no_credits", "capacity", "invalid_key"} and pool.alternate(
+            if kind not in {"invalid_input", "cancelled"} and time.monotonic() < deadline and pool.alternate(
                 reservation, attempted
             ):
                 continue
-            if key_health.exhausted(pool.keys):
+            if pool.registry.exhausted(reservation.order):
                 raise NoCredits() from None
             reservation.retry_at = time.monotonic() + 10
             raise ProviderError(kind) from None
@@ -240,7 +262,11 @@ async def bridge(
     frames = packets = 0
     sent_frames = 0
     completed = False
+    unit_finished = False
+    failure_reason = "recoverable"
     session_id = None
+    attempt_id = None
+    last_sent_at = time.monotonic()
     tasks = []
     try:
         async with asyncio.timeout(10):
@@ -276,15 +302,22 @@ async def bridge(
             {
                 **meta,
                 "speechmatics_realtime_model": settings.speechmatics_realtime_model.strip().lower(),
+                "transcription_provider": reservation.key.provider,
             },
             reservation.token,
             reservation.key.name,
         )
-        await websocket.send_json({"type": "ready", "generation": generation, "recording_id": recording_id})
+        model = settings.deepgram_model if reservation.key.provider == "deepgram" else settings.speechmatics_realtime_model
+        await asyncio.to_thread(repository.set_recording_provider, recording_id, reservation.key.provider,
+                                model, pool.registry.group(reservation.key))
+        attempt_id = await asyncio.to_thread(repository.start_transcription_attempt, recording_id,
+            "streaming", reservation.key.provider, reservation.key.name, pool.registry.group(reservation.key), model)
+        await websocket.send_json({"type": "ready", "generation": generation, "recording_id": recording_id,
+                                   "provider": reservation.key.provider})
         eos = asyncio.Event()
 
         async def send_audio():
-            nonlocal frames, packets, sent_frames
+            nonlocal frames, packets, sent_frames, last_sent_at
             last_checkpoint = 0.0
             while True:
                 packet = await websocket.receive()
@@ -308,7 +341,7 @@ async def bridge(
                             raise ValueError("Safety WAV does not match sent audio")
                     eos.set()
                     await upstream.send(
-                        json.dumps({"message": "EndOfStream", "last_seq_no": packets})
+                        json.dumps({"type": "CloseStream"} if reservation.key.provider == "deepgram" else {"message": "EndOfStream", "last_seq_no": packets})
                     )
                     return
                 if len(data) < 10 or len(data) > 8 + 48000 * 2 or (len(data) - 8) % 2:
@@ -320,18 +353,35 @@ async def bridge(
                 frames += (len(data) - 8) // 2
                 await upstream.send(data[8:])
                 sent_frames += (len(data) - 8) // 2
+                last_sent_at = time.monotonic()
                 if time.monotonic() - last_checkpoint >= 5:
+                    last_checkpoint = time.monotonic()
                     await asyncio.to_thread(
                         repository.checkpoint_realtime_usage,
                         recording_id,
                         generation,
                         sent_frames / 48000,
                     )
-                    last_checkpoint = time.monotonic()
+                    await asyncio.to_thread(repository.checkpoint_transcription_attempt,
+                        attempt_id, sent_frames / 48000)
 
         async def receive_results():
+            close_metadata = False
             while True:
-                event = json.loads(await upstream.recv())
+                try:
+                    event = json.loads(await upstream.recv())
+                except ConnectionClosedOK:
+                    if reservation.key.provider == "deepgram" and eos.is_set() and close_metadata:
+                        return
+                    raise ProviderError("recoverable") from None
+                if reservation.key.provider == "deepgram":
+                    if event.get("type") == "Error" or event.get("err_code"):
+                        raise deepgram_message_error(event)
+                    if event.get("type") == "Metadata":
+                        close_metadata = eos.is_set()
+                        await asyncio.to_thread(repository.checkpoint_transcription_attempt, attempt_id,
+                            sent_frames / 48000, remote_id=event.get("request_id"))
+                    event = normalize_event(event)
                 kind = event.get("message")
                 if kind == "Error":
                     raise message_error(event)
@@ -348,6 +398,9 @@ async def bridge(
                         or end > frames / 48000 + 0.1
                     ):
                         raise ValueError("Invalid provider timestamp")
+                    words = event.get("words", final_words(event.get("results", [])))
+                    for word in words:
+                        validate_interval(word["start"], word["end"], frames / 48000)
                     if settings.transcription_streaming_debug:
                         logger.info(
                             "Realtime debug session=%s user=%s type=%s text=%s",
@@ -394,7 +447,7 @@ async def bridge(
                                     "start": start,
                                     "end": end,
                                     "text": result["transcript"],
-                                    "words": final_words(event.get("results", [])),
+                                    "words": words,
                                 }
                             )
                 if kind == "EndOfTranscript":
@@ -421,10 +474,16 @@ async def bridge(
                 ) or time.monotonic() - pool.last_roster > 15:
                     raise ProviderError("revoked")
 
+        async def heartbeat():
+            while True:
+                await asyncio.sleep(5)
+                if reservation.key.provider == "deepgram" and not eos.is_set() and time.monotonic() - last_sent_at >= 5:
+                    await upstream.send(json.dumps({"type": "KeepAlive"}))
+
         sender = asyncio.create_task(send_audio())
         receiver = asyncio.create_task(receive_results())
         watcher = asyncio.create_task(monitor())
-        tasks = [sender, receiver, watcher]
+        tasks = [sender, receiver, watcher, asyncio.create_task(heartbeat())]
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in done:
             task.result()
@@ -448,21 +507,32 @@ async def bridge(
         )
         if not completed:
             raise ProviderError("revoked")
+        await asyncio.to_thread(RecordingCleanup(repository=repository, settings=settings).cleanup_completed_file, filename)
         await websocket.send_json({"type": "completed"})
     except Exception as exc:
-        kind = error_kind(exc)
+        kind = (deepgram_error(exc) if reservation and reservation.key.provider == "deepgram"
+                and not isinstance(exc, ProviderError) else error_kind(exc))
         if reservation is not None:
-            key_health.mark(reservation.key.value, kind)
-            reservation.retry_at = time.monotonic() + 10
-        if session_id is not None and key_health.exhausted(pool.keys):
-            await asyncio.to_thread(repository.discard_session_audio, session_id)
-            kind = "no_credits"
+            pool.registry.mark(reservation.key, "streaming", kind)
+            reservation.retiring = True
+        if session_id is not None:
+            session = await asyncio.to_thread(repository.get_voice_session, session_id)
+            current_order, _ = await asyncio.to_thread(effective_order, settings, repository, session.guild_id if session else None)
+            if pool.registry.exhausted(current_order) and not await asyncio.to_thread(repository.session_has_remote_jobs, session_id):
+                await asyncio.to_thread(repository.discard_session_audio, session_id)
+                kind = "no_credits"
         logger.warning(
             "Realtime fallback session=%s unit=%s reason=%s",
             session_id,
             recording_id,
             kind,
         )
+        failure_reason = kind
+        if recording_id is not None:
+            await asyncio.to_thread(repository.set_recording_provider, recording_id, reservation.key.provider,
+                model, pool.registry.group(reservation.key), kind)
+            await asyncio.to_thread(repository.finish_realtime_unit, recording_id, generation, sent_frames / 48000, False)
+            unit_finished = True
         try:
             await websocket.send_json({"type": "fallback", "reason": kind})
         except Exception:
@@ -470,28 +540,28 @@ async def bridge(
     finally:
         for task in tasks:
             task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        if recording_id is not None and not completed:
-            await asyncio.to_thread(
-                repository.finish_realtime_unit,
-                recording_id,
-                generation,
-                sent_frames / 48000,
-                False,
-            )
-        if upstream is not None:
-            await upstream.close()
-        if reservation is not None:
-            pool.release_epoch(reservation)
-        if completed:
-            await asyncio.to_thread(
-                RecordingCleanup(
-                    repository=repository, settings=settings
-                ).cleanup_completed_file,
-                filename,
-            )
         try:
-            await websocket.close()
-        except Exception:
-            pass
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                if attempt_id is not None:
+                    await asyncio.to_thread(repository.checkpoint_transcription_attempt, attempt_id,
+                        sent_frames / 48000, "completed" if completed else "failed",
+                        None if completed else failure_reason)
+            finally:
+                if recording_id is not None and not completed and not unit_finished:
+                    await asyncio.to_thread(repository.finish_realtime_unit, recording_id,
+                        generation, sent_frames / 48000, False)
+        finally:
+            try:
+                if upstream is not None:
+                    await upstream.close()
+            finally:
+                if reservation is not None:
+                    if not completed:
+                        reservation.retiring = True
+                    pool.release_epoch(reservation)
+                try:
+                    await websocket.close()
+                except Exception:
+                    pass

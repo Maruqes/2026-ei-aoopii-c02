@@ -10,7 +10,8 @@ from contextlib import ExitStack
 from pathlib import Path
 
 logger = logging.getLogger("uvicorn.error")
-SIDECAR_SUFFIXES = (".speechmatics.json", ".speechmatics.tmp", ".request.json")
+MEDIA_SUFFIXES = (".speechmatics.json", ".speechmatics.tmp", ".deepgram.json", ".deepgram.json.tmp", ".deepgram-mono.wav")
+SIDECAR_SUFFIXES = (*MEDIA_SUFFIXES, ".request.json")
 
 
 def recording_paths(
@@ -20,7 +21,7 @@ def recording_paths(
     # Never follow links or delete anything outside the shared recordings directory.
     if not filename or Path(filename).name != filename:
         raise ValueError("Recording filename must be inside recordings directory")
-    suffixes = SIDECAR_SUFFIXES if include_request else SIDECAR_SUFFIXES[:2]
+    suffixes = SIDECAR_SUFFIXES if include_request else MEDIA_SUFFIXES
     paths = [root / filename] + [root / (filename + suffix) for suffix in suffixes]
     for path in paths:
         if path.is_symlink() or path.resolve().parent != root:

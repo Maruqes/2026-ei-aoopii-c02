@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -77,21 +78,25 @@ func initializeVoiceArrivalOrder(c *streamingController, guildID, channelID stri
 }
 
 type streamGrant struct {
-	Token   string `json:"token"`
-	KeyName string `json:"key_name"`
+	Provider string `json:"provider"`
+	Group    string `json:"group"`
+	Token    string `json:"token"`
+	KeyName  string `json:"key_name"`
 }
 
 type streamingStatus struct {
-	Enabled        bool                   `json:"enabled"`
-	Preferred      bool                   `json:"preferred"`
-	Available      bool                   `json:"available"`
-	Occupied       int                    `json:"occupied"`
-	Capacity       int                    `json:"capacity"`
-	Queued         int                    `json:"queued"`
-	Assignments    map[string]streamGrant `json:"assignments"`
-	Exhausted      bool                   `json:"exhausted"`
-	NoticeSent     bool                   `json:"notice_sent"`
-	CleanupPending bool                   `json:"cleanup_pending"`
+	Providers        map[string]int         `json:"providers"`
+	CaptureSuspended bool                   `json:"capture_suspended"`
+	Enabled          bool                   `json:"enabled"`
+	Preferred        bool                   `json:"preferred"`
+	Available        bool                   `json:"available"`
+	Occupied         int                    `json:"occupied"`
+	Capacity         int                    `json:"capacity"`
+	Queued           int                    `json:"queued"`
+	Assignments      map[string]streamGrant `json:"assignments"`
+	Exhausted        bool                   `json:"exhausted"`
+	NoticeSent       bool                   `json:"notice_sent"`
+	CleanupPending   bool                   `json:"cleanup_pending"`
 }
 
 // Arrival order belongs to participants, never to speaking updates or SSRCs.
@@ -255,7 +260,7 @@ func (c *streamingController) sync(ctx context.Context) (*streamingStatus, error
 	c.queued = response.Queued
 	c.synced = true
 	c.grants = response.Assignments
-	c.exhausted = response.Exhausted
+	c.exhausted = response.Exhausted || response.CaptureSuspended
 	c.mu.Unlock()
 	return &response, nil
 }
@@ -316,6 +321,8 @@ func voiceSnapshot(s *discordgo.Session, guildID, channelID, botID string) []str
 
 // One bounded worker per WAV/epoch. The capture loop only copies PCM and enqueues.
 type realtimeAudioClient struct {
+	failed      atomic.Bool
+	controller  *streamingController
 	speechRMS   int64
 	assistant   *assistantController
 	user        string
@@ -335,6 +342,7 @@ type realtimeAudioClient struct {
 func newRealtimeAudioClient(client *TranscriptionClient, request TranscriptionRequest, grant streamGrant, assistants ...*assistantController) *realtimeAudioClient {
 	r := &realtimeAudioClient{queue: make(chan []byte, 100), done: make(chan struct{}), finish: make(chan struct{}), abort: make(chan struct{})}
 	r.user, r.startedAt = request.DiscordID, request.RecordingStartedAt
+	r.controller = request.Streaming
 	threshold, err := strconv.Atoi(strings.TrimSpace(os.Getenv("ASSISTANT_SPEECH_RMS")))
 	if err != nil || threshold < 1 || threshold > 32767 {
 		threshold = 500
@@ -417,10 +425,25 @@ func (r *realtimeAudioClient) wait(ctx context.Context) {
 func (r *realtimeAudioClient) run(client *TranscriptionClient, request TranscriptionRequest, grant streamGrant) {
 	successful := false
 	defer func() {
-		if !successful && r.assistant != nil {
-			r.assistant.fail(r.user, r)
+		if !successful {
+			r.failed.Store(true)
+			if r.assistant != nil {
+				r.assistant.fail(r.user, r)
+			}
+			if r.controller != nil {
+				r.controller.mu.Lock()
+				if r.controller.grants[r.user].Token == grant.Token {
+					delete(r.controller.grants, r.user)
+				}
+				r.controller.mu.Unlock()
+			}
 		}
 		close(r.done)
+		if !successful && r.controller != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, _ = r.controller.sync(ctx)
+		}
 	}()
 	address, err := url.Parse(client.baseURL + "/v1/streaming/audio")
 	if err != nil {
@@ -431,7 +454,7 @@ func (r *realtimeAudioClient) run(client *TranscriptionClient, request Transcrip
 	} else {
 		address.Scheme = "ws"
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
 	ws, _, err := dialer.DialContext(ctx, address.String(), nil)
@@ -448,7 +471,7 @@ func (r *realtimeAudioClient) run(client *TranscriptionClient, request Transcrip
 	if ws.WriteJSON(meta) != nil {
 		return
 	}
-	_ = ws.SetReadDeadline(time.Now().Add(15 * time.Second))
+	_ = ws.SetReadDeadline(time.Now().Add(30 * time.Second))
 	var status realtimeEvent
 	if ws.ReadJSON(&status) != nil || status.Type != "ready" {
 		return
@@ -574,7 +597,7 @@ func streamingHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		respondText(s, i, fmt.Sprintf("Streaming: %v", err))
 		return
 	}
-	respondText(s, i, fmt.Sprintf("Streaming: %t · %d/%d · FIFO: %d", result.Enabled && !result.Exhausted, result.Occupied, result.Capacity, result.Queued))
+	respondText(s, i, fmt.Sprintf("Streaming: %t · %d/%d · FIFO: %d · Deepgram: %d · Speechmatics: %d", result.Enabled && !result.Exhausted, result.Occupied, result.Capacity, result.Queued, result.Providers["deepgram"], result.Providers["speechmatics"]))
 }
 
 type creditNotice struct {
@@ -622,9 +645,9 @@ func runCreditNotices(ctx context.Context, s *discordgo.Session, client *Transcr
 					}
 				}
 				if !sent[identity] {
-					message := botText("Os créditos da Speechmatics esgotaram. A transcrição desta chamada foi interrompida e o áudio pendente foi eliminado. O texto já transcrito foi preservado.", "Speechmatics credits ran out. Transcription stopped and pending audio was deleted. Previously transcribed text was preserved.")
+					message := botText("Os créditos dos fornecedores de transcrição esgotaram. A transcrição desta chamada foi interrompida e o áudio pendente foi eliminado. O texto já transcrito foi preservado.", "Transcription provider credits ran out. Transcription stopped and pending audio was deleted. Previously transcribed text was preserved.")
 					if notice.CleanupPending {
-						message = botText("Os créditos da Speechmatics esgotaram. A transcrição foi interrompida; o áudio pendente será eliminado. O texto já transcrito foi preservado.", "Speechmatics credits ran out. Transcription stopped; pending audio will be deleted. Previously transcribed text was preserved.")
+						message = botText("Os créditos dos fornecedores de transcrição esgotaram. A transcrição foi interrompida; o áudio pendente será eliminado. O texto já transcrito foi preservado.", "Transcription provider credits ran out. Transcription stopped; pending audio will be deleted. Previously transcribed text was preserved.")
 					}
 					digest := sha256.Sum256([]byte(identity))
 					nonce := fmt.Sprintf("%x", digest)[:24]

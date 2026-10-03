@@ -55,25 +55,29 @@ type MusicSnapshot struct {
 }
 
 type MusicPlayer struct {
-	mu         sync.Mutex
-	vc         *discordgo.VoiceConnection
-	ctx        context.Context
-	cancel     context.CancelFunc
-	done       chan struct{}
-	changed    chan struct{}
-	queue      []MusicTrack
-	current    *MusicTrack
-	trackStop  context.CancelFunc
-	paused     bool
-	closed     bool
-	resolving  int
-	generation uint64
-	lookupCtx  context.Context
-	lookupStop context.CancelFunc
-	onError    func(MusicTrack, error)
-	resolve    func(context.Context, string, string) (MusicTrack, error)
-	play       func(context.Context, MusicTrack) error
-	deps       func() error
+	mu          sync.Mutex
+	vc          *discordgo.VoiceConnection
+	ctx         context.Context
+	cancel      context.CancelFunc
+	done        chan struct{}
+	changed     chan struct{}
+	queue       []MusicTrack
+	current     *MusicTrack
+	trackStop   context.CancelFunc
+	paused      bool
+	closed      bool
+	resolving   int
+	voicing     int
+	generation  uint64
+	lookupCtx   context.Context
+	lookupStop  context.CancelFunc
+	onError     func(MusicTrack, error)
+	resolve     func(context.Context, string, string) (MusicTrack, error)
+	play        func(context.Context, MusicTrack) error
+	deps        func() error
+	output      chan struct{}
+	resumeMusic bool // Protected by the output token.
+	voiceStatus func(bool) error
 }
 
 func NewMusicPlayer(vc *discordgo.VoiceConnection, onError ...func(MusicTrack, error)) *MusicPlayer {
@@ -88,7 +92,14 @@ func NewMusicPlayer(vc *discordgo.VoiceConnection, onError ...func(MusicTrack, e
 // Keeping construction separate lets offline tests use deterministic audio sources.
 func newMusicPlayer(vc *discordgo.VoiceConnection) *MusicPlayer {
 	ctx, cancel := context.WithCancel(context.Background())
-	p := &MusicPlayer{vc: vc, ctx: ctx, cancel: cancel, done: make(chan struct{}), changed: make(chan struct{})}
+	p := &MusicPlayer{vc: vc, ctx: ctx, cancel: cancel, done: make(chan struct{}), changed: make(chan struct{}), output: make(chan struct{}, 1)}
+	p.output <- struct{}{}
+	p.voiceStatus = func(speaking bool) error {
+		if p.vc == nil {
+			return errors.New("Discord voice connection is unavailable")
+		}
+		return p.vc.Speaking(speaking)
+	}
 	p.lookupCtx, p.lookupStop = context.WithCancel(ctx)
 	p.resolve, p.play = resolveYouTubeMusic, p.stream
 	p.deps = func() error {
@@ -308,7 +319,7 @@ func (p *MusicPlayer) Snapshot() MusicSnapshot {
 func (p *MusicPlayer) IsBusy() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.current != nil || len(p.queue) > 0 || p.resolving > 0
+	return p.current != nil || len(p.queue) > 0 || p.resolving > 0 || p.voicing > 0
 }
 
 func (p *MusicPlayer) PauseToggle() (bool, error) {
@@ -447,10 +458,10 @@ func (p *MusicPlayer) stream(ctx context.Context, track MusicTrack) error {
 		return errors.New("could not start ffmpeg")
 	}
 	defer func() { stop(nil); _ = stdout.Close(); _ = cmd.Wait() }()
-	if err := p.vc.Speaking(true); err != nil {
+	if err := p.musicSpeaking(ctx, true); err != nil {
 		return errors.New("could not activate Discord voice playback")
 	}
-	defer p.vc.Speaking(false)
+	defer p.musicSpeaking(p.ctx, false)
 	if err := p.sendPCM(streamCtx, stop, stdout, encoder); err != nil {
 		return err
 	}
@@ -461,13 +472,22 @@ func (p *MusicPlayer) stream(ctx context.Context, track MusicTrack) error {
 }
 
 func (p *MusicPlayer) sendPCM(ctx context.Context, stop context.CancelCauseFunc, input io.Reader, encoder *opus.Encoder) error {
+	return p.sendAudioPCM(ctx, stop, input, encoder, true)
+}
+
+func (p *MusicPlayer) sendAudioPCM(ctx context.Context, stop context.CancelCauseFunc, input io.Reader, encoder *opus.Encoder, music bool) error {
 	pcmBytes := make([]byte, defaultOpusFrameSamples*channels*2)
 	pcm := make([]int16, defaultOpusFrameSamples*channels)
 	encoded := make([]byte, 4000)
 	readTimeout := 30 * time.Second
 	for {
-		if err := p.waitUnpaused(ctx); err != nil {
-			return err
+		if music {
+			if err := p.waitUnpaused(ctx); err != nil {
+				return err
+			}
+		}
+		if ctx.Err() != nil {
+			return context.Cause(ctx)
 		}
 		watchdog := time.AfterFunc(readTimeout, func() { stop(errors.New("music stream stopped delivering audio")) })
 		n, readErr := io.ReadFull(input, pcmBytes)
@@ -489,32 +509,92 @@ func (p *MusicPlayer) sendPCM(ctx context.Context, stop context.CancelCauseFunc,
 		if err != nil {
 			return errors.New("could not encode music audio")
 		}
-		if err := p.waitUnpaused(ctx); err != nil {
-			return err
-		}
 		packet := append([]byte(nil), encoded[:size]...)
-		sendTimer := time.NewTimer(15 * time.Second)
-		select {
-		case <-ctx.Done():
-			sendTimer.Stop()
-			return context.Cause(ctx)
-		case <-sendTimer.C:
-			return errors.New("Discord voice connection stopped accepting audio")
-		case p.vc.OpusSend <- packet:
-			sendTimer.Stop()
+		if music {
+			if err := p.acquireMusicOutput(ctx); err != nil {
+				return err
+			}
+			if p.resumeMusic {
+				if err := p.voiceStatus(true); err != nil {
+					p.releaseOutput()
+					return err
+				}
+				p.resumeMusic = false
+			}
 		}
-		// discordgo also paces its UDP sender. Produce at 20 ms to avoid filling
-		// its 16-packet buffer, so pause/skip take effect within a few frames.
-		frameTimer := time.NewTimer(20 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			frameTimer.Stop()
-			return context.Cause(ctx)
-		case <-frameTimer.C:
+		err = p.sendAudioPacket(ctx, packet)
+		if music {
+			p.releaseOutput()
+		}
+		if err != nil {
+			return err
 		}
 		if readErr == io.ErrUnexpectedEOF {
 			return nil
 		}
 		readTimeout = 15 * time.Second
+	}
+}
+
+func (p *MusicPlayer) acquireOutput(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-p.output:
+		if ctx.Err() != nil {
+			p.releaseOutput()
+			return ctx.Err()
+		}
+		return nil
+	}
+}
+
+func (p *MusicPlayer) releaseOutput() { p.output <- struct{}{} }
+
+func (p *MusicPlayer) acquireMusicOutput(ctx context.Context) error {
+	for {
+		if err := p.waitUnpaused(ctx); err != nil {
+			return err
+		}
+		if err := p.acquireOutput(ctx); err != nil {
+			return err
+		}
+		p.mu.Lock()
+		paused := p.paused
+		p.mu.Unlock()
+		if !paused {
+			return nil
+		}
+		p.releaseOutput()
+	}
+}
+
+func (p *MusicPlayer) musicSpeaking(ctx context.Context, speaking bool) error {
+	if err := p.acquireOutput(ctx); err != nil {
+		return err
+	}
+	defer p.releaseOutput()
+	p.resumeMusic = false
+	return p.voiceStatus(speaking)
+}
+
+func (p *MusicPlayer) sendAudioPacket(ctx context.Context, packet []byte) error {
+	sendTimer := time.NewTimer(15 * time.Second)
+	defer sendTimer.Stop()
+	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	case <-sendTimer.C:
+		return errors.New("Discord voice connection stopped accepting audio")
+	case p.vc.OpusSend <- packet:
+	}
+	// Pace at 20ms, including the music frame before handing output to speech.
+	frameTimer := time.NewTimer(20 * time.Millisecond)
+	defer frameTimer.Stop()
+	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	case <-frameTimer.C:
+		return nil
 	}
 }

@@ -35,6 +35,7 @@ type TranscriptionClient struct {
 }
 
 type TranscriptionRequest struct {
+	Streaming          *streamingController `json:"-"`
 	Realtime           *realtimeAudioClient `json:"-"`
 	SafetyWAV          bool                 `json:"SafetyWAV,omitempty"`
 	SessionID          int64
@@ -155,20 +156,22 @@ type ProfilePromptResponse struct {
 }
 
 type HealthResponse struct {
-	SessionsPending        int        `json:"sessions_pending"`
-	SessionsFailed         int        `json:"sessions_failed"`
-	VoiceProfilesPending   int        `json:"voice_profiles_pending"`
-	VoiceProfilesFailed    int        `json:"voice_profiles_failed"`
-	LLMProvider            string     `json:"llm_provider"`
-	LLMModel               string     `json:"llm_model"`
-	Status                 string     `json:"status"`
-	Database               string     `json:"database"`
-	RecordingsTranscribing int        `json:"recordings_transcribing"`
-	RecordingsFailed       int        `json:"recordings_failed"`
-	RecordingsCompleted    int        `json:"recordings_completed"`
-	LastRecordingStatus    *string    `json:"last_recording_status"`
-	LastRecordingFilename  *string    `json:"last_recording_filename"`
-	LastRecordingAt        *time.Time `json:"last_recording_at"`
+	TranscriptionOrder          []string   `json:"transcription_provider_order"`
+	TranscriptionProvidersInUse []string   `json:"transcription_providers_in_use"`
+	SessionsPending             int        `json:"sessions_pending"`
+	SessionsFailed              int        `json:"sessions_failed"`
+	VoiceProfilesPending        int        `json:"voice_profiles_pending"`
+	VoiceProfilesFailed         int        `json:"voice_profiles_failed"`
+	LLMProvider                 string     `json:"llm_provider"`
+	LLMModel                    string     `json:"llm_model"`
+	Status                      string     `json:"status"`
+	Database                    string     `json:"database"`
+	RecordingsTranscribing      int        `json:"recordings_transcribing"`
+	RecordingsFailed            int        `json:"recordings_failed"`
+	RecordingsCompleted         int        `json:"recordings_completed"`
+	LastRecordingStatus         *string    `json:"last_recording_status"`
+	LastRecordingFilename       *string    `json:"last_recording_filename"`
+	LastRecordingAt             *time.Time `json:"last_recording_at"`
 }
 
 type SpeechmaticsCostItem struct {

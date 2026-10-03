@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -77,6 +78,7 @@ type assistantController struct {
 	session           *discordgo.Session
 	settings          assistantSettings
 	silence           time.Duration
+	voiceEnabled      bool
 	configured        bool
 	stopped           bool
 	streams           map[string]*assistantStream
@@ -88,8 +90,9 @@ type assistantController struct {
 	coverageSince     time.Time
 	coverageNoticeAt  time.Time
 	// Injectable effects keep timing/state tests independent of Discord and paid providers.
-	send func(string, string) error
-	ask  func(context.Context, string) (string, error)
+	send  func(string, string) error
+	ask   func(context.Context, string) (string, error)
+	speak func(context.Context, string) error
 }
 
 func newAssistantController(s *discordgo.Session, state *voiceConnectionState) *assistantController {
@@ -97,7 +100,12 @@ func newAssistantController(s *discordgo.Session, state *voiceConnectionState) *
 	if err != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds < 0.5 || seconds > 20 {
 		seconds = assistantDefaultSilence.Seconds()
 	}
-	a := &assistantController{state: state, session: s, silence: time.Duration(seconds * float64(time.Second)), streams: map[string]*assistantStream{}, busyAt: map[string]time.Time{}}
+	voiceEnabled, voiceErr := strconv.ParseBool(strings.TrimSpace(os.Getenv("ASSISTANT_VOICE_ENABLED")))
+	if voiceErr != nil {
+		voiceEnabled = true
+	}
+	a := &assistantController{state: state, session: s, silence: time.Duration(seconds * float64(time.Second)), voiceEnabled: voiceEnabled, streams: map[string]*assistantStream{}, busyAt: map[string]time.Time{}}
+	a.speak = func(ctx context.Context, text string) error { return state.music.Speak(ctx, text) }
 	a.send = func(channel, text string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -238,7 +246,6 @@ func (a *assistantController) notice(user, text string) {
 	}
 	go func() {
 		a.publishMu.Lock()
-		defer a.publishMu.Unlock()
 		a.mu.Lock()
 		valid := !a.stopped && serial == a.serial && a.settings.Enabled
 		if user == "" {
@@ -249,6 +256,7 @@ func (a *assistantController) notice(user, text string) {
 		}
 		a.mu.Unlock()
 		if !valid {
+			a.publishMu.Unlock()
 			return
 		}
 		prefix := ""
@@ -259,15 +267,27 @@ func (a *assistantController) notice(user, text string) {
 		if err != nil {
 			log.Printf("assistant notice failed session=%d: %v", a.state.sessionID, err)
 		}
+		var voiceCtx context.Context
+		var voiceCancel context.CancelFunc
 		if text == "Diz" {
 			a.mu.Lock()
 			if a.request != nil && a.request.id == serial {
 				log.Printf("assistant activation session=%d user=%s latency_ms=%d delivered=%t", a.state.sessionID, user, time.Since(a.request.activation).Milliseconds(), err == nil)
 				if err != nil {
 					a.reset()
+				} else if a.voiceEnabled && !a.request.responding {
+					voiceCtx, voiceCancel = context.WithTimeout(context.Background(), 10*time.Second)
+					a.request.cancel = voiceCancel
 				}
 			}
 			a.mu.Unlock()
+		}
+		a.publishMu.Unlock()
+		if voiceCtx != nil {
+			defer voiceCancel()
+			if err := a.speak(voiceCtx, text); err != nil && voiceCtx.Err() == nil {
+				log.Printf("assistant voice acknowledgement failed session=%d user=%s: %v", a.state.sessionID, user, err)
+			}
 		}
 	}()
 }
@@ -603,18 +623,21 @@ func (a *assistantController) tick(now time.Time) {
 		request.questionEnded = recognizedEnd
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if request.cancel != nil {
+		request.cancel()
+	}
 	request.cancel = cancel
 	go func() {
 		answer, err := a.ask(ctx, request.text)
 		cancel()
 		a.publishMu.Lock()
-		defer a.publishMu.Unlock()
 		a.mu.Lock()
 		if a.request != request || !a.eligible(request.user) || !a.canRespond() {
 			if a.request == request {
 				a.reset()
 			}
 			a.mu.Unlock()
+			a.publishMu.Unlock()
 			return
 		}
 		channel := a.destination()
@@ -628,6 +651,23 @@ func (a *assistantController) tick(now time.Time) {
 			log.Printf("assistant reply failed session=%d: %v", a.state.sessionID, sendErr)
 		}
 		log.Printf("assistant response session=%d user=%s latency_ms=%d answered=%t delivered=%t", a.state.sessionID, request.user, time.Since(request.questionEnded).Milliseconds(), err == nil, sendErr == nil)
+		a.mu.Lock()
+		var voiceCtx context.Context
+		var voiceCancel context.CancelFunc
+		if a.request == request && err == nil && a.voiceEnabled {
+			voiceCtx, voiceCancel = context.WithTimeout(context.Background(), 2*time.Minute)
+			request.cancel = voiceCancel
+		}
+		a.mu.Unlock()
+		a.publishMu.Unlock()
+		if voiceCtx != nil {
+			voiceErr := a.speak(voiceCtx, answer)
+			cancelled := errors.Is(voiceCtx.Err(), context.Canceled)
+			voiceCancel()
+			if voiceErr != nil && !cancelled {
+				log.Printf("assistant voice response failed session=%d user=%s: %v", a.state.sessionID, request.user, voiceErr)
+			}
+		}
 		// No retry: a Discord timeout can mean that the answer was already published.
 		a.mu.Lock()
 		defer a.mu.Unlock()

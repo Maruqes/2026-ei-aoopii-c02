@@ -18,7 +18,7 @@ FROM debian:bookworm-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       ca-certificates libopus0 libopusfile0 ffmpeg python3 python3-venv libstdc++6 \
+       ca-certificates libopus0 libopusfile0 ffmpeg espeak-ng python3 python3-venv libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=youtube-js /usr/local/bin/node /usr/local/bin/node

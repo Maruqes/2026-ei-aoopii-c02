@@ -155,6 +155,7 @@ func buildApplicationCommands(lang botLanguage) []*discordgo.ApplicationCommand 
 	manage := int64(discordgo.PermissionManageServer)
 	commands := []*discordgo.ApplicationCommand{
 		assistantCommand(),
+		sttCommand(lang),
 		{Name: "streaming", Description: "Set Realtime transcription mode or inspect the FIFO queue.", DefaultMemberPermissions: &manage,
 			Options: []*discordgo.ApplicationCommandOption{{Name: "mode", Type: discordgo.ApplicationCommandOptionString, Description: "on, off or status", Required: true,
 				Choices: []*discordgo.ApplicationCommandOptionChoice{{Name: "on", Value: "on"}, {Name: "off", Value: "off"}, {Name: "status", Value: "status"}}}}},
@@ -235,7 +236,7 @@ func buildApplicationCommands(lang botLanguage) []*discordgo.ApplicationCommand 
 		},
 		{
 			Name:        commandName(lang, "keys"),
-			Description: "Shows Speechmatics API key usage.",
+			Description: textForLanguage(lang, "Estado e consumo das keys Deepgram e Speechmatics.", "Deepgram and Speechmatics key status and usage."),
 		},
 		{
 			Name:        commandName(lang, "forget"),

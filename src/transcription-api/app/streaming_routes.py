@@ -5,8 +5,9 @@ import asyncio
 from fastapi import Depends, HTTPException, WebSocket
 from pydantic import BaseModel, Field
 
+from .provider_routes import install_provider_routes
+from .providers import effective_order, registry_for
 from .realtime import RealtimePool, bridge, valid_configuration
-from .speechmatics_errors import key_health
 
 
 class StreamingMode(BaseModel):
@@ -29,11 +30,12 @@ def install_streaming_routes(
     configured_keys,
     validate_filename,
     resolve_path,
+    speechmatics_keys=None,
 ):
     def pool_for(settings):
         pool = getattr(service.state, "realtime_pool", None)
         if pool is None:
-            pool = RealtimePool(configured_keys(settings))
+            pool = RealtimePool((), registry=registry_for(settings))
             service.state.realtime_pool = pool
         return pool
 
@@ -44,9 +46,11 @@ def install_streaming_routes(
             guild_id,
             settings.transcription_streaming_enabled,
         )
-        usable = valid_configuration(settings, pool.keys) and any(
-            key_health.healthy(k.value) for k in pool.keys
-        )
+        order, source = await asyncio.to_thread(effective_order, settings, repository, guild_id)
+        eligible = tuple(k for k in pool.keys if k.provider in order and pool.registry.supports(k.provider, "streaming"))
+        usable = valid_configuration(settings, eligible, order) and any(
+            pool.registry.state(k, "streaming") not in {"no_credits", "invalid_key"} for k in eligible)
+        groups = {(k.provider, pool.registry.group(k)): k for k in eligible}
         session = (
             await asyncio.to_thread(repository.get_voice_session, pool.session_id)
             if pool.session_id
@@ -63,16 +67,28 @@ def install_streaming_routes(
             if session and session.guild_id == guild_id
             else 0
         )
+        capacity = sum(pool.registry.limits(k, "streaming") for k in groups.values())
+        dg_capacity = sum(pool.registry.limits(k, "streaming") for k in groups.values() if k.provider == "deepgram")
+        if any(k.provider == "deepgram" and k.name not in pool.registry.verified for k in eligible):
+            capacity -= max(0, dg_capacity - settings.deepgram_streaming_limit)
         return {
             "enabled": preferred and usable,
             "preferred": preferred,
             "available": usable,
             "occupied": occupied,
-            "capacity": len(pool.keys) * 2,
+            "capacity": capacity,
+            "order": order, "source": source,
+            "providers": {p: sum(not r.retiring and r.key.provider == p for r in pool.reservations.values())
+                          for p in ("deepgram", "speechmatics")},
+            "capture_suspended": order != ("whisper",) and not pool.registry.usable(order),
             "queued": getattr(service.state, "realtime_queue_sizes", {}).get(
                 guild_id, 0
             ),
         }
+
+    if speechmatics_keys is not None:
+        install_provider_routes(service, get_settings=get_settings, get_repository=get_repository,
+                                speechmatics_keys=speechmatics_keys)
 
     @service.get("/v1/guilds/{guild_id}/streaming")
     async def get_mode(
@@ -94,12 +110,13 @@ def install_streaming_routes(
         pool = pool_for(settings)
         enabled = request.mode == "on"
         if enabled:
-            if not valid_configuration(settings, pool.keys):
+            order, _ = await asyncio.to_thread(effective_order, settings, repository, guild_id)
+            if not valid_configuration(settings, pool.keys, order):
                 raise HTTPException(
                     409,
-                    "Streaming requires Speechmatics keys, Realtime enhanced/standard and language pt",
+                    "Streaming requires a configured provider with a compatible streaming model/language",
                 )
-            key_health.reset(pool.keys)
+            pool.registry.reset()
             if pool.session_id:
                 session = await asyncio.to_thread(
                     repository.get_voice_session, pool.session_id
@@ -128,7 +145,7 @@ def install_streaming_routes(
             mode["enabled"] and session.status == "open" and not state["exhausted"]
         )
         assignments = pool.reconcile(
-            session_id, list(dict.fromkeys(request.users)), enabled
+            session_id, list(dict.fromkeys(request.users)), enabled, mode["order"]
         )
         queues = getattr(service.state, "realtime_queue_sizes", {})
         queues[session.guild_id] = (

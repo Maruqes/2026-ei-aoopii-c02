@@ -25,6 +25,7 @@ const (
 	channels                = 2
 	bitsPerSample           = 16
 	maxFrameMs              = 120
+	audioReorderWindow      = 60 * time.Millisecond
 	defaultOpusFrameMs      = 20
 	maxConcealedOpusPackets = 6
 	defaultOpusFrameSamples = sampleRate * defaultOpusFrameMs / 1000
@@ -415,18 +416,191 @@ func ListenAndWriteOpusToWAV(
 		}
 	}
 	voiceMu.Unlock()
+	identifyPacket := func(packet *discordgo.Packet) string {
+		var discordID string
+		if ssrcUsers != nil {
+			if user, ok := ssrcUsers.GetBySSRC(packet.SSRC); ok {
+				discordID = user.DiscordID
+				if identifiedUsers[packet.SSRC] != user.DiscordID {
+					identifiedUsers[packet.SSRC] = user.DiscordID
+					log.Printf("a receber áudio de user=%s ssrc=%d", user.DiscordID, user.SSRC)
+				}
+			} else {
+				if syncSSRCUserMapFromVoiceConnection(vc, ssrcUsers) {
+					if user, ok := ssrcUsers.GetBySSRC(packet.SSRC); ok {
+						discordID = user.DiscordID
+						if identifiedUsers[packet.SSRC] != user.DiscordID {
+							identifiedUsers[packet.SSRC] = user.DiscordID
+							log.Printf("SSRC associado pelo voice websocket user=%s ssrc=%d", user.DiscordID, user.SSRC)
+						}
+					}
+				}
+				if discordID == "" && !unknownSSRCs[packet.SSRC] {
+					unknownSSRCs[packet.SSRC] = true
+					log.Printf("a receber áudio de ssrc=%d sem user associado", packet.SSRC)
+				}
+			}
+		}
+
+		return discordID
+	}
+	processPacket := func(packet *discordgo.Packet, discordID string, packetAt time.Time) error {
+		// Ownership was resolved on receipt, before a member can leave or lose
+		// their SSRC mapping. Privacy/suspension gates still apply at flush.
+		if isUserCapturePaused(discordID) || streaming.suspended() {
+			return nil
+		}
+
+		dec := decoders[packet.SSRC]
+		if dec == nil {
+			newDecoder, err := newDiscordOpusDecoder()
+			if err != nil {
+				return err
+			}
+			dec = newDecoder
+			decoders[packet.SSRC] = dec
+		}
+
+		recording := userRecordings[discordID]
+		plan := rtpPacketPlan{}
+		if recording != nil {
+			plan = recording.planRTPPacket(packet.SSRC, packet.Sequence, packet.Timestamp)
+			if plan.stale {
+				// Discard before rotation so a late duplicate cannot become a new clip.
+				return nil
+			}
+		}
+		if (recording != nil && recording.realtime != nil && recording.realtime.failed.Load()) || shouldRotateRecording(recording, packetAt, packet.SSRC) || shouldRotateForRTPGap(plan) || (recording != nil && recording.streamToken != streaming.grant(discordID).Token) {
+			delete(userRecordings, discordID)
+			if err := closeAndTranscribeRecording(recording, voiceUserInfo{}, transcriptions); err != nil {
+				return err
+			}
+			recording = nil
+			plan = rtpPacketPlan{}
+		}
+
+		recoveredPCM := []int16(nil)
+		silenceFrames := plan.timestampGapFrames
+		if recording != nil && plan.missingPackets > 0 && plan.timestampGapFrames > 0 {
+			var recoverErr error
+			recoveredPCM, silenceFrames, recoverErr = recoverMissingOpusAudio(
+				dec,
+				packet.Opus,
+				plan.missingPackets,
+				plan.timestampGapFrames,
+			)
+			if recoverErr != nil {
+				log.Printf(
+					"erro a recuperar perda RTP user=%s ssrc=%d sequence=%d missing=%d gap_frames=%d: %v",
+					discordID,
+					packet.SSRC,
+					packet.Sequence,
+					plan.missingPackets,
+					plan.timestampGapFrames,
+					recoverErr,
+				)
+				recoveredPCM = nil
+				silenceFrames = plan.timestampGapFrames
+			} else if len(recoveredPCM) > 0 {
+				log.Printf(
+					"perda RTP recuperada user=%s ssrc=%d sequence=%d missing=%d recovered_frames=%d silence_frames=%d",
+					discordID,
+					packet.SSRC,
+					packet.Sequence,
+					plan.missingPackets,
+					len(recoveredPCM)/channels,
+					silenceFrames,
+				)
+			}
+		}
+
+		pcm, frames, err := dec.Decode(packet.Opus)
+		if err != nil {
+			log.Printf("erro a descodificar opus (ssrc=%d): %v", packet.SSRC, err)
+			return nil
+		}
+
+		if recording == nil {
+			outPath := newUserAudioPath(outDir, discordID)
+			newWriter, err := NewWAVWriter(outPath, sampleRate, channels, bitsPerSample)
+			if err != nil {
+				return err
+			}
+			recording = &userAudioRecording{
+				wav:       newWriter,
+				path:      outPath,
+				startedAt: packetAt,
+				user:      getRecordingUserInfo(discordID, lookupUserInfo),
+				channel:   getCurrentChannelName(currentChannelName, vc.ChannelID),
+				sessionID: sessionID,
+			}
+			if grant := streaming.grant(discordID); grant.Token != "" && transcriptions != nil {
+				request := TranscriptionRequest{SessionID: sessionID, AudioPath: outPath, DiscordID: discordID,
+					Username: recording.user.Username, DisplayName: recording.user.DisplayName,
+					ChannelName: recording.channel, RecordingStartedAt: packetAt, SafetyWAV: true}
+				// Persist before opening Realtime: a crash still leaves a recoverable WAV and owner.
+				if err := persistTranscription(request); err == nil {
+					_ = persistSessionFinish(sessionID, currentBotLanguage().apiValue())
+					transcriptions.submissionMu.Lock()
+					if transcriptions.liveAudio == nil {
+						transcriptions.liveAudio = map[string]bool{}
+					}
+					transcriptions.liveAudio[transcriptionOutboxPath(request)] = true
+					transcriptions.submissionMu.Unlock()
+					recording.streamToken = grant.Token
+					recording.realtime = newRealtimeAudioClient(transcriptions, withStreamingController(request, streaming), grant, streaming.state.assistant)
+				} else {
+					log.Printf("Realtime outbox failed user=%s; using Batch", discordID)
+				}
+			}
+			userRecordings[discordID] = recording
+			log.Printf("a gravar user=%s para %s", discordID, outPath)
+		}
+
+		if err := recording.writeRTPPacket(
+			packet.SSRC,
+			packet.Sequence,
+			packet.Timestamp,
+			silenceFrames,
+			recoveredPCM,
+			pcm,
+			frames,
+		); err != nil {
+			return err
+		}
+		recording.lastPacketAt = maxPacketArrival(recording.lastPacketAt, packetAt)
+		return nil
+	}
+	buffer := discordAudioBuffer{}
+	flush := func(now time.Time, all bool) error {
+		for _, queued := range buffer.ready(now, all) {
+			if err := processPacket(queued.packet, queued.discordID, queued.receivedAt); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	reorderTicker := time.NewTicker(10 * time.Millisecond)
+	defer reorderTicker.Stop()
 	idleTicker := time.NewTicker(250 * time.Millisecond)
 	defer idleTicker.Stop()
 	for {
 		select {
 		case <-stopSignal:
+			if err := flush(time.Now(), true); err != nil {
+				return err
+			}
 			return closeUserRecordings(userRecordings, transcriptions)
+		case tick := <-reorderTicker.C:
+			if err := flush(tick, false); err != nil {
+				return err
+			}
 		case tick := <-idleTicker.C:
 			for id, recording := range userRecordings {
 				if err := recording.padRealtimeSilence(tick); err != nil {
 					return err
 				}
-				if !recording.lastPacketAt.IsZero() && tick.Sub(recording.lastPacketAt) >= recordingIdleTimeout() || recording.streamToken != streaming.grant(id).Token || streaming.suspended() {
+				if !recording.lastPacketAt.IsZero() && tick.Sub(recording.lastPacketAt) >= recordingIdleTimeout() || recording.streamToken != streaming.grant(id).Token || (recording.realtime != nil && recording.realtime.failed.Load()) || streaming.suspended() {
 					delete(userRecordings, id)
 					if err := closeAndTranscribeRecording(recording, voiceUserInfo{}, transcriptions); err != nil {
 						log.Printf("Could not flush idle recording: %v", err)
@@ -437,6 +611,9 @@ func ListenAndWriteOpusToWAV(
 			if !ok {
 				recordingEvents = nil
 				continue
+			}
+			if err := flush(time.Now(), true); err != nil {
+				return err
 			}
 			if event.finishAll {
 				log.Printf("evento recebido: finalizar todas as gravações ativas count=%d stop=%v", len(userRecordings), event.stopListening)
@@ -466,164 +643,20 @@ func ListenAndWriteOpusToWAV(
 		case packet, ok := <-vc.OpusRecv:
 			if !ok {
 				log.Println("OpusRecv fechado")
-				return nil
+				return flush(time.Now(), true)
 			}
 			if packet == nil || len(packet.Opus) == 0 {
 				continue
 			}
 
-			var discordID string
-			if ssrcUsers != nil {
-				if user, ok := ssrcUsers.GetBySSRC(packet.SSRC); ok {
-					discordID = user.DiscordID
-					if identifiedUsers[packet.SSRC] != user.DiscordID {
-						identifiedUsers[packet.SSRC] = user.DiscordID
-						log.Printf("a receber áudio de user=%s ssrc=%d", user.DiscordID, user.SSRC)
-					}
-				} else {
-					if syncSSRCUserMapFromVoiceConnection(vc, ssrcUsers) {
-						if user, ok := ssrcUsers.GetBySSRC(packet.SSRC); ok {
-							discordID = user.DiscordID
-							if identifiedUsers[packet.SSRC] != user.DiscordID {
-								identifiedUsers[packet.SSRC] = user.DiscordID
-								log.Printf("SSRC associado pelo voice websocket user=%s ssrc=%d", user.DiscordID, user.SSRC)
-							}
-						}
-					}
-					if discordID == "" && !unknownSSRCs[packet.SSRC] {
-						unknownSSRCs[packet.SSRC] = true
-						log.Printf("a receber áudio de ssrc=%d sem user associado", packet.SSRC)
-					}
-				}
-			}
-
+			discordID := identifyPacket(packet)
 			if discordID == "" || discordID == vc.UserID || isUserCapturePaused(discordID) || streaming.suspended() || !streaming.participantPresent(discordID) {
 				continue
 			}
-
-			dec := decoders[packet.SSRC]
-			if dec == nil {
-				newDecoder, err := newDiscordOpusDecoder()
-				if err != nil {
-					return err
-				}
-				dec = newDecoder
-				decoders[packet.SSRC] = dec
-			}
-
-			packetAt := time.Now().UTC()
-			recording := userRecordings[discordID]
-			plan := rtpPacketPlan{}
-			if recording != nil {
-				plan = recording.planRTPPacket(packet.SSRC, packet.Sequence, packet.Timestamp)
-				if plan.stale {
-					// Discard before rotation so a late duplicate cannot become a new clip.
-					continue
-				}
-			}
-			if shouldRotateRecording(recording, packetAt, packet.SSRC) || shouldRotateForRTPGap(plan) || (recording != nil && recording.streamToken != streaming.grant(discordID).Token) {
-				delete(userRecordings, discordID)
-				if err := closeAndTranscribeRecording(recording, voiceUserInfo{}, transcriptions); err != nil {
-					return err
-				}
-				recording = nil
-				plan = rtpPacketPlan{}
-			}
-
-			if recording != nil {
-				plan.timestampGapFrames = max(0, plan.timestampGapFrames-recording.idlePadding)
-				recording.idlePadding = 0
-			}
-			recoveredPCM := []int16(nil)
-			silenceFrames := plan.timestampGapFrames
-			if recording != nil && plan.missingPackets > 0 && plan.timestampGapFrames > 0 {
-				var recoverErr error
-				recoveredPCM, silenceFrames, recoverErr = recoverMissingOpusAudio(
-					dec,
-					packet.Opus,
-					plan.missingPackets,
-					plan.timestampGapFrames,
-				)
-				if recoverErr != nil {
-					log.Printf(
-						"erro a recuperar perda RTP user=%s ssrc=%d sequence=%d missing=%d gap_frames=%d: %v",
-						discordID,
-						packet.SSRC,
-						packet.Sequence,
-						plan.missingPackets,
-						plan.timestampGapFrames,
-						recoverErr,
-					)
-					recoveredPCM = nil
-					silenceFrames = plan.timestampGapFrames
-				} else if len(recoveredPCM) > 0 {
-					log.Printf(
-						"perda RTP recuperada user=%s ssrc=%d sequence=%d missing=%d recovered_frames=%d silence_frames=%d",
-						discordID,
-						packet.SSRC,
-						packet.Sequence,
-						plan.missingPackets,
-						len(recoveredPCM)/channels,
-						silenceFrames,
-					)
-				}
-			}
-
-			pcm, frames, err := dec.Decode(packet.Opus)
-			if err != nil {
-				log.Printf("erro a descodificar opus (ssrc=%d): %v", packet.SSRC, err)
-				continue
-			}
-
-			if recording == nil {
-				outPath := newUserAudioPath(outDir, discordID)
-				newWriter, err := NewWAVWriter(outPath, sampleRate, channels, bitsPerSample)
-				if err != nil {
-					return err
-				}
-				recording = &userAudioRecording{
-					wav:       newWriter,
-					path:      outPath,
-					startedAt: packetAt,
-					user:      getRecordingUserInfo(discordID, lookupUserInfo),
-					channel:   getCurrentChannelName(currentChannelName, vc.ChannelID),
-					sessionID: sessionID,
-				}
-				if grant := streaming.grant(discordID); grant.Token != "" && transcriptions != nil {
-					request := TranscriptionRequest{SessionID: sessionID, AudioPath: outPath, DiscordID: discordID,
-						Username: recording.user.Username, DisplayName: recording.user.DisplayName,
-						ChannelName: recording.channel, RecordingStartedAt: packetAt, SafetyWAV: true}
-					// Persist before opening Realtime: a crash still leaves a recoverable WAV and owner.
-					if err := persistTranscription(request); err == nil {
-						_ = persistSessionFinish(sessionID, currentBotLanguage().apiValue())
-						transcriptions.submissionMu.Lock()
-						if transcriptions.liveAudio == nil {
-							transcriptions.liveAudio = map[string]bool{}
-						}
-						transcriptions.liveAudio[transcriptionOutboxPath(request)] = true
-						transcriptions.submissionMu.Unlock()
-						recording.streamToken = grant.Token
-						recording.realtime = newRealtimeAudioClient(transcriptions, request, grant, streaming.state.assistant)
-					} else {
-						log.Printf("Realtime outbox failed user=%s; using Batch", discordID)
-					}
-				}
-				userRecordings[discordID] = recording
-				log.Printf("a gravar user=%s para %s", discordID, outPath)
-			}
-
-			if err := recording.writeRTPPacket(
-				packet.SSRC,
-				packet.Sequence,
-				packet.Timestamp,
-				silenceFrames,
-				recoveredPCM,
-				pcm,
-				frames,
-			); err != nil {
+			buffer.add(packet, time.Now().UTC(), discordID)
+			if err := flush(time.Now(), false); err != nil {
 				return err
 			}
-			recording.lastPacketAt = packetAt
 		}
 	}
 }
@@ -633,7 +666,14 @@ func (recording *userAudioRecording) padRealtimeSilence(now time.Time) error {
 	if recording.realtime == nil || recording.lastPacketAt.IsZero() {
 		return nil
 	}
-	expected := int(now.Sub(recording.lastPacketAt).Seconds() * sampleRate)
+	select {
+	case <-recording.realtime.abort:
+		return nil
+	case <-recording.realtime.done:
+		return nil
+	default:
+	}
+	expected := int((now.Sub(recording.lastPacketAt) - audioReorderWindow).Seconds() * sampleRate)
 	padding := max(0, expected-recording.idlePadding-recording.lastPacketFrames)
 	if padding == 0 {
 		return nil
@@ -732,6 +772,27 @@ func (recording *userAudioRecording) writeRTPPacket(
 		return fmt.Errorf("WAV PCM incompleto: frames=%d channels=%d samples=%d", frames, recording.wav.channels, len(pcm))
 	}
 
+	// Padding may cover late speech. Preserve the full decoded audio in the WAV
+	// and fall back to Batch, since upstream silence cannot be retracted.
+	if recording.idlePadding > silenceFrames {
+		if recording.realtime != nil {
+			recording.realtime.abortOnce.Do(func() { close(recording.realtime.abort) })
+		}
+		dataSize := recording.wav.dataSize - uint32(recording.idlePadding*int(recording.wav.channels)*2)
+		if err := recording.wav.f.Truncate(44 + int64(dataSize)); err != nil {
+			return err
+		}
+		if _, err := recording.wav.f.Seek(44+int64(dataSize), 0); err != nil {
+			return err
+		}
+		recording.wav.dataSize = dataSize
+		recording.idlePadding = 0
+		log.Printf("Late RTP overlaps Realtime silence; full WAV retained for Batch user=%s", recording.user.DiscordID)
+	} else {
+		silenceFrames -= recording.idlePadding
+		recording.idlePadding = 0
+	}
+
 	if err := recording.wav.WriteSilence(silenceFrames); err != nil {
 		return err
 	}
@@ -754,6 +815,13 @@ func (recording *userAudioRecording) writeRTPPacket(
 	recording.hasRTPSequence = true
 	recording.hasRTPTimestamp = true
 	return nil
+}
+
+func maxPacketArrival(previous, current time.Time) time.Time {
+	if previous.After(current) {
+		return previous
+	}
+	return current
 }
 
 func getRecordingUserInfo(discordID string, lookupUserInfo func(string) voiceUserInfo) voiceUserInfo {

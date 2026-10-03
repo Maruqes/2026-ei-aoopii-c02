@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -50,7 +51,7 @@ func handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	name := strings.ToLower(data.Name)
 	if needsDeferredResponse(i) {
 		flags := discordgo.MessageFlags(0)
-		if name == "streaming" || name == "assistant" {
+		if name == "streaming" || name == "assistant" || name == "stt" {
 			flags = discordgo.MessageFlagsEphemeral
 		}
 		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseDeferredChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: flags}}); err != nil {
@@ -64,6 +65,8 @@ func handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	switch {
 	case isMusicCommand(name):
 		musicHook(s, i)
+	case name == "stt":
+		sttHook(s, i)
 	case name == "assistant":
 		assistantHook(s, i)
 	case commandMatches(name, "streaming"):
@@ -629,6 +632,7 @@ func healthHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		fmt.Sprintf(textForLanguage(lang, "**Resumos:** %d pendentes, %d falhados", "**Summaries:** %d pending, %d failed"), health.SessionsPending, health.SessionsFailed),
 		fmt.Sprintf(textForLanguage(lang, "**Perfis de voz:** %d pendentes, %d falhados", "**Voice profiles:** %d pending, %d failed"), health.VoiceProfilesPending, health.VoiceProfilesFailed),
 	)
+	lines = append(lines, "**STT:** "+strings.Join(health.TranscriptionOrder, " → ")+" · "+strings.Join(health.TranscriptionProvidersInUse, ", "))
 	if health.LLMProvider != "" || health.LLMModel != "" {
 		lines = append(lines, fmt.Sprintf("**IA:** %s / %s", health.LLMProvider, health.LLMModel))
 	}
@@ -648,31 +652,18 @@ func healthHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 }
 
 func keysHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	lang := currentBotLanguage()
 	client := botAPIClient
 	if client == nil {
 		client = NewTranscriptionClientFromEnv()
 	}
-
-	keys, err := client.GetSpeechmaticsKeys(context.Background())
-	if err != nil {
-		respondText(s, i, fmt.Sprintf(textForLanguage(lang, "Nao consegui consultar as chaves Speechmatics: %v", "I could not fetch Speechmatics keys: %v"), err))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var result transcriptionKeys
+	if err := client.getJSON(ctx, "/v1/transcription/keys?guild_id="+url.QueryEscape(i.GuildID), &result); err != nil {
+		respondText(s, i, fmt.Sprintf("STT: %v", err))
 		return
 	}
-	if keys.Provider != "speechmatics" {
-		respondText(s, i, fmt.Sprintf(textForLanguage(lang, "Speechmatics nao esta ativo. Provider atual: %s", "Speechmatics is not active. Current provider: %s"), keys.Provider))
-		return
-	}
-	if len(keys.Keys) == 0 {
-		respondText(s, i, textForLanguage(lang, "Nao ha chaves API Speechmatics configuradas.", "No Speechmatics API keys are configured."))
-		return
-	}
-
-	lines := []string{textForLanguage(lang, "**Speechmatics · custo estimado (USD)**", "**Speechmatics · estimated cost (USD)**")}
-	for _, key := range keys.Keys {
-		lines = append(lines, formatSpeechmaticsKeyLine(key, lang))
-	}
-	respondLongText(s, i, strings.Join(lines, "\n"))
+	respondLongText(s, i, formatTranscriptionKeys(result, currentBotLanguage()))
 }
 
 func formatSpeechmaticsKeyLine(key SpeechmaticsKeyUsageResponse, lang botLanguage) string {
@@ -1289,7 +1280,7 @@ func needsDeferredResponse(i *discordgo.InteractionCreate) bool {
 		return false
 	}
 	switch i.ApplicationCommandData().Name {
-	case "assistant", "streaming", "start", "stop", "timeout", "language", "profile", "models", "effort", "health", "keys", "forget", "recap", "guess", "digest", "retry", "play", "pause", "skip", "queue", "musicstop":
+	case "stt", "assistant", "streaming", "start", "stop", "timeout", "language", "profile", "models", "effort", "health", "keys", "forget", "recap", "guess", "digest", "retry", "play", "pause", "skip", "queue", "musicstop":
 		return true
 	}
 	return false
@@ -1344,7 +1335,7 @@ func canManageServer(i *discordgo.InteractionCreate) bool {
 }
 func requiresManageServer(command string) bool {
 	switch command {
-	case "start", "stop", "sync", "timeout", "language", "retry", "effort", "streaming":
+	case "start", "stop", "sync", "timeout", "language", "retry", "effort", "streaming", "stt":
 		return true
 	}
 	return false

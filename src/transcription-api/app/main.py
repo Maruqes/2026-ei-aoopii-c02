@@ -48,6 +48,7 @@ from .model_selection import (
     select_model,
 )
 from .profile_updater import run_text_profile_sync, start_text_profile_sync_loop
+from .providers import effective_order, registry_for
 from .recording_cleanup import RecordingCleanup, remove_recording_files
 from .schemas import (
     CreateSessionRequest,
@@ -78,7 +79,7 @@ from .schemas import (
     UserProfileResponse,
     VoiceSessionResponse,
 )
-from .speechmatics_errors import NoCredits, key_health
+from .speechmatics_errors import NoCredits, ProviderError
 from .speechmatics_usage import (
     SpeechmaticsAPIKey,
     SpeechmaticsKeyUsage,
@@ -93,6 +94,7 @@ from .transcriber import (
     TranscriptionResult,
     WhisperTranscriber,
 )
+from .transcription_router import TranscriptionRouter, remote_mode
 from .workers import RecordingWorkers
 
 SUPPORTED_EXTENSIONS = {
@@ -239,6 +241,9 @@ def create_app() -> FastAPI:
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=f"Database unavailable: {exc}",
             ) from exc
+        pool = getattr(service.state, "realtime_pool", None)
+        active_session = repository.get_voice_session(pool.session_id) if pool and pool.session_id else None
+        order, _ = effective_order(settings, repository, active_session.guild_id if active_session else None)
         return HealthResponse(
             status="ok",
             database="ok",
@@ -254,6 +259,8 @@ def create_app() -> FastAPI:
             last_recording_status=details["last_recording_status"],
             last_recording_filename=details["last_recording_filename"],
             last_recording_at=details["last_recording_at"],
+            transcription_provider_order=list(order),
+            transcription_providers_in_use=registry_for(settings).active_providers(),
         )
 
     @service.get("/v1/speechmatics/keys", response_model=SpeechmaticsKeysResponse)
@@ -261,7 +268,7 @@ def create_app() -> FastAPI:
         settings: Settings = Depends(get_settings),
         repository: DataRepository = Depends(get_repository),
     ) -> SpeechmaticsKeysResponse:
-        if settings.transcription_provider != "speechmatics":
+        if not configured_speechmatics_api_keys(settings):
             return SpeechmaticsKeysResponse(
                 provider=settings.transcription_provider,
                 limit_hours=settings.speechmatics_usage_limit_hours,
@@ -552,7 +559,7 @@ def create_app() -> FastAPI:
             summary_channel_id=request.summary_channel_id,
             started_at=request.started_at or datetime.now(timezone.utc),
         )
-        key_health.reset(configured_speechmatics_api_keys(settings))
+        registry_for(settings).reset()
         return voice_session_response(session)
 
     @service.post(
@@ -817,7 +824,7 @@ def create_app() -> FastAPI:
 
     install_streaming_routes(service, get_settings=get_settings, get_repository=get_repository,
         configured_keys=configured_speechmatics_api_keys,
-        validate_filename=validate_recording_filename, resolve_path=resolve_recording_path)
+        validate_filename=validate_recording_filename, resolve_path=resolve_recording_path, speechmatics_keys=speechmatics_keys)
     return service
 
 
@@ -832,6 +839,8 @@ def get_repository(settings: Settings = Depends(get_settings)) -> DataRepository
 
 @lru_cache
 def get_transcriber(settings: Settings = Depends(get_settings)) -> Transcriber:
+    if remote_mode(settings):
+        return TranscriptionRouter(settings)
     if settings.transcription_provider == "whisper":
         return WhisperTranscriber(
             settings.whisper_model,
@@ -902,6 +911,7 @@ def get_speechmatics_key_usages(
         batch_url=settings.speechmatics_batch_url,
         limit_hours=settings.speechmatics_usage_limit_hours,
         since=settings.speechmatics_usage_since,
+        timeout_seconds=2,
     )
     # Today is already in the provider query; adding local WAVs would double-count.
     return rows
@@ -1134,7 +1144,19 @@ def process_recording_file(
             transcriber.model_name,
             discord_id,
         )
-        if (
+        if recording_id and session_id and not isinstance(transcriber, TranscriptionRouter):
+            session = repository.get_voice_session(session_id)
+            if session and repository.transcription_order(session.guild_id):
+                transcriber = TranscriptionRouter(settings)
+        if isinstance(transcriber, TranscriptionRouter):
+            transcription_result = transcriber.transcribe_recording(
+                recording_path, repository=repository, recording_id=recording_id,
+                session_id=session_id, job_id=provider_job_id, key_name=provider_key_name,
+            )
+            if recording_id:
+                repository.set_recording_provider(recording_id, transcription_result.provider,
+                    transcription_result.model, transcription_result.group)
+        elif (
             isinstance(transcriber, SpeechmaticsTranscriber)
             and recording_id is not None
         ):
@@ -1222,11 +1244,20 @@ def process_recording_file(
             )
     except NoCredits:
         if session_id is not None:
-            repository.discard_session_audio(session_id)
-            RecordingCleanup(repository=repository, settings=settings).sweep()
+            if repository.session_has_remote_jobs(session_id):
+                repository.defer_recording(recording_id, "remote_job_pending")
+            else:
+                repository.discard_session_audio(session_id)
+                RecordingCleanup(repository=repository, settings=settings).sweep()
         else:
-            repository.mark_recording_failed(recording_id, "Speechmatics credits exhausted")
-        logger.warning("Speechmatics exhausted session=%s; pending audio discarded", session_id)
+            repository.mark_recording_failed(recording_id, "Transcription providers exhausted")
+        logger.warning("Transcription providers exhausted session=%s", session_id)
+    except ProviderError as exc:
+        if exc.kind in {"recoverable", "capacity", "unconfigured", "invalid_key"} and recording_id:
+            repository.defer_recording(recording_id, exc.kind)
+        else:
+            repository.mark_recording_failed(recording_id, exc.kind)
+        logger.warning("Transcription deferred unit=%s reason=%s", recording_id, exc.kind)
     except Exception as exc:
         error_msg = (
             type(exc).__name__

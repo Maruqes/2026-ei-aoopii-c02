@@ -1,6 +1,6 @@
 # Plano: assistente por voz «Hey Bot»
 
-Data: 2026-10-03. Estado: versão chat implementada; ensaio Discord e voz pendentes.
+Data: 2026-10-03. Estado: chat e voz local implementados; ensaio Discord pendente.
 
 ## Experiência pretendida
 
@@ -17,8 +17,8 @@ Exemplo da primeira versão:
 4. Bot, no mesmo canal: pergunta reconhecida e resposta curta em português.
 5. O próximo pedido exige novamente «Hey Bot».
 
-«Diz» e a resposta serão escritos no chat nesta versão. A confirmação audível e a
-resposta falada entram na etapa seguinte. Também aceitar «Hey Bot, explica…» sem
+«Diz» e a resposta são escritos no chat e falados com TTS local em PT-PT.
+Também aceitar «Hey Bot, explica…» sem
 obrigar o utilizador a esperar pela confirmação.
 
 ## Decisões assumidas depois do grilling
@@ -62,8 +62,8 @@ uma interação e libertam o bot para a próxima ativação.
 - `/oracle` e `app/llm.py` já têm transporte LLM e respostas no chat. O oracle exige
   contexto do servidor: não serve diretamente para perguntas gerais sem histórico.
 - `src/data/repository.py` já persiste preferências de transcrição por servidor.
-- `discord_bot/music.go` já envia áudio ao Discord. Não existe TTS, e música e voz
-  teriam de partilhar essa saída de forma coordenada.
+- `discord_bot/music.go` envia áudio ao Discord e partilha a saída com o TTS local
+  por frames de música e por resposta completa de voz, sem intercalar streams.
 
 **Capacidade é condição de aceitação:** o pool atual reserva duas pessoas por chave
 distinta e passa as restantes para Batch. Batch pode esperar 10 segundos de silêncio
@@ -182,12 +182,12 @@ o início da medição para a chegada da transcrição.
 
 ### 6. Voz, depois de validar o chat
 
-Acrescentar primeiro um clip fixo «Diz» para confirmação audível. Depois comparar
-TTS local e remoto usando português de Portugal, tempo até primeiro áudio, qualidade,
-custo e requisitos de execução. Escolher por ensaio, sem nova dependência antecipada.
-Reutilizar o encoder/output Discord; pausar/retomar música para evitar streams
-intercalados. Ignorar áudio de bots na deteção. Se TTS falhar, conservar a resposta
-no chat. Nesta etapa adicionar escolha de saída `chat`, `voice` ou `both`.
+Implementada a confirmação «Diz» e a resposta com TTS local em português de Portugal.
+Reutiliza o encoder/output Discord e suspende frames de música durante a voz, sem
+perder a posição nem alterar pausas manuais. Ignora áudio de bots na deteção e
+conserva a resposta no chat se TTS falhar. A saída é chat e voz por defeito, ou só
+chat com `ASSISTANT_VOICE_ENABLED=false`. A comparação com voz remota e a escolha
+por servidor ficam para uma necessidade posterior.
 
 ## Fora desta implementação
 
@@ -215,7 +215,8 @@ A etapa 1 e o ensaio da etapa 5 **não foram realizados**: não há nesta execu�
 chamada Discord controlada com humanos para medir capacidade, p95 e consumo. Não se
 alteraram limites do fornecedor nem se declara suporte para todos os participantes.
 A preferência `/streaming` existente continua a controlar a disponibilidade Realtime;
-usá-la com `mode:on` antes do ensaio. A etapa 6 (clip «Diz» e TTS) depende desse ensaio.
+usá-la com `mode:on` antes do ensaio. A voz local foi acrescentada a pedido do
+utilizador; a avaliação de qualidade, p95 e consumo numa chamada real continua pendente.
 
 A energia PCM usa um limiar inicial RMS de 500 em S16LE, ajustável por
 `ASSISTANT_SPEECH_RMS`. Validar o limiar com fala
@@ -241,3 +242,16 @@ marcadores vazios não cancelam a captura. O progresso nunca recua; palavras já
 consumidas não voltam à pergunta, mesmo num final cumulativo com outra identidade.
 Mantêm-se as validações de geração/autor e de tempos finitos dentro do áudio recebido,
 assim como a espera por finais que cubram toda a fala antes de enviar ao LLM.
+
+Voz implementada: `espeak-ng -v pt` sintetiza «Diz» e a resposta, FFmpeg converte
+para PCM e o encoder Opus existente envia os frames à chamada. Uma saída exclusiva
+impede intercalar frames de música e fala; o decoder da música conserva a posição
+e as pausas manuais. Texto permanece no chat em caso de falha e a voz tem limites de
+10 segundos para «Diz», 2 minutos para a resposta e 2000 caracteres antes de indicar
+o chat para o restante. A desativação, mudança de configuração e saída do autor
+cancelam a fala. `ASSISTANT_VOICE_ENABLED=false` permite usar só chat; o default é
+chat e voz. Não foi adicionada uma API externa de TTS nem uma escolha por servidor.
+
+Verificação: síntese PT-PT real para pacotes Opus descodificáveis, música bloqueada
+durante a fala e retomada depois, preservação de pausa manual, cancelamento dos
+processos e fallback de texto em falha de TTS. O ensaio Discord continua pendente.

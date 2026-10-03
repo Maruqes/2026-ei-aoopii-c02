@@ -46,7 +46,7 @@ func checkAndSendSpeechmaticsUsageAlerts(
 		log.Printf("erro ao consultar uso Speechmatics para alertas: %v", err)
 		return
 	}
-	if keys.Provider != "speechmatics" {
+	if len(keys.Keys) == 0 {
 		return
 	}
 
