@@ -433,6 +433,9 @@ class ChatGPTAuth:
         models = data.get("models")
         if not isinstance(models, list):
             raise ChatGPTError("O catálogo ChatGPT devolvido é inválido.")
+        # /models exposes the complete account catalog, including entries the
+        # provider hides from its default picker. Selection still tests inference
+        # before saving, since appearing in the catalog does not guarantee access.
         return [
             {
                 "slug": item["slug"],
@@ -440,7 +443,6 @@ class ChatGPTAuth:
             }
             for item in models
             if isinstance(item, dict)
-            and item.get("visibility") == "list"
             and isinstance(item.get("slug"), str)
             and item["slug"].strip()
         ]

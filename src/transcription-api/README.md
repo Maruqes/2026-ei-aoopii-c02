@@ -189,6 +189,11 @@ persisted in `LLM_MODEL_SELECTION_FILE` (default `.tmp/llm_model_selection.json`
 the model configured in the environment after restart. If no model has been persisted yet, the
 environment model is used.
 
+With `LLM_PROVIDER=chatgpt`, `/models` fetches the signed-in account's catalog directly from
+`https://api.openai.com/v1/models` on each request. All entries with valid model IDs are included,
+even those marked hidden or without visibility metadata, and Discord paginates the choices.
+Models that fail the test prompt are not activated.
+
 For Groq, set `OPENAI_BASE_URL=https://api.groq.com/openai/v1` and choose a Groq model such as
 `llama-3.3-70b-versatile`. The legacy `LLM_PROVIDER=groq` and `GROQ_*` environment variables are
 still accepted for existing local setups.
@@ -219,7 +224,12 @@ legacy recordings without metadata are marked failed rather than blocking summar
 Voice and text conversations above `LLM_CONTEXT_CHARS` are distilled in chronological
 slices before synthesis. Prompts preserve speakers, dates, topic changes, explicit decisions,
 owners and stated deadlines. Recaps end with memorable moments when the evidence supports
-them. Questions receive a direct answer and relevant evidence; a joke is optional.
+them. `/oracle` and `/prompt` answer directly in natural prose with playful irony grounded in
+the supplied evidence. `/profile` descriptions use the same tone when profiles are generated or
+updated. New voice recaps and `/digest` summaries group topics and weave humor into the recap,
+using chronology only when the sequence matters. Dates and uncertainty are included when they
+help answer the question; humor never adds invented facts or quotes. Already stored profiles and
+recaps keep their previous wording until regenerated.
 The oracle retrieves older messages matching question terms within the requested guild.
 No voice context is selected solely by a channel name shared across servers.
 

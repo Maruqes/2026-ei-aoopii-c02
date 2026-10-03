@@ -1,11 +1,46 @@
 package main
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/bwmarrin/discordgo"
 )
+
+func TestChatGPTModelsResponseShowsEntireCatalogAcrossPages(t *testing.T) {
+	catalog := make([]string, 57)
+	for index := range catalog {
+		catalog[index] = fmt.Sprintf("model-%02d", index)
+	}
+	models := &LLMModelsResponse{Provider: "chatgpt", CurrentModel: catalog[56], Models: catalog}
+	var displayed []string
+	for page := 0; page < 3; page++ {
+		response := modelsResponse(models, page)
+		if response == nil {
+			t.Fatalf("page %d has no response", page)
+		}
+		menu := response.Data.Components[0].(discordgo.ActionsRow).Components[0].(discordgo.SelectMenu)
+		if len(menu.Options) > 25 {
+			t.Fatalf("page %d exceeds Discord's option limit", page)
+		}
+		for _, option := range menu.Options {
+			displayed = append(displayed, option.Value)
+			if option.Default != (option.Value == models.CurrentModel) {
+				t.Fatalf("incorrect current model marker for %s", option.Value)
+			}
+		}
+		buttons := response.Data.Components[1].(discordgo.ActionsRow).Components
+		if buttons[0].(discordgo.Button).Disabled != (page == 0) || buttons[1].(discordgo.Button).Disabled != (page == 2) {
+			t.Fatalf("incorrect navigation on page %d", page)
+		}
+	}
+	if !reflect.DeepEqual(displayed, catalog) {
+		t.Fatalf("displayed catalog = %v, want %v", displayed, catalog)
+	}
+}
 
 func TestModelMenuItemsIncludesCurrentModel(t *testing.T) {
 	models := []string{"a", "b", "c", "d"}

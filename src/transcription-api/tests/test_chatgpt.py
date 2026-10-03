@@ -120,6 +120,12 @@ def oauth(tmp_path, signing_key):
                             "visibility": "list",
                         },
                         {"slug": "hidden", "visibility": "hidden"},
+                        {"slug": "unlisted"},
+                        {"slug": "", "visibility": "list"},
+                        {"slug": "   ", "visibility": "list"},
+                        {"slug": None, "visibility": "list"},
+                        {"display_name": "No ID"},
+                        None,
                     ]
                 },
             )
@@ -164,7 +170,12 @@ def test_registration_storage_catalog_and_reauthorization(oauth):
     assert state["token_calls"][0]["redirect_uri"] == params["redirect_uri"]
     assert settings.chatgpt_auth_file.stat().st_mode & 0o777 == 0o600
     assert auth.access_token() == "access"
-    assert [item["slug"] for item in auth.models()] == ["model-a", "model-b"]
+    assert [item["slug"] for item in auth.models()] == [
+        "model-a",
+        "model-b",
+        "hidden",
+        "unlisted",
+    ]
     assert "access_token" not in json.dumps(auth.status())
     host_id = params["ext_agent_host_id"]
     params, _ = begin()
@@ -448,8 +459,9 @@ def test_real_sdk_decodes_responses_sse_and_json_requests(oauth, monkeypatch):
     assert sent[0]["store"] is False
 
 
+@pytest.mark.parametrize("selected_model", ["model-b", "hidden", "unlisted"])
 def test_discord_models_api_tests_and_persists_chatgpt_selection(
-    panel, oauth, monkeypatch
+    panel, oauth, monkeypatch, selected_model
 ):
     settings, auth, _, _, finish = oauth
     finish()
@@ -465,23 +477,24 @@ def test_discord_models_api_tests_and_persists_chatgpt_selection(
     models = panel.get("/v1/models")
     assert models.status_code == 200
     assert models.json()["provider"] == "chatgpt"
-    assert models.json()["models"] == ["model-a", "model-b"]
+    assert models.json()["models"] == ["model-a", "model-b", "hidden", "unlisted"]
     assert (
-        panel.post("/v1/models/current", json={"model": "model-b"}).status_code == 401
+        panel.post("/v1/models/current", json={"model": selected_model}).status_code
+        == 401
     )
     response = panel.post(
         "/v1/models/current",
-        json={"model": "model-b"},
+        json={"model": selected_model},
         headers={"X-ChatGPT-Admin-Key": "owner-secret"},
     )
     assert response.status_code == 200
     assert response.json()["test_response"] == "Ola!"
-    assert current_model(settings) == "model-b"
+    assert current_model(settings) == selected_model
     assert (
         json.loads(settings.llm_model_selection_file.read_text())["chatgpt"]
-        == "model-b"
+        == selected_model
     )
-    assert main.get_llm_client(settings).model == "model-b"
+    assert main.get_llm_client(settings).model == selected_model
     assert isinstance(main.get_llm_client(settings), ChatGPTClient)
 
 
