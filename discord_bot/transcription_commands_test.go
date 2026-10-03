@@ -32,15 +32,49 @@ func TestCombinedKeysUnknownBalanceAndDiscordPagination(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := formatTranscriptionKeys(result, botLanguageEN)
-	if !strings.Contains(content, "balance: unavailable") || strings.Contains(content, "balance: $0") || !strings.Contains(content, "speechmatics") {
+	if !strings.Contains(content, "Credits: unavailable") || strings.Contains(content, "Credits: $0") || !strings.Contains(content, "Speechmatics") {
 		t.Fatalf("unknown/provider output: %s", content)
 	}
-	for range 30 {
+	for range 150 {
 		result.Providers[0].Keys = append(result.Providers[0].Keys, result.Providers[0].Keys[0])
 	}
 	parts := splitDiscordMessage(formatTranscriptionKeys(result, botLanguageEN))
 	if len(parts) < 2 {
 		t.Fatal("many keys must be split for Discord")
+	}
+}
+
+func TestKeysAreCompactAndExplainMissingBalancePermission(t *testing.T) {
+	payload := `{"order":["deepgram","speechmatics"],"source":"environment","since":"2026-10-01","until":"2026-10-03T20:00:00Z","providers":[{"provider":"deepgram","configured":true,"model":"nova-3","streaming_model":"nova-3","groups":[{"name":"private-project-id","verified":true,"streaming_occupied":2,"streaming_limit":150,"balance_usd":null,"balance_error":"forbidden"}],"keys":[{"name":"DEEPGRAM_API_KEY_01","streaming_state":"healthy","batch_state":"healthy"},{"name":"DEEPGRAM_API_KEY_02","streaming_state":"healthy","batch_state":"no_credits"}],"cost_items":[{"estimated_cost_usd":0.18},{"estimated_cost_usd":0.19}]},{"provider":"speechmatics","configured":true,"groups":[{"streaming_limit":2},{"streaming_limit":2}],"keys":[{"name":"SPEECHMATICS_API_KEY_01","streaming_state":"healthy","batch_state":"healthy"}],"usage":{"keys":[{"name":"SPEECHMATICS_API_KEY_01","estimated_cost_usd":2.30}]}}]}`
+	var result transcriptionKeys
+	if err := json.Unmarshal([]byte(payload), &result); err != nil {
+		t.Fatal(err)
+	}
+	for _, lang := range []botLanguage{botLanguagePT, botLanguageEN} {
+		content := formatTranscriptionKeys(result, lang)
+		for _, want := range []string{"billing:read", "Streams: 2/150", "Streams: 0/4", "$0.37", "$2.30", "Key 01:", "Key 02:"} {
+			if !strings.Contains(content, want) {
+				t.Fatalf("missing %q: %s", want, content)
+			}
+		}
+		for _, unwanted := range []string{"private-project-id", "API_KEY", "UTC:", "WAV", "WS ", "environment", "nova-3", "· nível ", "· level ", "2026-10-03T"} {
+			if strings.Contains(content, unwanted) {
+				t.Fatalf("output contains noise %q: %s", unwanted, content)
+			}
+		}
+		if len(content) > 1000 || strings.Count(content, "Key 01:") != 2 || !strings.Contains(content, textForLanguage(lang, "ficheiros sem créditos", "files no credits")) {
+			t.Fatalf("compact output must keep key health without duplicates: %s", content)
+		}
+	}
+	zero := 0.0
+	result.Providers[0].Groups[0].Balance = &zero
+	content := formatTranscriptionKeys(result, botLanguageEN)
+	if !strings.Contains(content, "Credits: $0.00") || strings.Contains(content, "billing:read") {
+		t.Fatalf("a known zero balance must take precedence: %s", content)
+	}
+	result.Providers[0].CostItems[1].Cost = nil
+	if strings.Contains(formatTranscriptionKeys(result, botLanguageEN), "Estimated cost this month") {
+		t.Fatal("a partial estimate must not be presented as a complete monthly cost")
 	}
 }
 

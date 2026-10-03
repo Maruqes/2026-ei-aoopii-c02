@@ -45,6 +45,7 @@ def deepgram_management(settings, registry):
                 continue
             row = rows.get(project) or {
                 "balance_usd": None,
+                "balance_error": "unavailable",
                 "reported_hours": None,
                 "management_error": "unavailable",
                 "since": since,
@@ -88,6 +89,7 @@ def deepgram_management(settings, registry):
                             if not all(math.isfinite(value) for value in amounts):
                                 raise ValueError("Invalid balance")
                             row["balance_usd"] = sum(amounts) if amounts else None
+                            row["balance_error"] = None if amounts else "unavailable"
                         else:
                             entries = data.get("results")
                             if isinstance(entries, list):
@@ -96,7 +98,17 @@ def deepgram_management(settings, registry):
                                     raise ValueError("Invalid usage")
                                 row["reported_hours"] = sum(hours)
                         row["management_error"] = None
+                    except httpx.HTTPStatusError as exc:
+                        if operation == "balances":
+                            row["balance_error"] = (
+                                "forbidden"
+                                if exc.response.status_code == 403
+                                else "unavailable"
+                            )
+                        row["management_error"] = "unavailable"
                     except Exception:
+                        if operation == "balances":
+                            row["balance_error"] = "unavailable"
                         row["management_error"] = "unavailable"
             rows[project] = row
     with registry.lock:

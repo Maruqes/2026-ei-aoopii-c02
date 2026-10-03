@@ -50,6 +50,7 @@ type transcriptionKeys struct {
 			BatchOccupied     int      `json:"batch_occupied"`
 			BatchLimit        int      `json:"batch_limit"`
 			Balance           *float64 `json:"balance_usd"`
+			BalanceError      string   `json:"balance_error"`
 			ReportedHours     *float64 `json:"reported_hours"`
 			UpdatedAt         string   `json:"updated_at"`
 		} `json:"groups"`
@@ -113,49 +114,75 @@ func sttHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 }
 
 func formatTranscriptionKeys(result transcriptionKeys, lang botLanguage) string {
-	lines := []string{fmt.Sprintf(textForLanguage(lang, "**Ordem:** %s (%s)", "**Order:** %s (%s)"), strings.Join(result.Order, " → "), result.Source), "UTC: " + result.Since + " → " + result.Until}
+	lines := []string{fmt.Sprintf(textForLanguage(lang, "**Ordem:** %s", "**Order:** %s"), strings.Join(result.Order, " → "))}
 	for _, provider := range result.Providers {
-		lines = append(lines, "", "**"+provider.Provider+" · WAV "+provider.Model+" / WS "+provider.StreamingModel+"**")
+		title := "Deepgram"
+		if provider.Provider == "speechmatics" {
+			title = "Speechmatics"
+		}
+		lines = append(lines, "", "**"+title+"**")
 		if !provider.Configured {
 			lines = append(lines, textForLanguage(lang, "Não configurado", "Not configured"))
 			continue
 		}
-		lines = append(lines, fmt.Sprintf(textForLanguage(lang, "Disponível: WS %t · WAV %t", "Available: WS %t · WAV %t"), provider.StreamingAvailable, provider.BatchAvailable))
-		for _, group := range provider.Groups {
-			association := textForLanguage(lang, "associação não verificada; teto local", "unverified association; local ceiling")
-			if group.Verified {
-				association = textForLanguage(lang, "projeto verificado; teto local", "verified project; local ceiling")
+		if provider.Provider == "deepgram" {
+			if len(provider.Groups) == 0 {
+				lines = append(lines, textForLanguage(lang, "Créditos: indisponíveis", "Credits: unavailable"))
 			}
-			balance := textForLanguage(lang, "indisponível", "unavailable")
-			if group.Balance != nil {
-				balance = formatSpeechmaticsUSD(*group.Balance)
+			for index, group := range provider.Groups {
+				if len(provider.Groups) > 1 {
+					lines = append(lines, fmt.Sprintf(textForLanguage(lang, "Projeto %d", "Project %d"), index+1))
+				}
+				balance := textForLanguage(lang, "indisponíveis", "unavailable")
+				if group.Balance != nil {
+					balance = formatSpeechmaticsUSD(*group.Balance)
+				} else if group.BalanceError == "forbidden" {
+					balance = textForLanguage(lang, "sem permissão para consultar (billing:read)", "no permission to read (billing:read)")
+				}
+				lines = append(lines, textForLanguage(lang, "Créditos: ", "Credits: ")+balance)
+				lines = append(lines, fmt.Sprintf(textForLanguage(lang, "Streams: %d/%d (limite local)", "Streams: %d/%d (local limit)"), group.StreamingOccupied, group.StreamingLimit))
 			}
-			lines = append(lines, fmt.Sprintf("%s (%s): WS %d/%d · WAV %d/%d · %s: %s", group.Name, association, group.StreamingOccupied, group.StreamingLimit, group.BatchOccupied, group.BatchLimit, textForLanguage(lang, "saldo", "balance"), balance))
-			if group.UpdatedAt != "" {
-				lines = append(lines, "UTC: "+group.UpdatedAt)
+			cost, known := 0.0, len(provider.CostItems) > 0
+			for _, item := range provider.CostItems {
+				if item.Cost == nil {
+					known = false
+				} else {
+					cost += *item.Cost
+				}
 			}
-			if group.ReportedHours != nil {
-				lines = append(lines, textForLanguage(lang, "Uso reportado do projeto: ", "Reported project usage: ")+formatAPIHoursMinutes(*group.ReportedHours))
+			if known {
+				lines = append(lines, textForLanguage(lang, "Custo estimado este mês: ≈ ", "Estimated cost this month: ≈ ")+formatSpeechmaticsUSD(cost))
 			}
+		} else {
+			occupied, limit := 0, 0
+			for _, group := range provider.Groups {
+				occupied += group.StreamingOccupied
+				limit += group.StreamingLimit
+			}
+			lines = append(lines, textForLanguage(lang, "Créditos: indisponíveis", "Credits: unavailable"), fmt.Sprintf(textForLanguage(lang, "Streams: %d/%d (limite local)", "Streams: %d/%d (local limit)"), occupied, limit))
 		}
 		for _, key := range provider.Keys {
-			lines = append(lines, fmt.Sprintf("%s · %s · WS %s (%d) · WAV %s · %s: WS %s / WAV %s", key.Name, key.Group, sttState(key.StreamingState, lang), key.Occupied, sttState(key.BatchState, lang), textForLanguage(lang, "uso local", "local usage"), formatAPIHoursMinutes(key.StreamingHours), formatAPIHoursMinutes(key.BatchHours)))
-		}
-		if provider.Provider == "deepgram" {
-			for _, cost := range provider.CostItems {
-				if cost.Cost != nil && cost.Rate != nil {
-					lines = append(lines, fmt.Sprintf("%s · ≈ %s · $%.3f/h · %s · %s", cost.Product, formatSpeechmaticsUSD(*cost.Cost), *cost.Rate, cost.Date, cost.Source))
+			name := strings.TrimPrefix(key.Name, strings.ToUpper(provider.Provider)+"_API_KEY")
+			name = strings.TrimPrefix(name, "_")
+			if name == "" {
+				name = textForLanguage(lang, "principal", "main")
+			}
+			state := sttState(key.StreamingState, lang)
+			if key.StreamingState != key.BatchState {
+				state = fmt.Sprintf(textForLanguage(lang, "streams %s · ficheiros %s", "streams %s · files %s"), state, sttState(key.BatchState, lang))
+			}
+			line := fmt.Sprintf("Key %s: %s", name, state)
+			if provider.Usage != nil {
+				for _, usage := range provider.Usage.Keys {
+					if usage.Name == key.Name {
+						line += textForLanguage(lang, " · custo ", " · cost ") + speechmaticsKeyCost(usage, lang)
+					}
 				}
 			}
+			lines = append(lines, line)
 		}
 		if provider.Usage != nil {
-			for _, key := range provider.Usage.Keys {
-				lines = append(lines, formatSpeechmaticsKeyLine(key, lang))
-				if key.UsedHours != nil {
-					lines = append(lines, "Batch: "+formatAPIHoursMinutes(*key.UsedHours)+" · WS: "+formatAPIHoursMinutes(key.RealtimeHours)+" · UTC: "+stringValue(key.Since)+" → "+stringValue(key.Until))
-				}
-			}
-			lines = append(lines, textForLanguage(lang, "Batch remoto + Realtime local; custo estimado, saldo indisponível. Keys podem partilhar consumo remoto.", "Remote Batch + local Realtime; estimated cost, balance unavailable. Keys may share remote usage."))
+			lines = append(lines, textForLanguage(lang, "Custos estimados; consumo pode ser partilhado entre keys.", "Estimated costs; usage may be shared across keys."))
 		}
 	}
 	return strings.Join(lines, "\n")

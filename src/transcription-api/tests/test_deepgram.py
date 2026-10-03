@@ -293,6 +293,7 @@ def test_management_forbidden_does_not_disable_inference(monkeypatch):
     monkeypatch.setattr(provider_routes.httpx, "Client", lambda **kw: client)
     data = deepgram_management(s, registry)
     assert data["project"]["balance_usd"] is None
+    assert data["project"]["balance_error"] == "forbidden"
     assert data["project"]["reported_hours"] is None
     assert registry.reserve("stream", ("deepgram",), "streaming")
 
@@ -567,11 +568,32 @@ def test_management_uses_authorized_key_and_queries_shared_project_once(monkeypa
     monkeypatch.setattr(provider_routes.httpx, "Client", lambda **kwargs: client)
     rows = deepgram_management(s, registry)
     assert rows["project"]["balance_usd"] == 123
+    assert rows["project"]["balance_error"] is None
     assert rows["project"]["reported_hours"] == 1.5
     count = len(requests)
     assert deepgram_management(s, registry) == rows
     assert len(requests) == count
     assert all(registry.state(k, "batch") == "healthy" for k in registry.keys)
+
+
+def test_balance_permission_error_survives_successful_usage_lookup(monkeypatch):
+    from app import provider_routes
+
+    def handle(request):
+        if request.url.path.endswith("/balances"):
+            return httpx.Response(403)
+        if request.url.path.endswith("/projects"):
+            return httpx.Response(200, json={"projects": [{"project_id": "project"}]})
+        return httpx.Response(200, json={"results": [{"hours": 1.5}]})
+
+    client = httpx.Client(transport=httpx.MockTransport(handle))
+    monkeypatch.setattr(provider_routes.httpx, "Client", lambda **kwargs: client)
+    registry = ProviderRegistry(settings())
+    row = deepgram_management(settings(), registry)["project"]
+    assert row["balance_usd"] is None
+    assert row["balance_error"] == "forbidden"
+    assert row["reported_hours"] == 1.5
+    assert registry.reserve("stream", ("deepgram",), "streaming")
 
 
 def test_keys_aggregates_even_when_management_is_offline(

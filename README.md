@@ -223,12 +223,13 @@ restart. Speechmatics job IDs/old sidecars retain their original key identity.
 A lost HTTP response can require a second billed request. `/forget`, normal cleanup,
 and credit cleanup include both providers' sidecars and derived WAVs.
 
-`/keys` separates locally sent streaming/WAV hours from provider-reported project
-usage. Project balances/usage require management permissions; unknown values stay
-unavailable, and a management failure never disables transcription. Shared balances
-and remote Speechmatics usage must not be added per key. Cost estimates use dated
-PAYG tariffs (including configured Deepgram keyterms), and exclude grants, discounts
-and taxes. `/health` and `/streaming status` also identify active providers.
+`/keys` shows credits, streams in use against the configured local limit, key health,
+and estimated costs in a compact summary. Deepgram balances require `billing:read`;
+a 403 is shown as missing permission, and unknown balances never look like zero.
+Management failures never disable transcription. Detailed local audio hours, models,
+provider usage and pricing remain in `GET /v1/transcription/keys`. Shared balances
+and remote Speechmatics usage must not be added per key. Cost estimates exclude
+grants, discounts and taxes. `/health` and `/streaming status` identify active providers.
 
 Validation uses local REST/WebSocket simulators and a disposable PostgreSQL database:
 `TEST_DATABASE_URL=... pytest` and `cd discord_bot && go test -race ./...`.

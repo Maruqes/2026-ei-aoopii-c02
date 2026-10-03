@@ -666,14 +666,10 @@ func keysHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	respondLongText(s, i, formatTranscriptionKeys(result, currentBotLanguage()))
 }
 
-func formatSpeechmaticsKeyLine(key SpeechmaticsKeyUsageResponse, lang botLanguage) string {
-	name := strings.TrimPrefix(key.Name, "SPEECHMATICS_API_KEY_")
-	if name == "SPEECHMATICS_API_KEY" {
-		name = textForLanguage(lang, "principal", "main")
-	}
+func speechmaticsKeyCost(key SpeechmaticsKeyUsageResponse, lang botLanguage) string {
 	if key.EstimatedCostUSD != nil {
 		cost := *key.EstimatedCostUSD
-		return fmt.Sprintf("**%s:** ≈ %s · %s", name, formatSpeechmaticsUSD(cost), speechmaticsCostLevel(cost, lang))
+		return "≈ " + formatSpeechmaticsUSD(cost)
 	}
 	cost, known := 0.0, false
 	for _, item := range key.CostItems {
@@ -683,23 +679,9 @@ func formatSpeechmaticsKeyLine(key SpeechmaticsKeyUsageResponse, lang botLanguag
 		}
 	}
 	if known {
-		return fmt.Sprintf(textForLanguage(lang, "**%s:** ≈ %s (parcial)", "**%s:** ≈ %s (partial)"), name, formatSpeechmaticsUSD(cost))
+		return fmt.Sprintf(textForLanguage(lang, "≈ %s (parcial)", "≈ %s (partial)"), formatSpeechmaticsUSD(cost))
 	}
-	return fmt.Sprintf(textForLanguage(lang, "**%s:** indisponível", "**%s:** unavailable"), name)
-}
-
-func speechmaticsCostLevel(cost float64, lang botLanguage) string {
-	// Display bands only; these are not provider billing tiers or credit limits.
-	level, band := 4, "≥ $10"
-	switch {
-	case cost < 1:
-		level, band = 1, "< $1"
-	case cost < 5:
-		level, band = 2, "$1–5"
-	case cost < 10:
-		level, band = 3, "$5–10"
-	}
-	return fmt.Sprintf(textForLanguage(lang, "nível %d (%s)", "level %d (%s)"), level, band)
+	return textForLanguage(lang, "indisponível", "unavailable")
 }
 
 func formatSpeechmaticsUSD(cost float64) string {
