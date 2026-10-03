@@ -148,14 +148,21 @@ ruído e música reais. O ensaio Discord, capacidade e metas de latência ainda 
 pendentes.
 
 O assistente também lê a resposta na chamada com uma voz local em português de
-Portugal (`espeak-ng`, incluído no Docker). Não precisa de outra key; a voz é
-sintética e mais robótica. A música cede a saída durante a fala e retoma no mesmo
+Portugal com [Piper](https://github.com/OHF-Voice/piper1-gpl) e a voz neural Tugão,
+incluídos no Docker. A fala usa fonemas 30% mais longos, sem alterar o tom, e pausas
+de 400 ms entre frases. Não precisa de outra key nem de rede durante a síntese.
+A música cede a saída durante a fala e retoma no mesmo
 ponto; uma pausa manual mantém-se. A resposta completa fica no chat mesmo que
 a síntese falhe. Para respostas longas, fala até 2000 caracteres e indica o chat
 para o restante. Desligar o assistente, mudar a configuração ou sair da chamada
 cancela a fala em curso.
 
 `ASSISTANT_VOICE_ENABLED=true` é o default. Usa `false` para resposta apenas no chat.
+Depois de atualizar, reconstrói o bot com `docker compose up -d --build discord-bot`.
+Para execução fora do Docker, instala `piper-tts==1.8.0` e descarrega o
+[modelo Tugão](https://huggingface.co/rhasspy/piper-voices/tree/v1.0.0/pt/pt_PT/tug%C3%A3o/medium)
+e a configuração `.onnx.json` para o mesmo diretório. Coloca `piper` no `PATH` e
+define `ASSISTANT_VOICE_MODEL` com o caminho do `.onnx` (22 050 Hz, mono).
 O [plano](plan/hey-bot.md) mantém o ensaio Discord e a avaliação de qualidade pendentes.
 
 

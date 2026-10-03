@@ -4,11 +4,20 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"gopkg.in/hraban/opus.v2"
 )
+
+func speechVoiceModel() string {
+	if model := strings.TrimSpace(os.Getenv("ASSISTANT_VOICE_MODEL")); model != "" {
+		return model
+	}
+	return "/opt/piper/pt_PT-tugao-medium.onnx"
+}
 
 func speechText(text string) string {
 	text = strings.Join(strings.Fields(strings.NewReplacer("**", "", "`", "").Replace(text)), " ")
@@ -39,18 +48,21 @@ func (p *MusicPlayer) Speak(ctx context.Context, text string) error {
 	if text == "" {
 		return nil
 	}
-	// ponytail: buffer one bounded local WAV; stream synthesis if longer replies are needed.
-	synth := musicCommand(ctx, "espeak-ng", "-v", "pt", "-s", "175", "--stdin", "--stdout")
+	// ponytail: buffer one bounded local reply; stream synthesis if longer replies are needed.
+	// Tugão produces 22.05 kHz mono PCM. Longer phonemes slow speech without changing pitch.
+	synth := musicCommand(ctx, "piper", "--model", speechVoiceModel(),
+		"--length-scale", "1.3", "--sentence-silence", "0.4", "--output-raw")
 	synth.Stdin, synth.Stderr = strings.NewReader(text), io.Discard
-	wav, err := synth.Output()
+	audio, err := synth.Output()
 	if err != nil {
-		return errors.New("could not synthesize Portuguese speech")
+		return fmt.Errorf("could not synthesize Portuguese speech with Piper: %w", err)
 	}
 	streamCtx, stop := context.WithCancelCause(ctx)
 	defer stop(nil)
-	cmd := musicCommand(streamCtx, "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0",
+	cmd := musicCommand(streamCtx, "ffmpeg", "-hide_banner", "-loglevel", "error",
+		"-f", "s16le", "-ar", "22050", "-ac", "1", "-i", "pipe:0",
 		"-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1")
-	cmd.Stdin, cmd.Stderr = bytes.NewReader(wav), io.Discard
+	cmd.Stdin, cmd.Stderr = bytes.NewReader(audio), io.Discard
 	pcm, err := cmd.StdoutPipe()
 	if err != nil {
 		return err

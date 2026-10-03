@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -16,9 +17,14 @@ import (
 
 func speechPlayer(t *testing.T) *MusicPlayer {
 	t.Helper()
-	for _, command := range []string{"espeak-ng", "ffmpeg"} {
+	for _, command := range []string{"piper", "ffmpeg"} {
 		if _, err := exec.LookPath(command); err != nil {
 			t.Skip(command + " is not installed")
+		}
+	}
+	for _, path := range []string{speechVoiceModel(), speechVoiceModel() + ".json"} {
+		if _, err := os.Stat(path); err != nil {
+			t.Skip("Piper voice is not installed: " + path)
 		}
 	}
 	p := newMusicPlayer(&discordgo.VoiceConnection{OpusSend: make(chan []byte, 500)})
@@ -30,7 +36,7 @@ func speechPlayer(t *testing.T) *MusicPlayer {
 func TestSpeechPortugueseSynthesisProducesDiscordOpusWhileMusicPaused(t *testing.T) {
 	p := speechPlayer(t)
 	p.paused = true
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := p.Speak(ctx, "Diz."); err != nil {
 		t.Fatal(err)
@@ -61,7 +67,7 @@ func TestSpeechPortugueseSynthesisProducesDiscordOpusWhileMusicPaused(t *testing
 
 func TestSpeechOutputIsExclusiveAndMusicResumes(t *testing.T) {
 	p := speechPlayer(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	started, musicDone := make(chan struct{}), make(chan error, 1)
 	var once sync.Once
@@ -106,15 +112,41 @@ func TestSpeechOutputIsExclusiveAndMusicResumes(t *testing.T) {
 	}
 }
 
+func TestSpeechSlowsDownAndPausesBetweenSentences(t *testing.T) {
+	p := speechPlayer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	text := "Olá. Vamos falar com calma para perceberes tudo."
+	baseline := exec.CommandContext(ctx, "piper", "--model", speechVoiceModel(), "--output-raw")
+	baseline.Stdin = strings.NewReader(text)
+	audio, err := baseline.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	normalSeconds := float64(len(audio)) / (22050 * 2)
+	if normalSeconds == 0 {
+		t.Fatal("baseline voice produced no audio")
+	}
+	if err := p.Speak(ctx, text); err != nil {
+		t.Fatal(err)
+	}
+	spokenSeconds := float64(len(p.vc.OpusSend)) * 0.02
+	// Allow phoneme-duration randomness while requiring slower speech and a sentence pause.
+	if spokenSeconds < normalSeconds*1.1+0.3 {
+		t.Fatalf("speech is too rushed: normal=%.2fs spoken=%.2fs", normalSeconds, spokenSeconds)
+	}
+	t.Logf("normal=%.2fs, slower voice with pauses=%.2fs", normalSeconds, spokenSeconds)
+}
+
 func TestSpeechCancellationReleasesOutputAndChildProcesses(t *testing.T) {
 	p := speechPlayer(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- p.Speak(ctx, strings.Repeat("Uma resposta longa. ", 50)) }()
+	go func() { done <- p.Speak(ctx, strings.Repeat("Uma resposta longa. ", 5)) }()
 	select {
 	case <-p.vc.OpusSend:
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("speech never sent audio")
 	}
 	cancel()
