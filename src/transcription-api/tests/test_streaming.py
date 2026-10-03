@@ -278,6 +278,14 @@ def test_websocket_pcm_final_flush_and_cleanup(
             assert usage["realtime_hours"] == pytest.approx(0.02 / 3600)
             assert usage["estimated_cost_usd"] == pytest.approx(0.02 / 3600 * 0.8)
             ws.send_json({"type": "end", "last_seq_no": 2})
+            final = ws.receive_json()
+            assert final["type"] == "final"
+            assert final["session_id"] == s.id and final["discord_id"] == "123"
+            assert final["recording_id"] > 0 and final["generation"] >= 0
+            assert final["identity"] and final["start"] == 0 and final["end"] == 0.01
+            assert final["text"] == "Olá, mundo."
+            # Partials and duplicate finals must not reach the bot.
+            assert len(repository.get_session_messages(s.id)) == 1
             assert ws.receive_json()["type"] == "completed"
         assert provider.start["transcription_config"] == {
             "language": "pt",
@@ -643,6 +651,14 @@ def test_debug_only_outputs_transcript_when_explicitly_enabled(
             assert ws.receive_json()["type"] == "ready"
             ws.send_bytes(struct.pack("<Q", 1) + b"\0" * 480 * 2)
             ws.send_json({"type": "end", "last_seq_no": 1})
+            final = ws.receive_json()
+            assert final["type"] == "final"
+            assert final["session_id"] == s.id and final["discord_id"] == "123"
+            assert final["recording_id"] > 0 and final["generation"] >= 0
+            assert final["identity"] and final["start"] == 0 and final["end"] == 0.01
+            assert final["text"] == "Olá, mundo."
+            # Partials and duplicate finals must not reach the bot.
+            assert len(repository.get_session_messages(s.id)) == 1
             assert ws.receive_json()["type"] == "completed"
     assert "partial" in caplog.text and "Olá, mundo." in caplog.text
     assert "secret-0" not in caplog.text

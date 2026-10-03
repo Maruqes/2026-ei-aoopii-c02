@@ -290,3 +290,86 @@ func TestKnownEntriesDuringJoinKeepEventOrderAfterUnknownSnapshot(t *testing.T) 
 		}
 	}
 }
+
+func TestRealtimeAssistantFinalDeliveryAndFallback(t *testing.T) {
+	h := newAssistantHarness(t)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseProvider := func() { releaseOnce.Do(func() { close(release) }) }
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		ws, err := upgrader.Upgrade(w, request, nil)
+		if err != nil {
+			return
+		}
+		defer ws.Close()
+		var meta map[string]any
+		if ws.ReadJSON(&meta) != nil {
+			return
+		}
+		_ = ws.WriteJSON(realtimeEvent{Type: "ready", RecordingID: 10, Generation: 2})
+		if _, _, err = ws.ReadMessage(); err != nil {
+			return
+		}
+		final := realtimeEvent{Type: "final", SessionID: 1, DiscordID: "ana", RecordingID: 10, Generation: 2, Identity: "one", Start: 0, End: 1, Text: "Hey Bot Pergunta?", Words: []assistantWord{{Text: "Hey", Start: 0, End: 0.2}, {Text: "Bot", Start: 0.2, End: 0.4}, {Text: "Pergunta?", Start: 0.4, End: 1}}}
+		_ = ws.WriteJSON(final)
+		_ = ws.WriteJSON(final)
+		<-release
+		_ = ws.WriteJSON(realtimeEvent{Type: "fallback"})
+	}))
+	defer server.Close()
+	defer releaseProvider()
+	rt := newRealtimeAudioClient(testAPIClient(server), TranscriptionRequest{SessionID: 1, DiscordID: "ana", AudioPath: "unit.wav", RecordingStartedAt: h.now}, streamGrant{Token: "ana"}, h.a)
+	pcm := make([]int16, sampleRate*channels)
+	for i := range pcm {
+		pcm[i] = 1000
+	}
+	rt.enqueue(pcm)
+	h.wait(t, func() bool { h.a.mu.Lock(); defer h.a.mu.Unlock(); return h.a.request != nil })
+	h.a.mu.Lock()
+	text := h.a.request.text
+	h.a.mu.Unlock()
+	releaseProvider()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	rt.wait(ctx)
+	if text != "Pergunta?" || !h.waiting() {
+		t.Fatalf("final/fallback handling: text=%q waiting=%t", text, h.waiting())
+	}
+}
+
+func TestRealtimeDTXSilenceUsesSameWAVClockAndKeepsSpeechBoundary(t *testing.T) {
+	writer, err := NewWAVWriter(filepath.Join(t.TempDir(), "silence.wav"), sampleRate, channels, bitsPerSample)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	rt := &realtimeAudioClient{queue: make(chan []byte, 10), done: make(chan struct{}), abort: make(chan struct{})}
+	recording := &userAudioRecording{wav: writer, realtime: rt, lastPacketAt: time.Now()}
+	pcm := make([]int16, defaultOpusFrameSamples*channels)
+	for i := range pcm {
+		pcm[i] = 1000
+	}
+	if err = recording.writeRTPPacket(10, 1, 0, 0, nil, pcm, defaultOpusFrameSamples); err != nil {
+		t.Fatal(err)
+	}
+	if err = recording.padRealtimeSilence(recording.lastPacketAt.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	frames, speech, _ := rt.progress()
+	if frames != 1 || speech != 0.02 || writer.FramesWritten() != sampleRate {
+		t.Fatalf("audio clocks: frames=%f speech=%f WAV=%d", frames, speech, writer.FramesWritten())
+	}
+	if err = recording.padRealtimeSilence(recording.lastPacketAt.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if writer.FramesWritten() != sampleRate {
+		t.Fatal("duplicated silence")
+	}
+	if err = recording.padRealtimeSilence(recording.lastPacketAt.Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if writer.FramesWritten() != 2*sampleRate {
+		t.Fatal("missing continuous DTX")
+	}
+}

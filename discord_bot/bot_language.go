@@ -154,6 +154,7 @@ func buildApplicationCommands(lang botLanguage) []*discordgo.ApplicationCommand 
 
 	manage := int64(discordgo.PermissionManageServer)
 	commands := []*discordgo.ApplicationCommand{
+		assistantCommand(),
 		{Name: "streaming", Description: "Set Realtime transcription mode or inspect the FIFO queue.", DefaultMemberPermissions: &manage,
 			Options: []*discordgo.ApplicationCommandOption{{Name: "mode", Type: discordgo.ApplicationCommandOptionString, Description: "on, off or status", Required: true,
 				Choices: []*discordgo.ApplicationCommandOptionChoice{{Name: "on", Value: "on"}, {Name: "off", Value: "off"}, {Name: "status", Value: "status"}}}}},

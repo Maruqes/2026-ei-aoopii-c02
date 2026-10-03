@@ -91,3 +91,39 @@ suspendem a transcrição da chamada, eliminam áudio pendente e preservam texto
 Executar **um único processo da API** para este pool de reservas. Streaming vem desligado
 por defeito; não é necessário mudar o comportamento de autojoin. Para detalhes de operação,
 recuperação, debug e testes, consultar [a documentação da API](src/transcription-api/README.md#realtime).
+
+## Hey Bot: perguntas por voz, respostas no chat
+
+Com Realtime ativo (`/streaming mode:on`), o assistente fica disponível por defeito
+para humanos com reserva na chamada. Diz «Hey Bot» para receber «Diz» no chat e
+faz a pergunta; também aceita «Hey Bot, explica polimorfismo…». Depois de responder,
+a próxima pergunta exige novamente a frase. O assistente geral responde em português,
+sem consultar o histórico do servidor ou executar comandos.
+
+- `/assistant status`: estado, frase, destino e participantes com/sem Realtime.
+- `/assistant phrase value:"Olá Bot"`: frase com 2–5 palavras, até 50 caracteres.
+- `/assistant channel value:#bot`: destino das confirmações e respostas.
+- `/assistant enable` e `/assistant disable`: ligar/desligar por servidor.
+
+Alterações exigem **Gerir Servidor**, são persistidas e cancelam pedidos pendentes.
+O destino inicial é o canal de resumo da chamada; sem acesso a um destino válido,
+o assistente não inicia pedidos. Só o autor da ativação fornece a pergunta. Há uma
+interação de cada vez; outras ativações recebem um aviso de ocupado, sem fila.
+«Cancela» como enunciado isolado cancela a captura; sair da chamada também cancela.
+
+A pergunta termina após 2 segundos sem fala detetada no PCM, aguardando finais
+Realtime que cubram essa fala. Há 10 segundos para começar, 30 segundos de captura
+e 30 segundos para o LLM. Finais em falta ou falhas de streaming cancelam o pedido;
+Batch continua a servir as gravações, mas nunca ativa o assistente.
+Os limites encerram apenas o pedido: a escuta volta a ficar disponível na chamada.
+
+O limite de reservas Realtime existente mantém-se. `/assistant status` e avisos de
+cobertura identificam quem está em Batch ou tem um stream falhado. Não se garante
+cobertura para todos sem confirmar a capacidade da conta. Silêncio enviado para
+fechar enunciados também consome minutos Realtime; consulta `/keys` e os logs
+`assistant activation`/`assistant response` para medir consumo e latência.
+
+A deteção de fala usa inicialmente energia PCM (`ASSISTANT_SPEECH_RMS=500`); deve ser validada com microfones,
+ruído e música reais. O ensaio Discord, capacidade e metas de latência ainda estão
+pendentes. Confirmações audíveis e TTS ficam para a etapa seguinte do
+[plano](plan/hey-bot.md).

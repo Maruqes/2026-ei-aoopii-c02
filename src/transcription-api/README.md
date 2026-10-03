@@ -459,3 +459,30 @@ Os testes usam um servidor WebSocket local e Postgres isolado por schema. O prim
 ensaio real deve usar uma chamada controlada, uma key e debug ligado; validar PT-PT,
 vagas e flush, depois várias keys. Desligar debug no fim. O ensaio real requer áudio e
 acesso à Speechmatics e não é substituído pelos testes simulados.
+
+### Contrato Hey Bot
+
+`GET/POST /v1/guilds/{guild}/assistant` lê/altera `enabled`, `phrase` e `channel_id`
+na tabela de settings existente. A revisão monotónica invalida configurações antigas;
+a gravação devolve sucesso apenas depois do commit. A preferência streaming permanece
+independente; uma linha criada só para o assistente herda o default streaming do ambiente.
+
+`POST /v1/assistant/question` recebe `{"question":"Explica polimorfismo?"}` e devolve
+`question`/`answer`. Usa o cliente LLM selecionado, um prompt geral em PT-PT e timeout
+de 30 segundos, sem leitura de contexto do servidor nem tools. É um endpoint interno,
+como os restantes endpoints da API; as permissões Discord são verificadas no bot.
+
+O WebSocket agora devolve `ready` com `recording_id`/`generation` e eventos `final`
+apenas depois de persistir cada segmento novo. Cada final inclui `session_id`,
+`discord_id`, `recording_id`, `generation`, `identity`, `text`, `start`, `end` e `words`
+com tempos relativos ao PCM daquela unidade. Pontuação é preservada nas palavras.
+Duplicados, parciais e recuperação Batch não geram eventos de ativação. Falha de
+persistência/entrega termina o stream com `fallback`; o bot cancela o pedido afetado.
+
+No silêncio/DTX, o Go envia zeros para o Realtime e escreve os mesmos frames no WAV.
+O relógio e as fronteiras RTP descontam esse padding para evitar silêncio duplicado.
+O fecho idle continua a libertar o transporte, preservando a reserva e a possibilidade
+de abrir novo stream na próxima fala. Esses frames enviados contam no uso Realtime.
+Os logs do assistente medem até à publicação, desde o tempo áudio da frase e desde a
+última fala PCM da pergunta; não registam perguntas ou respostas. Uma publicação
+Discord falhada não é repetida automaticamente.

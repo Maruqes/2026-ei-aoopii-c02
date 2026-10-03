@@ -40,6 +40,8 @@ type WAVWriter struct {
 
 type userAudioRecording struct {
 	realtime         *realtimeAudioClient
+	idlePadding      int
+	lastPacketFrames int
 	streamToken      string
 	wav              *WAVWriter
 	path             string
@@ -413,7 +415,7 @@ func ListenAndWriteOpusToWAV(
 		}
 	}
 	voiceMu.Unlock()
-	idleTicker := time.NewTicker(2 * time.Second)
+	idleTicker := time.NewTicker(250 * time.Millisecond)
 	defer idleTicker.Stop()
 	for {
 		select {
@@ -421,6 +423,9 @@ func ListenAndWriteOpusToWAV(
 			return closeUserRecordings(userRecordings, transcriptions)
 		case tick := <-idleTicker.C:
 			for id, recording := range userRecordings {
+				if err := recording.padRealtimeSilence(tick); err != nil {
+					return err
+				}
 				if !recording.lastPacketAt.IsZero() && tick.Sub(recording.lastPacketAt) >= recordingIdleTimeout() || recording.streamToken != streaming.grant(id).Token || streaming.suspended() {
 					delete(userRecordings, id)
 					if err := closeAndTranscribeRecording(recording, voiceUserInfo{}, transcriptions); err != nil {
@@ -525,6 +530,10 @@ func ListenAndWriteOpusToWAV(
 				plan = rtpPacketPlan{}
 			}
 
+			if recording != nil {
+				plan.timestampGapFrames = max(0, plan.timestampGapFrames-recording.idlePadding)
+				recording.idlePadding = 0
+			}
 			recoveredPCM := []int16(nil)
 			silenceFrames := plan.timestampGapFrames
 			if recording != nil && plan.missingPackets > 0 && plan.timestampGapFrames > 0 {
@@ -594,7 +603,7 @@ func ListenAndWriteOpusToWAV(
 						transcriptions.liveAudio[transcriptionOutboxPath(request)] = true
 						transcriptions.submissionMu.Unlock()
 						recording.streamToken = grant.Token
-						recording.realtime = newRealtimeAudioClient(transcriptions, request, grant)
+						recording.realtime = newRealtimeAudioClient(transcriptions, request, grant, streaming.state.assistant)
 					} else {
 						log.Printf("Realtime outbox failed user=%s; using Batch", discordID)
 					}
@@ -617,6 +626,24 @@ func ListenAndWriteOpusToWAV(
 			recording.lastPacketAt = packetAt
 		}
 	}
+}
+
+// Feed DTX silence while keeping the safety WAV and upstream clock identical.
+func (recording *userAudioRecording) padRealtimeSilence(now time.Time) error {
+	if recording.realtime == nil || recording.lastPacketAt.IsZero() {
+		return nil
+	}
+	expected := int(now.Sub(recording.lastPacketAt).Seconds() * sampleRate)
+	padding := max(0, expected-recording.idlePadding-recording.lastPacketFrames)
+	if padding == 0 {
+		return nil
+	}
+	if err := recording.wav.WriteSilence(padding); err != nil {
+		return err
+	}
+	recording.realtime.silence(padding)
+	recording.idlePadding += padding
+	return nil
 }
 
 func (recording *userAudioRecording) planRTPPacket(
@@ -720,6 +747,7 @@ func (recording *userAudioRecording) writeRTPPacket(
 		recording.realtime.enqueue(recoveredPCM)
 		recording.realtime.enqueue(pcm[:samples])
 	}
+	recording.lastPacketFrames = frames
 	recording.ssrc = ssrc
 	recording.nextRTPSequence = sequence + 1
 	recording.nextRTPTimestamp = timestamp + uint32(frames)

@@ -73,11 +73,25 @@ class LLMClient(Protocol):
         language: str = "pt",
     ) -> str: ...
 
+    def answer_question(self, *, question: str, language: str = "pt") -> str: ...
+
 
 class ConversationClient:
     """Bounded, hierarchical evidence extraction shared by all providers."""
 
     context_chars = 24000
+
+    def answer_question(self, *, question: str, language: str = "pt") -> str:
+        system = (
+            "You are a helpful general voice assistant. Answer the question concisely. "
+            "You cannot execute actions, access server history, search the internet or call tools. "
+            "Never claim to have done those things. Explain uncertainty when relevant. "
+            + response_language_instruction(language) + discord_answer_style()
+        )
+        answer = clean_answer(self._chat(system=system, user=question))
+        if not answer:
+            raise ValueError("Assistant returned an empty answer")
+        return answer
 
     def _evidence_budget(self, system: str, empty_user: str) -> int:
         available = self.context_chars - len(system) - len(empty_user) - 128
@@ -379,7 +393,7 @@ class OpenAICompatibleClient(ConversationClient):
                         api_key=self.api_key,
                         base_url=self.base_url,
                         timeout=self.timeout_seconds,
-                        max_retries=1,
+                        max_retries=getattr(self, "max_retries", 1),
                     )
         return self._client
 

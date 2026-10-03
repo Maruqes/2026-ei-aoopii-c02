@@ -50,7 +50,7 @@ func handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	name := strings.ToLower(data.Name)
 	if needsDeferredResponse(i) {
 		flags := discordgo.MessageFlags(0)
-		if name == "streaming" {
+		if name == "streaming" || name == "assistant" {
 			flags = discordgo.MessageFlagsEphemeral
 		}
 		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseDeferredChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: flags}}); err != nil {
@@ -64,6 +64,8 @@ func handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	switch {
 	case isMusicCommand(name):
 		musicHook(s, i)
+	case name == "assistant":
+		assistantHook(s, i)
 	case commandMatches(name, "streaming"):
 		streamingHook(s, i)
 	case commandMatches(name, "ping"):
@@ -1287,7 +1289,7 @@ func needsDeferredResponse(i *discordgo.InteractionCreate) bool {
 		return false
 	}
 	switch i.ApplicationCommandData().Name {
-	case "streaming", "start", "stop", "timeout", "language", "profile", "models", "effort", "health", "keys", "forget", "recap", "guess", "digest", "retry", "play", "pause", "skip", "queue", "musicstop":
+	case "assistant", "streaming", "start", "stop", "timeout", "language", "profile", "models", "effort", "health", "keys", "forget", "recap", "guess", "digest", "retry", "play", "pause", "skip", "queue", "musicstop":
 		return true
 	}
 	return false

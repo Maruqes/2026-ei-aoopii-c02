@@ -28,6 +28,7 @@ from data.repository import (  # noqa: E402
 )
 
 from .agent import SessionAgent
+from .assistant_routes import install_assistant_routes
 from .chatgpt_auth import get_chatgpt_auth
 from .chatgpt_control import require_chatgpt_admin
 from .chatgpt_llm import ChatGPTClient
@@ -733,6 +734,10 @@ def create_app() -> FastAPI:
             session_id=guess["session_id"],
             channel_name=guess["channel_name"],
         )
+
+    install_assistant_routes(
+        service, get_repository=get_repository, get_llm_client=get_llm_client
+    )
 
     @service.post("/v1/guilds/{guild_id}/oracle", response_model=GuildOracleResponse)
     def ask_guild_oracle(

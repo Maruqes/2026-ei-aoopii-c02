@@ -20,6 +20,7 @@ import (
 )
 
 type voiceConnectionState struct {
+	assistant           *assistantController
 	streaming           *streamingController
 	vc                  *discordgo.VoiceConnection
 	music               *MusicPlayer
@@ -119,6 +120,7 @@ func clearVoiceConnection(guildID string, vc *discordgo.VoiceConnection) {
 	voiceMu.Unlock()
 
 	if current.vc == vc {
+		current.assistant.stop()
 		current.stopLeaveTimer()
 		current.closeMusic()
 	}
@@ -143,6 +145,7 @@ func stopAllVoiceConnections() {
 			continue
 		}
 
+		state.assistant.stop()
 		state.stopLeaveTimer()
 		state.closeMusic()
 		state.queueAllRecordingsFinish()
@@ -439,6 +442,7 @@ func disconnectVoiceConnection(guildID string, state *voiceConnectionState) bool
 	delete(voiceConnections, guildID)
 	voiceMu.Unlock()
 
+	state.assistant.stop()
 	state.stopLeaveTimer()
 	state.closeMusic()
 	state.queueAllRecordingsFinish()
@@ -477,6 +481,8 @@ func receiveAudio(s *discordgo.Session, guildID string, state *voiceConnectionSt
 	registerRecordingState(state)
 	defer unregisterRecordingState(state)
 	defer clearVoiceConnection(guildID, state.vc)
+	go state.assistant.run(guildID)
+	defer state.assistant.stop()
 	go state.streaming.run()
 	triggerContext, stopTriggers := context.WithCancel(context.Background())
 	triggersDone := make(chan struct{})
@@ -516,10 +522,12 @@ func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 	if s.State != nil && s.State.User != nil && vs.UserID == s.State.User.ID {
 		if vs.ChannelID == "" {
 			if current := getVoiceConnection(vs.GuildID); current != nil {
+				current.assistant.stop()
 				current.queueAllRecordingsFinish()
 				clearVoiceConnection(vs.GuildID, current.vc)
 			}
 		} else if current := getVoiceConnection(vs.GuildID); current != nil && current.streaming != nil && current.streaming.currentChannel() != vs.ChannelID {
+			current.assistant.relocate()
 			current.queueCloseAllRecordings()
 			current.streaming.reset(voiceSnapshot(s, vs.GuildID, vs.ChannelID, vs.UserID), vs.ChannelID)
 			current.ssrcUsers.Reset()
@@ -576,6 +584,7 @@ func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 			return
 		}
 
+		current.assistant.relocate()
 		current.queueCloseAllRecordings()
 		if err := current.vc.ChangeChannel(channelID, false, false); err != nil {
 			log.Printf("erro ao mover para canal %s no servidor %s: %v", channelID, guildID, err)
@@ -631,6 +640,7 @@ func OnVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
 			}()
 		}
 	})
+	state.assistant = newAssistantController(s, state)
 	state.rememberUser(userInfo)
 	initializeVoiceArrivalOrder(state.streaming, guildID, channelID, voiceSnapshot(s, guildID, channelID, vc.UserID))
 

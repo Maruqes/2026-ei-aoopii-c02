@@ -1518,7 +1518,7 @@ class DataRepository:
                     (guild_id,),
                 )
                 row = cur.fetchone()
-                return row[0] if row else default
+                return row[0] if row and row[0] is not None else default
 
     def set_streaming_preference(self, guild_id: str, enabled: bool) -> None:
         with closing(connect(self.database_url)) as conn:
@@ -1528,6 +1528,41 @@ class DataRepository:
                     (guild_id, enabled),
                 )
             conn.commit()
+
+    def assistant_settings(self, guild_id: str) -> dict:
+        with closing(connect(self.database_url)) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT assistant_enabled, assistant_phrase, assistant_channel_id, assistant_revision "
+                    "FROM guild_transcription_settings WHERE guild_id = %s",
+                    (guild_id,),
+                )
+                row = cur.fetchone() or (True, "Hey Bot", None, 0)
+        return dict(zip(("enabled", "phrase", "channel_id", "revision"), row))
+
+    def update_assistant_settings(self, guild_id: str, changes: dict) -> dict:
+        # Column names are allowlisted here; values are always bound parameters.
+        columns = {"enabled": "assistant_enabled", "phrase": "assistant_phrase",
+                   "channel_id": "assistant_channel_id"}
+        if not changes or not changes.keys() <= columns.keys():
+            raise ValueError("Invalid assistant settings")
+        with closing(connect(self.database_url)) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO guild_transcription_settings(guild_id) VALUES (%s) ON CONFLICT DO NOTHING",
+                    (guild_id,),
+                )
+                assignments = ", ".join(columns[key] + " = %s" for key in changes)
+                cur.execute(
+                    "UPDATE guild_transcription_settings SET " + assignments +
+                    ", assistant_revision = assistant_revision + 1, updated_at = NOW() "
+                    "WHERE guild_id = %s RETURNING assistant_enabled, assistant_phrase, "
+                    "assistant_channel_id, assistant_revision",
+                    (*changes.values(), guild_id),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return dict(zip(("enabled", "phrase", "channel_id", "revision"), row))
 
     def start_realtime_unit(
         self, session_id: int, filename: str, metadata: dict, token: str, key_name: str

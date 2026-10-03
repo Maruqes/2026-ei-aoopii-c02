@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -293,19 +294,43 @@ func voiceSnapshot(s *discordgo.Session, guildID, channelID, botID string) []str
 
 // One bounded worker per WAV/epoch. The capture loop only copies PCM and enqueues.
 type realtimeAudioClient struct {
-	queue     chan []byte
-	done      chan struct{}
-	finish    chan struct{}
-	abort     chan struct{}
-	once      sync.Once
-	abortOnce sync.Once
+	speechRMS   int64
+	assistant   *assistantController
+	user        string
+	startedAt   time.Time
+	audioMu     sync.Mutex
+	frames      int64
+	speechFrame int64
+	lastSpeech  time.Time
+	queue       chan []byte
+	done        chan struct{}
+	finish      chan struct{}
+	abort       chan struct{}
+	once        sync.Once
+	abortOnce   sync.Once
 }
 
-func newRealtimeAudioClient(client *TranscriptionClient, request TranscriptionRequest, grant streamGrant) *realtimeAudioClient {
+func newRealtimeAudioClient(client *TranscriptionClient, request TranscriptionRequest, grant streamGrant, assistants ...*assistantController) *realtimeAudioClient {
 	r := &realtimeAudioClient{queue: make(chan []byte, 100), done: make(chan struct{}), finish: make(chan struct{}), abort: make(chan struct{})}
+	r.user, r.startedAt = request.DiscordID, request.RecordingStartedAt
+	threshold, err := strconv.Atoi(strings.TrimSpace(os.Getenv("ASSISTANT_SPEECH_RMS")))
+	if err != nil || threshold < 1 || threshold > 32767 {
+		threshold = 500
+	}
+	r.speechRMS = int64(threshold)
+	if len(assistants) > 0 && assistants[0] != nil {
+		r.assistant = assistants[0]
+		r.assistant.begin(r.user, r)
+	}
 	go r.run(client, request, grant)
 	return r
 }
+func (r *realtimeAudioClient) progress() (float64, float64, time.Time) {
+	r.audioMu.Lock()
+	defer r.audioMu.Unlock()
+	return float64(r.frames) / sampleRate, float64(r.speechFrame) / sampleRate, r.lastSpeech
+}
+
 func (r *realtimeAudioClient) enqueue(pcm []int16) {
 	if r == nil || len(pcm) == 0 {
 		return
@@ -317,6 +342,22 @@ func (r *realtimeAudioClient) enqueue(pcm []int16) {
 		return
 	default:
 	}
+	// ponytail: PCM energy threshold is a baseline VAD; tune in a real Discord trial.
+	var energy int64
+	for _, sample := range pcm {
+		energy += int64(sample) * int64(sample)
+	}
+	r.audioMu.Lock()
+	r.frames += int64(len(pcm) / channels)
+	threshold := r.speechRMS
+	if threshold == 0 {
+		threshold = 500
+	}
+	if energy/int64(len(pcm)) > threshold*threshold {
+		r.speechFrame = r.frames
+		r.lastSpeech = time.Now()
+	}
+	r.audioMu.Unlock()
 	data := make([]byte, len(pcm)/channels*2)
 	for i := 0; i+1 < len(pcm); i += 2 {
 		sample := (int32(pcm[i]) + int32(pcm[i+1])) / 2
@@ -352,7 +393,13 @@ func (r *realtimeAudioClient) wait(ctx context.Context) {
 	}
 }
 func (r *realtimeAudioClient) run(client *TranscriptionClient, request TranscriptionRequest, grant streamGrant) {
-	defer close(r.done)
+	successful := false
+	defer func() {
+		if !successful && r.assistant != nil {
+			r.assistant.fail(r.user, r)
+		}
+		close(r.done)
+	}()
 	address, err := url.Parse(client.baseURL + "/v1/streaming/audio")
 	if err != nil {
 		return
@@ -380,18 +427,42 @@ func (r *realtimeAudioClient) run(client *TranscriptionClient, request Transcrip
 		return
 	}
 	_ = ws.SetReadDeadline(time.Now().Add(15 * time.Second))
-	var status map[string]any
-	if ws.ReadJSON(&status) != nil || status["type"] != "ready" {
+	var status realtimeEvent
+	if ws.ReadJSON(&status) != nil || status.Type != "ready" {
 		return
+	}
+	if r.assistant != nil {
+		r.assistant.event(r.user, r, status, time.Now())
 	}
 	_ = ws.SetReadDeadline(time.Time{})
 	readDone := make(chan struct{})
+	completed := make(chan struct{})
 	go func() {
 		defer close(readDone)
 		for {
-			if ws.ReadJSON(&status) != nil || status["type"] == "completed" || status["type"] == "fallback" {
+			var event realtimeEvent
+			if ws.ReadJSON(&event) != nil {
 				return
 			}
+			if event.Type == "completed" {
+				close(completed)
+				return
+			}
+			if event.Type == "fallback" {
+				return
+			}
+			if r.assistant != nil {
+				r.assistant.event(r.user, r, event, time.Now())
+			}
+		}
+	}()
+	defer func() {
+		_ = ws.Close()
+		<-readDone
+		select {
+		case <-completed:
+			successful = true
+		default:
 		}
 	}()
 	var sequence uint64

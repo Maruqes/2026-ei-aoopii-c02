@@ -214,6 +214,22 @@ async def open_provider(settings, pool, reservation):
             raise ProviderError(kind) from None
 
 
+def final_words(results: list[dict]) -> list[dict]:
+    words = []
+    for item in results:
+        alternatives = item.get("alternatives") or []
+        if not alternatives:
+            continue
+        text = alternatives[0]["content"]
+        if item.get("type") == "word":
+            words.append(
+                {"text": text, "start": item["start_time"], "end": item["end_time"]}
+            )
+        elif item.get("type") == "punctuation" and words:
+            words[-1]["text"] += text
+    return words
+
+
 async def bridge(
     websocket: WebSocket, *, settings, repository, pool, validate_filename, resolve_path
 ):
@@ -264,7 +280,7 @@ async def bridge(
             reservation.token,
             reservation.key.name,
         )
-        await websocket.send_json({"type": "ready", "generation": generation})
+        await websocket.send_json({"type": "ready", "generation": generation, "recording_id": recording_id})
         eos = asyncio.Event()
 
         async def send_audio():
@@ -344,16 +360,30 @@ async def bridge(
                         identity = hashlib.sha256(
                             json.dumps(result, sort_keys=True).encode()
                         ).hexdigest()
-                        if not await asyncio.to_thread(
+                        inserted = await asyncio.to_thread(
                             repository.insert_realtime_final,
                             recording_id,
                             generation,
                             identity,
                             result["transcript"],
                             started_at + timedelta(seconds=start),
-                        ):
-                            # Duplicate finals are normal. The generation guard handles cancellation.
-                            pass
+                        )
+                        if inserted:
+                            # Only new committed finals are delivered; Batch never uses this channel.
+                            await websocket.send_json(
+                                {
+                                    "type": "final",
+                                    "session_id": session_id,
+                                    "discord_id": user,
+                                    "recording_id": recording_id,
+                                    "generation": generation,
+                                    "identity": identity,
+                                    "start": start,
+                                    "end": end,
+                                    "text": result["transcript"],
+                                    "words": final_words(event.get("results", [])),
+                                }
+                            )
                 if kind == "EndOfTranscript":
                     if not eos.is_set():
                         raise ProviderError("recoverable")
