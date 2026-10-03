@@ -96,6 +96,35 @@ def test_empty_digest_avoids_an_llm_call(api):
     assert llm.calls == []
 
 
+def test_voice_messages_expose_batch_and_realtime_for_only_the_session(api, repository):
+    client, _ = api
+    voice = session(repository)
+    batch_id = recording(repository, voice)
+    insert(repository, voice, batch_id, "Pijama!")
+    other = session(repository, guild="two")
+    insert(repository, other, recording(repository, other, "other.wav"), "Private.")
+    text(repository, 1)
+
+    stamp = datetime.now(timezone.utc)
+    realtime_id, generation = repository.start_realtime_unit(
+        voice.id,
+        "live.wav",
+        {"discord_id": "456", "username": "Bob", "channel_name": "general"},
+        "token",
+        "key",
+    )
+    assert repository.insert_realtime_final(realtime_id, generation, "first", "bot", stamp)
+    assert repository.insert_realtime_final(realtime_id, generation, "second", "audio", stamp)
+    response = client.get(f"/v1/sessions/{voice.id}/voice-messages")
+    assert response.status_code == 200
+    rows = response.json()
+    assert [row["content"] for row in rows] == ["Pijama!", "bot", "audio"]
+    assert [row["recording_id"] for row in rows] == [batch_id, realtime_id, realtime_id]
+    assert [row["discord_id"] for row in rows] == ["123", "456", "456"]
+    assert len({row["id"] for row in rows}) == 3
+    assert client.get("/v1/sessions/999999/voice-messages").status_code == 404
+
+
 def test_retry_endpoint_enforces_guild_and_active_session_state(api, repository):
     client, _ = api
     voice = session(repository)
