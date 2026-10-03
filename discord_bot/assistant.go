@@ -46,6 +46,7 @@ type assistantStream struct {
 	seen        map[string]bool
 	window      []assistantWord
 	through     float64
+	wordThrough float64
 	speechFloor float64
 	failed      bool
 }
@@ -285,16 +286,22 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 	if event.Type != "final" || event.SessionID != a.state.sessionID || event.DiscordID != user || event.RecordingID != stream.recordingID || event.Generation != stream.generation || event.Identity == "" || stream.seen[event.Identity] {
 		return
 	}
-	if math.IsNaN(event.Start) || math.IsNaN(event.End) || math.IsInf(event.Start, 0) || math.IsInf(event.End, 0) || event.Start < 0 || event.End < event.Start || event.End > frames+0.1 || event.Start < stream.through-0.02 || len(stream.seen) >= 4096 {
+	if math.IsNaN(event.Start) || math.IsNaN(event.End) || math.IsInf(event.Start, 0) || math.IsInf(event.End, 0) || event.Start < 0 || event.End < event.Start || event.End > frames+0.1 || len(stream.seen) >= 4096 {
+		log.Printf("assistant invalid final session=%d user=%s recording=%d start=%f end=%f frames=%f", a.state.sessionID, user, event.RecordingID, event.Start, event.End, frames)
 		stream.failed = true
 		if a.request != nil && a.request.stream == stream {
 			a.reset()
-			a.notice(user, "Não consegui ordenar os finais Realtime. Tenta novamente.")
+			a.notice(user, "Recebi tempos Realtime inválidos. Tenta novamente.")
 		}
 		return
 	}
 	stream.seen[event.Identity] = true
-	stream.through = event.End
+	// WebSocket delivery is ordered; approximate metadata envelopes may overlap.
+	// Empty flush markers and entirely late finals must not cancel a live capture.
+	if len(event.Words) == 0 && event.End <= stream.through {
+		return
+	}
+	stream.through = max(stream.through, event.End)
 	if !a.eligible(user) || !a.canRespond() || event.End <= stream.speechFloor {
 		return
 	}
@@ -304,10 +311,12 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 			words = append(words, assistantWord{Text: word, Start: event.Start, End: event.End})
 		}
 	}
+	words = append([]assistantWord(nil), words...)
+	sort.SliceStable(words, func(i, j int) bool { return words[i].Start < words[j].Start })
 	tokens := []assistantWord{}
-	previousEnd := event.Start
+	priorWordThrough := stream.wordThrough
 	for _, word := range words {
-		if math.IsNaN(word.Start) || math.IsNaN(word.End) || math.IsInf(word.Start, 0) || math.IsInf(word.End, 0) || (len(event.Words) > 0 && word.Start < previousEnd-0.02) || word.Start < event.Start || word.End < word.Start || word.End > event.End+0.02 {
+		if math.IsNaN(word.Start) || math.IsNaN(word.End) || math.IsInf(word.Start, 0) || math.IsInf(word.End, 0) || word.Start < 0 || word.End < word.Start || word.End > frames+0.1 {
 			stream.failed = true
 			if a.request != nil && a.request.stream == stream {
 				a.reset()
@@ -315,7 +324,11 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 			}
 			return
 		}
-		previousEnd = word.End
+		if len(event.Words) > 0 && word.End <= priorWordThrough {
+			continue
+		}
+		stream.wordThrough = max(stream.wordThrough, word.End)
+		stream.through = max(stream.through, word.End)
 		if word.End <= stream.speechFloor {
 			continue
 		}
@@ -356,17 +369,31 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 		}
 		return
 	}
+	if len(stream.window) > 0 && tokens[0].Start > stream.window[len(stream.window)-1].End+2 {
+		stream.window = nil
+	}
 	combined := append(stream.window, tokens...)
-	stream.window = append([]assistantWord(nil), combined[max(0, len(combined)-len(phrase)+1):]...)
-	for i := 0; i+len(phrase) <= len(combined); i++ {
-		match := true
-		for j, word := range phrase {
-			if combined[i+j].Text != word {
-				match = false
-				break
+	// Retain the current utterance so a wake phrase at its end keeps the question.
+	// 2001 words suffice to reject questions beyond the existing 2000-byte limit.
+	windowStart := max(0, len(combined)-2001)
+	for j := windowStart + 1; j < len(combined); j++ {
+		if combined[j].Start > combined[j-1].End+2 {
+			windowStart = j
+		}
+	}
+	stream.window = append([]assistantWord(nil), combined[windowStart:]...)
+	for i := 0; i < len(combined); i++ {
+		end := assistantPhraseEnd(combined, i, phrase)
+		if end < 0 {
+			continue
+		}
+		contiguousSpeech := true
+		for j := i + 1; j < end; j++ {
+			if combined[j].Start > combined[j-1].End+2 {
+				contiguousSpeech = false
 			}
 		}
-		if !match {
+		if !contiguousSpeech {
 			continue
 		}
 		if a.request != nil {
@@ -378,8 +405,15 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 			return
 		}
 		a.serial++
-		boundary := combined[i+len(phrase)-1].End
-		a.request = &assistantRequest{id: a.serial, user: user, stream: stream, activation: audio.startedAt.Add(time.Duration(boundary * float64(time.Second))), boundary: boundary, text: assistantQuestionTokens(combined[i+len(phrase):], phrase)}
+		boundary := combined[end-1].End
+		// Include speech on either side, without replaying an earlier utterance.
+		prefixStart := i
+		for prefixStart > 0 && combined[prefixStart].Start <= combined[prefixStart-1].End+2 {
+			prefixStart--
+		}
+		question := append([]assistantWord(nil), combined[prefixStart:i]...)
+		question = append(question, combined[end:]...)
+		a.request = &assistantRequest{id: a.serial, user: user, stream: stream, activation: audio.startedAt.Add(time.Duration(boundary * float64(time.Second))), boundary: boundary, text: assistantQuestionTokens(question, phrase)}
 		stream.window = nil
 		if len(a.request.text) > 2000 {
 			a.reset()
@@ -390,20 +424,90 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 		return
 	}
 }
+
+// Permit one recognition edit and up to two intervening words, in phrase order.
+// Joining also accepts recognition that merges or splits words ("olamacaco").
+func assistantPhraseEnd(tokens []assistantWord, start int, phrase []string) int {
+	if len(phrase) == 0 {
+		return -1
+	}
+	joined := ""
+	for end := start; end < len(tokens) && end < start+len(phrase)+2; end++ {
+		joined += tokens[end].Text
+		if assistantNearWord(joined, strings.Join(phrase, "")) {
+			return end + 1
+		}
+	}
+	var match func(int, int, int, int) int
+	match = func(index, word, edits, gaps int) int {
+		if word == len(phrase) {
+			return index
+		}
+		gapLimit := 2 - gaps
+		if word == 0 {
+			gapLimit = 0
+		}
+		for gap := 0; gap <= gapLimit && index+gap < len(tokens); gap++ {
+			candidate := tokens[index+gap].Text
+			cost := 0
+			if candidate != phrase[word] {
+				if edits != 0 || !assistantNearWord(candidate, phrase[word]) {
+					continue
+				}
+				cost = 1
+			}
+			if end := match(index+gap+1, word+1, edits+cost, gaps+gap); end >= 0 {
+				return end
+			}
+		}
+		return -1
+	}
+	return match(start, 0, 0, 0)
+}
+
+func assistantNearWord(a, b string) bool {
+	if a == b {
+		return true
+	}
+	left, right := []rune(a), []rune(b)
+	if min(len(left), len(right)) < 3 || len(left)-len(right) > 1 || len(right)-len(left) > 1 {
+		return false
+	}
+	if len(left) == len(right) {
+		differences := []int{}
+		for i := range left {
+			if left[i] != right[i] {
+				differences = append(differences, i)
+			}
+		}
+		if len(differences) == 1 {
+			return true
+		}
+		return len(differences) == 2 && differences[1] == differences[0]+1 && left[differences[0]] == right[differences[1]] && left[differences[1]] == right[differences[0]]
+	}
+	if len(left) < len(right) {
+		left, right = right, left
+	}
+	for i, j, edits := 0, 0, 0; j < len(right); {
+		if left[i] == right[j] {
+			i++
+			j++
+		} else {
+			edits++
+			i++
+			if edits > 1 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func assistantQuestionTokens(tokens []assistantWord, phrase []string) string {
 	words := []string{}
 	for i := 0; i < len(tokens); {
-		match := i+len(phrase) <= len(tokens)
-		if match {
-			for j, word := range phrase {
-				if tokens[i+j].Text != word {
-					match = false
-					break
-				}
-			}
-		}
-		if match {
-			i += len(phrase)
+		if end := assistantPhraseEnd(tokens, i, phrase); end >= 0 {
+			i = end
 			continue
 		}
 		raw := tokens[i].Raw

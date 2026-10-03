@@ -36,7 +36,7 @@ Estes valores são defaults propostos, ajustáveis depois de um ensaio real.
 | Concorrência | Uma interação ativa por chamada. Outra ativação recebe indicação de ocupado, sem fila de áudio antigo. |
 | Repetição | Repetir a frase durante a captura não cria outro pedido. Durante a resposta, não interrompe o LLM nesta versão. |
 | Frase | Default «Olá macaco»; 2 a 5 palavras, até 50 caracteres, normalizada por maiúsculas, acentos e pontuação. Validar que sobra uma frase útil. |
-| Deteção | Palavras consecutivas, na ordem certa; aceitar fronteira entre segmentos Realtime do mesmo autor. Não usar aproximação fonética inicialmente. |
+| Deteção | Qualquer posição do enunciado, na ordem certa; ignorar acentos/pontuação/caixa, tolerar um erro de reconhecimento, duas palavras intercaladas e palavras juntas/separadas. Aceitar fronteira entre finais do mesmo autor. |
 | Fim da pergunta | 2 segundos sem atividade de fala do autor; aguardar finais correspondentes ao áudio antes de enviar ao LLM. Silêncio não é apenas ausência de texto novo. |
 | Sem pergunta | 10 segundos para começar; avisar e voltar à espera. |
 | Pedido longo | Máximo de 30 segundos de fala após ativação; se exceder, pedir uma pergunta mais curta, sem responder a um corte arbitrário. |
@@ -99,10 +99,11 @@ stateDiagram-v2
    utilizador, gravação, geração, identidade estável do segmento e tempos de áudio.
    Persistir primeiro; comunicar explicitamente falhas de entrega/stream.
 2. No Go, consumir estes eventos sem consultar repetidamente o transcript completo.
-   Manter apenas a janela de palavras necessária à frase e o pedido ativo, com
+   Manter uma janela limitada do enunciado atual e o pedido ativo, com
    deduplicação limitada ao ciclo de vida da ligação/gravação.
-3. Detetar a frase de forma contígua, incluindo quando se divide entre finais.
-   Eliminar o prefixo e a frase de ativação; preservar a pergunta na mesma emissão.
+3. Detetar a frase com tolerância limitada, incluindo quando se divide entre finais.
+   Eliminar apenas a ativação; preservar a pergunta antes e depois no mesmo enunciado.
+   Uma pausa superior a 2 segundos separa o contexto anterior.
    Associar cada ativação à sua posição no áudio, não apenas ao recording ID.
 4. Capturar eventos novos apenas do autor. Associar atividade de fala e progresso
    de finais ao mesmo relógio de áudio. Tratar silêncio/DTX com o PCM e mecanismos
@@ -224,7 +225,15 @@ substituí-la por um detetor comprovado. Pedidos com finais pendentes falham ap�
 
 
 Atualização da frase: default «Olá macaco», alterável por
-`/assistant phrase value:"outra frase"`. A deteção procura palavras consecutivas
-em qualquer posição, ignorando caixa, acentos e pontuação; «ola macaco» e
-«Olá, Macaco» são equivalentes. A migração atualiza apenas o antigo default
-persistido e preserva frases personalizadas.
+`/assistant phrase value:"outra frase"`. A deteção procura a frase em qualquer
+posição, ignorando caixa, acentos e pontuação; «ola macaco» e «Olá, Macaco» são
+equivalentes. Aceita também «olha macaco», «olá meu macaco», «olamacaco» e pequenos
+erros de uma letra. Preserva a pergunta antes/depois, incluindo finais distintos
+do mesmo enunciado. A migração atualiza apenas o antigo default persistido e
+preserva frases personalizadas.
+
+Correção dos finais: envelopes de tempos sobrepostos, palavras sobrepostas e
+marcadores vazios não cancelam a captura. O progresso nunca recua; palavras já
+consumidas não voltam à pergunta, mesmo num final cumulativo com outra identidade.
+Mantêm-se as validações de geração/autor e de tempos finitos dentro do áudio recebido,
+assim como a espera por finais que cubram toda a fala antes de enviar ao LLM.

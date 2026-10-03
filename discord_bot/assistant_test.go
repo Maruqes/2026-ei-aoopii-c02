@@ -448,13 +448,13 @@ func TestAssistantPhraseContainsIgnoresAccentsCaseAndPunctuation(t *testing.T) {
 				h.a.mu.Lock()
 				question := h.a.request.text
 				h.a.mu.Unlock()
-				if question != "Explica Go?" {
+				if question != "Antes: Explica Go?" {
 					t.Fatalf("wrong contains suffix: %q", question)
 				}
 			}
 		})
 	}
-	for _, text := range []string{"olamacaco", "ola macacolas", "macaco ola", "ola meu macaco"} {
+	for _, text := range []string{"ola macacolas", "macaco ola", "ola sem qualquer relacao macaco"} {
 		t.Run(text, func(t *testing.T) {
 			h := newAssistantHarness(t)
 			h.a.configure(assistantSettings{Enabled: true, Phrase: "Olá macaco", Revision: 1})
@@ -479,5 +479,136 @@ func TestAssistantPhraseContainsIgnoresAccentsCaseAndPunctuation(t *testing.T) {
 	h.final("ana", "new", "O, AMIGO!", 3, 4)
 	if h.waiting() {
 		t.Fatal("changed phrase did not activate")
+	}
+}
+
+func TestAssistantDoesNotCancelForOverlappingOrEmptyFinals(t *testing.T) {
+	for _, kind := range []string{"overlap", "empty"} {
+		t.Run(kind, func(t *testing.T) {
+			h := newAssistantHarness(t)
+			h.final("ana", "wake", "Hey Bot", 0, 1)
+			if kind == "overlap" {
+				h.final("ana", "question", "Explica Go?", 0.8, 2)
+			} else {
+				h.a.event("ana", h.audio["ana"], realtimeEvent{Type: "final", SessionID: 1, DiscordID: "ana", RecordingID: 10, Generation: 2, Identity: "empty", Start: 0, End: 0, Text: ""}, h.now)
+				h.final("ana", "question", "Explica Go?", 1, 2)
+			}
+			if h.waiting() {
+				t.Fatal("a valid capture was cancelled by final metadata")
+			}
+			h.a.tick(h.now.Add(5 * time.Second))
+			h.answers <- "Go é uma linguagem."
+			h.wait(t, h.waiting)
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			if len(h.questions) != 1 || h.questions[0] != "Explica Go?" {
+				t.Fatalf("question lost or duplicated: %v", h.questions)
+			}
+		})
+	}
+}
+
+func TestAssistantTolerantActivationPreservesQuestionAtAnyPosition(t *testing.T) {
+	cases := []struct{ input, question string }{
+		{"Olá macaco explica Go?", "explica Go?"},
+		{"Explica, olá macaco, Go?", "Explica, Go?"},
+		{"Explica Go? Olá macaco", "Explica Go?"},
+		{"Explica Go? Olha macaco", "Explica Go?"},
+		{"Olá meu macaco, explica Go?", "explica Go?"},
+		{"Olamacaco explica Go?", "explica Go?"},
+		{"Olá ma caco explica Go?", "explica Go?"},
+		{"Olá macacoo explica Go?", "explica Go?"},
+		{"Olá mcaaco explica Go?", "explica Go?"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			h := newAssistantHarness(t)
+			h.a.configure(assistantSettings{Enabled: true, Phrase: "Olá macaco", Revision: 1})
+			h.final("ana", "wake", tc.input, 0, 2)
+			if h.waiting() {
+				t.Fatalf("did not trigger: %s", tc.input)
+			}
+			h.a.mu.Lock()
+			question := h.a.request.text
+			h.a.mu.Unlock()
+			if question != tc.question {
+				t.Fatalf("question=%q want=%q", question, tc.question)
+			}
+			h.a.tick(h.now.Add(5 * time.Second))
+			h.answers <- "Resposta."
+			h.wait(t, h.waiting)
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			if len(h.questions) != 1 || h.questions[0] != tc.question {
+				t.Fatalf("bad LLM request: %v", h.questions)
+			}
+		})
+	}
+}
+
+func TestAssistantKeepsQuestionAcrossFinalsWithinSameUtterance(t *testing.T) {
+	for _, pause := range []float64{0, 3} {
+		t.Run(time.Duration(pause*float64(time.Second)).String(), func(t *testing.T) {
+			h := newAssistantHarness(t)
+			h.a.configure(assistantSettings{Enabled: true, Phrase: "Olá macaco", Revision: 1})
+			h.final("ana", "prefix", "Explica Go?", 0, 1)
+			h.final("ana", "wake", "Olá meu", 1+pause, 2+pause)
+			h.final("ana", "end", "macaco", 2+pause, 3+pause)
+			if h.waiting() {
+				t.Fatal("split tolerant phrase did not activate")
+			}
+			h.a.mu.Lock()
+			defer h.a.mu.Unlock()
+			want := "Explica Go?"
+			if pause > 0 {
+				want = ""
+			}
+			if h.a.request.text != want {
+				t.Fatalf("question=%q want=%q", h.a.request.text, want)
+			}
+		})
+	}
+}
+
+func TestAssistantOverlappingWordTimesAndCumulativeFinals(t *testing.T) {
+	h := newAssistantHarness(t)
+	audio := h.audio["ana"]
+	audio.audioMu.Lock()
+	audio.frames, audio.speechFrame = 2*sampleRate, 2*sampleRate
+	audio.lastSpeech = h.now.Add(2 * time.Second)
+	audio.audioMu.Unlock()
+	send := func(id string, end float64, words []assistantWord) {
+		h.a.event("ana", audio, realtimeEvent{Type: "final", SessionID: 1, DiscordID: "ana", RecordingID: 10, Generation: 2, Identity: id, End: end, Words: words}, h.now.Add(2*time.Second))
+	}
+	wake := []assistantWord{{Text: "Hey", Start: 0, End: 0.6}, {Text: "Bot", Start: 0.5, End: 1}}
+	send("wake", 1, wake)
+	// Real words overlap both the metadata envelope and each other, and arrive unsorted.
+	words := append(wake, assistantWord{Text: "Go?", Start: 1.4, End: 2}, assistantWord{Text: "Explica", Start: 0.9, End: 1.5})
+	send("question", 1.8, words)
+	send("replay", 2, words)
+	send("old", 0.6, wake[:1])
+	send("empty", 0, nil)
+	if h.waiting() {
+		t.Fatal("overlapping words cancelled capture")
+	}
+	h.a.tick(h.now.Add(5 * time.Second))
+	h.answers <- "Resposta."
+	h.wait(t, h.waiting)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.questions) != 1 || h.questions[0] != "Explica Go?" {
+		t.Fatalf("question lost or duplicated: %v", h.questions)
+	}
+}
+
+func TestAssistantStillRejectsWordTimesBeyondReceivedAudio(t *testing.T) {
+	h := newAssistantHarness(t)
+	h.final("ana", "wake", "Hey Bot", 0, 1)
+	h.audio["ana"].audioMu.Lock()
+	h.audio["ana"].frames = 2 * sampleRate
+	h.audio["ana"].audioMu.Unlock()
+	h.a.event("ana", h.audio["ana"], realtimeEvent{Type: "final", SessionID: 1, DiscordID: "ana", RecordingID: 10, Generation: 2, Identity: "invalid", Start: 1, End: 2, Words: []assistantWord{{Text: "Pergunta", Start: 1, End: 3}}}, h.now)
+	if !h.waiting() {
+		t.Fatal("invalid audio times were accepted")
 	}
 }

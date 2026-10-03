@@ -105,10 +105,12 @@ sem consultar o histórico do servidor ou executar comandos.
 - `/assistant channel value:#bot`: destino das confirmações e respostas.
 - `/assistant enable` e `/assistant disable`: ligar/desligar por servidor.
 
-A frase é procurada em qualquer posição do texto, por palavras consecutivas,
-ignorando maiúsculas, acentos e pontuação: «ola macaco», «Olá, Macaco» e
-«OLÁ MACACO!» ativam o mesmo pedido. `/assistant phrase value:"outra frase"`
-altera a frase usada pelo servidor.
+A frase é procurada no início, meio ou fim do enunciado, ignorando maiúsculas,
+acentos e pontuação. Aceita um pequeno erro de reconhecimento, até duas palavras
+intercaladas e palavras juntas/separadas: «olha macaco», «olá meu macaco» e
+«olamacaco» também ativam. A pergunta antes e depois da ativação é preservada,
+mesmo dividida entre finais; uma pausa superior a 2 segundos separa enunciados.
+`/assistant phrase value:"outra frase"` altera a frase usada pelo servidor.
 
 Alterações exigem **Gerir Servidor**, são persistidas e cancelam pedidos pendentes.
 O destino inicial é o canal de resumo da chamada; sem acesso a um destino válido,
@@ -120,6 +122,8 @@ A pergunta termina após 2 segundos sem fala detetada no PCM, aguardando finais
 Realtime que cubram essa fala. Há 10 segundos para começar, 30 segundos de captura
 e 30 segundos para o LLM. Finais em falta ou falhas de streaming cancelam o pedido;
 Batch continua a servir as gravações, mas nunca ativa o assistente.
+Tempos sobrepostos nos finais não cancelam a captura; palavras já recebidas e
+marcadores vazios não repetem a pergunta. Tempos inválidos continuam a ser rejeitados.
 Os limites encerram apenas o pedido: a escuta volta a ficar disponível na chamada.
 
 O limite de reservas Realtime existente mantém-se. `/assistant status` e avisos de
