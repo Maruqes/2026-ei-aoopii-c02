@@ -355,13 +355,18 @@ def test_provider_uses_responses_and_refreshes_credentials_between_calls(
     body = calls[1]
     assert body["instructions"] == "Instructions"
     assert body["stream"] is True and body["store"] is False
-    assert body["input"] == [{"role": "user", "content": "Hello"}]
+    assert body["input"] == [
+        {"role": "developer", "content": "Return only a valid JSON object."},
+        {"role": "user", "content": "Hello"},
+    ]
     assert body["text"] == {"format": {"type": "json_object"}}
     assert "max_output_tokens" not in body and "temperature" not in body
     expire(auth)
     assert client.test_model() == "Ola!"
     assert calls[0]["api_key"] == "access"
     assert calls[2]["api_key"] == "replacement"
+    assert calls[3]["input"] == [{"role": "user", "content": "Ola!"}]
+    assert "text" not in calls[3]
 
 
 @pytest.mark.parametrize("terminal", [None, "response.incomplete", "response.failed"])
@@ -435,6 +440,20 @@ def test_real_sdk_decodes_responses_sse_and_json_requests(oauth, monkeypatch):
         assert str(request.url) == "https://api.openai.com/v1/responses"
         assert request.headers["authorization"] == "Bearer access"
         sent.append(json.loads(request.content))
+        # Reproduce the provider's JSON-mode validation: instructions alone
+        # do not satisfy the requirement to mention JSON in input messages.
+        if not any("json" in item["content"].lower() for item in sent[-1]["input"]):
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "message": "Response input messages must contain the word 'json'",
+                        "type": "invalid_request_error",
+                        "param": "input",
+                        "code": None,
+                    }
+                },
+            )
         data = (
             "data: "
             + json.dumps({"type": "response.completed", "response": response})
@@ -459,7 +478,7 @@ def test_real_sdk_decodes_responses_sse_and_json_requests(oauth, monkeypatch):
     assert sent[0]["store"] is False
 
 
-@pytest.mark.parametrize("selected_model", ["model-b", "hidden", "unlisted"])
+@pytest.mark.parametrize("selected_model", ["model-b", "hidden", "unlisted", "gpt-6-astra"])
 def test_discord_models_api_tests_and_persists_chatgpt_selection(
     panel, oauth, monkeypatch, selected_model
 ):
@@ -498,14 +517,17 @@ def test_discord_models_api_tests_and_persists_chatgpt_selection(
     assert isinstance(main.get_llm_client(settings), ChatGPTClient)
 
 
-def test_failed_model_test_keeps_previous_choice(panel, oauth, monkeypatch):
+@pytest.mark.parametrize("selected_model", ["model-b", "gpt-6-astra"])
+def test_failed_model_test_keeps_previous_choice(
+    panel, oauth, monkeypatch, selected_model
+):
     settings, auth, _, _, finish = oauth
     finish()
     select_model("chatgpt", "model-a", settings.llm_model_selection_file)
     provider_stream(monkeypatch, auth, [SimpleNamespace(type="response.incomplete")])
     response = panel.post(
         "/v1/models/current",
-        json={"model": "model-b"},
+        json={"model": selected_model},
         headers={"X-ChatGPT-Admin-Key": "owner-secret"},
     )
     assert response.status_code == 502
@@ -522,6 +544,22 @@ def test_existing_providers_are_still_available(oauth):
         selected = replace(settings, llm_provider=name)
         assert current_model(selected) == model
         assert main.build_llm_client(selected, model).model == model
+
+
+@pytest.mark.parametrize("provider", ["openai", "groq", "ollama"])
+def test_other_providers_still_require_catalog_membership(
+    panel, oauth, monkeypatch, provider
+):
+    settings, *_ = oauth
+    selected = replace(settings, llm_provider=provider)
+    previous = current_model(selected)
+    panel.app.dependency_overrides[main.get_settings] = lambda: selected
+    monkeypatch.setattr(
+        main, "get_llm_client", lambda _: SimpleNamespace(list_models=lambda: ["known"])
+    )
+    response = panel.post("/v1/models/current", json={"model": "absent"})
+    assert response.status_code == 404
+    assert current_model(selected) == previous
 
 
 def test_settings_read_chatgpt_environment(monkeypatch, tmp_path):

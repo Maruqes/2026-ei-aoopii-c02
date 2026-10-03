@@ -51,6 +51,28 @@ account usage. See configuration, recovery details and test commands in the
 - `docker-compose.yml`: local Postgres, transcription API and Discord bot.
 - `BrunoAPI/`: local API request examples.
 
+## Triggers por palavras na call
+
+Em `discord_bot/main.go`, registar os triggers no arranque:
+
+```go
+triggerSaidKeyworkd(sayPijama, "pijama")
+triggerSaidKeyworkd(funcDarAudio, "bot", "audio")
+// Também aceita uma lista: triggerSaidKeyworkd(funcDarAudio, []string{"bot", "audio"}...)
+```
+
+A função recebe `SaidKeywordContext` e devolve `error`; o contexto inclui a sessão
+Discord, servidor, canal de texto, autor e texto reconhecido. Todas as palavras têm
+de aparecer na mesma gravação do mesmo autor, em qualquer ordem. Ignora maiúsculas
+e pontuação, compara palavras inteiras e executa cada trigger uma vez por gravação.
+Um erro da função permite nova tentativa na próxima consulta.
+
+O exemplo “pijama” já está registado: envia `pijama` para o canal de sistema do
+servidor, ou o primeiro canal de texto onde o bot possa escrever. As transcrições
+são consultadas a cada segundo: Realtime reage ao texto confirmado; Batch reage
+quando a transcrição da gravação fica disponível. Não precisa de LLM nem de
+dependências adicionais. Os registos e a deduplicação ficam em memória.
+
 ## Transcrição Realtime (opcional)
 
 Com `TRANSCRIPTION_PROVIDER=speechmatics` e keys configuradas, `/streaming mode:on`

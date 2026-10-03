@@ -204,6 +204,9 @@ func buildApplicationCommands(lang botLanguage) []*discordgo.ApplicationCommand 
 		{
 			Name:        commandName(lang, "models"),
 			Description: "Lists and changes the active LLM model.",
+			Options: []*discordgo.ApplicationCommandOption{
+				{Name: "model", Type: discordgo.ApplicationCommandOptionString, Description: "Exact model ID to test and activate, including IDs absent from the catalog."},
+			},
 		},
 		{
 			Name:        commandName(lang, "effort"),

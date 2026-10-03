@@ -300,6 +300,16 @@ func effortHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 }
 
 func modelsHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	for _, option := range i.ApplicationCommandData().Options {
+		if option.Name == "model" {
+			if !canManageServer(i) {
+				respondText(s, i, botText("Mudar o modelo requer Gerir Servidor.", "Changing the model requires Manage Server."))
+				return
+			}
+			selectAndRespondModel(s, i, option.StringValue())
+			return
+		}
+	}
 	client := botAPIClient
 	if client == nil {
 		client = NewTranscriptionClientFromEnv()
@@ -377,6 +387,7 @@ func modelsResponse(models *LLMModelsResponse, page int) *discordgo.InteractionR
 		len(displayedModels),
 		len(eligibleModels),
 	)
+	content += textForLanguage(lang, "\nPara testar um ID ausente do catalogo, usa `/models model:<id>`.", "\nTo test an ID absent from the catalog, use `/models model:<id>`.")
 	if skipped := len(models.Models) - len(eligibleModels); skipped > 0 {
 		content += fmt.Sprintf(textForLanguage(
 			lang,
@@ -442,7 +453,11 @@ func modelSelectHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}); err != nil {
 		return
 	}
+	selectAndRespondModel(s, i, model)
+}
 
+func selectAndRespondModel(s *discordgo.Session, i *discordgo.InteractionCreate, model string) {
+	lang := currentBotLanguage()
 	client := botAPIClient
 	if client == nil {
 		client = NewTranscriptionClientFromEnv()
@@ -1213,6 +1228,7 @@ func truncateDiscordField(value string) string {
 func main() {
 	_ = godotenv.Load("../.env", ".env")
 	initBotLanguageFromEnv()
+	triggerSaidKeyworkd(sayPijama, "pijama")
 
 	token := strings.TrimSpace(os.Getenv("DISCORD_TOKEN"))
 	appID := strings.TrimSpace(os.Getenv("DISCORD_APP_ID"))

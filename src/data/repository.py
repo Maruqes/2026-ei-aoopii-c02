@@ -1283,10 +1283,11 @@ class DataRepository:
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT m.tstamp, u.discord_id, u.username, u.display_name, m.channel_name, m.content
+                SELECT m.tstamp, u.discord_id, u.username, u.display_name, m.channel_name, m.content,
+                       m.id, m.recording_id
                 FROM messages m
                 JOIN users u ON u.id = m.user_id
-                WHERE m.session_id = %s
+                WHERE m.session_id = %s AND m.source_type = 'voice'
                 ORDER BY m.tstamp ASC, m.id ASC
                 """,
                 (session_id,),
@@ -1299,6 +1300,8 @@ class DataRepository:
                     "display_name": row[3],
                     "channel_name": row[4],
                     "content": row[5],
+                    "id": row[6],
+                    "recording_id": row[7],
                 }
                 for row in cur.fetchall()
             ]

@@ -478,6 +478,16 @@ func receiveAudio(s *discordgo.Session, guildID string, state *voiceConnectionSt
 	defer unregisterRecordingState(state)
 	defer clearVoiceConnection(guildID, state.vc)
 	go state.streaming.run()
+	triggerContext, stopTriggers := context.WithCancel(context.Background())
+	triggersDone := make(chan struct{})
+	go func() {
+		defer close(triggersDone)
+		runSaidKeywordTriggers(triggerContext, s, guildID, state)
+	}()
+	defer func() {
+		stopTriggers()
+		<-triggersDone
+	}()
 
 	err := ListenAndWriteOpusToWAV(
 		state.vc,

@@ -488,8 +488,12 @@ def create_app() -> FastAPI:
                 status_code=status.HTTP_400_BAD_REQUEST, detail="Model is required"
             )
 
-        available_models = get_llm_client(settings).list_models()
-        if model not in available_models:
+        # ChatGPT's catalog can omit an ID; inference decides whether the
+        # signed-in account can use an explicitly requested model.
+        if (
+            settings.llm_provider != "chatgpt"
+            and model not in get_llm_client(settings).list_models()
+        ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Model is not available"
             )
@@ -582,6 +586,15 @@ def create_app() -> FastAPI:
             summary=session.summary,
             agent_error=session.agent_error,
         )
+
+    @service.get("/v1/sessions/{session_id}/voice-messages")
+    def get_session_voice_messages(
+        session_id: int,
+        repository: DataRepository = Depends(get_repository),
+    ) -> list[dict]:
+        if repository.get_voice_session(session_id) is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return repository.get_session_messages(session_id)
 
     @service.delete("/v1/users/{discord_id}", response_model=ForgetUserResponse)
     def forget_user(

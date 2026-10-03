@@ -50,6 +50,10 @@ class ChatGPTClient(ConversationClient):
             "stream": True,
         }
         if json_format:
+            # JSON mode validates input messages, not the separate instructions.
+            body["input"].insert(
+                0, {"role": "developer", "content": "Return only a valid JSON object."}
+            )
             body["text"] = {"format": {"type": "json_object"}}
         if self.reasoning_effort != "default":
             body["reasoning"] = {"effort": self.reasoning_effort}

@@ -108,6 +108,11 @@ modelo e testar um pedido curto antes de o guardar. A mudança de modelo requer
 **Gerir Servidor**. O modelo selecionado passa a ser usado por todas as funções
 de AI.
 
+Se um identificador não aparecer no catálogo, usa `/models model:<id>` (por
+exemplo, `/models model:gpt-6-astra`). O bot testa o acesso com a conta e a effort
+atuais e só ativa o modelo se o pedido terminar com sucesso. Um nome mostrado no
+ChatGPT/Codex pode não ser um identificador de modelo válido neste endpoint.
+
 ```text
 /effort
 /effort level:low
