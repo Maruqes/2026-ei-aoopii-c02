@@ -24,6 +24,7 @@ def test_invalid_phrase(phrase):
 def test_settings_boundary_and_normalization():
     assert AssistantChanges(phrase="  HEY, Bot! ").phrase == "hey bot"
     assert AssistantChanges(phrase="Olá, Amigo!").phrase == "olá amigo"
+    assert AssistantChanges(phrase="Ola\u0301, Macaco!").phrase == "olá macaco"
     for changes in ({}, {"enabled": None}, {"phrase": None}, {"channel_id": "invalid"}):
         with pytest.raises(ValidationError):
             AssistantChanges(**changes)
@@ -72,7 +73,7 @@ def test_settings_persist_atomically_and_preserve_streaming(repository):
     defaults = repository.assistant_settings("guild")
     assert defaults == {
         "enabled": True,
-        "phrase": "Hey Bot",
+        "phrase": "Olá macaco",
         "channel_id": None,
         "revision": 0,
     }
@@ -172,3 +173,30 @@ def replace_asyncio(to_thread):
     from types import SimpleNamespace
 
     return SimpleNamespace(to_thread=to_thread, timeout=asyncio.timeout)
+
+
+def test_phrase_upgrade_preserves_custom_settings_and_later_changes(repository):
+    from data.apply_migrations import apply_migrations
+    from data.repository import connect
+
+    repository.set_streaming_preference("old", True)
+    repository.update_assistant_settings("old", {"phrase": "hey bot"})
+    custom = repository.update_assistant_settings("custom", {"phrase": "Olá amigo"})
+    # Simulate the schema default and persisted settings of the previous version.
+    with closing(connect(repository.database_url)) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "ALTER TABLE guild_transcription_settings ALTER COLUMN assistant_phrase SET DEFAULT 'Hey Bot'"
+            )
+        conn.commit()
+    apply_migrations(repository.database_url)
+    assert repository.assistant_settings("old")["phrase"] == "Olá macaco"
+    assert repository.assistant_settings("old")["revision"] == 2
+    assert repository.assistant_settings("custom") == custom
+    assert repository.streaming_preference("old", False) is True
+    repository.set_streaming_preference("new", False)
+    assert repository.assistant_settings("new")["phrase"] == "Olá macaco"
+    # Replaying migrations must not undo an explicit choice made after upgrading.
+    saved = repository.update_assistant_settings("old", {"phrase": "Hey Bot"})
+    apply_migrations(repository.database_url)
+    assert repository.assistant_settings("old") == saved

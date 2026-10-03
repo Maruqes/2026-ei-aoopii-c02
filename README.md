@@ -92,18 +92,23 @@ Executar **um único processo da API** para este pool de reservas. Streaming vem
 por defeito; não é necessário mudar o comportamento de autojoin. Para detalhes de operação,
 recuperação, debug e testes, consultar [a documentação da API](src/transcription-api/README.md#realtime).
 
-## Hey Bot: perguntas por voz, respostas no chat
+## Assistente por voz: perguntas e respostas no chat
 
 Com Realtime ativo (`/streaming mode:on`), o assistente fica disponível por defeito
-para humanos com reserva na chamada. Diz «Hey Bot» para receber «Diz» no chat e
-faz a pergunta; também aceita «Hey Bot, explica polimorfismo…». Depois de responder,
+para humanos com reserva na chamada. Diz «Olá macaco» para receber «Diz» no chat e
+faz a pergunta; também aceita «Olá macaco, explica polimorfismo…». Depois de responder,
 a próxima pergunta exige novamente a frase. O assistente geral responde em português,
 sem consultar o histórico do servidor ou executar comandos.
 
 - `/assistant status`: estado, frase, destino e participantes com/sem Realtime.
-- `/assistant phrase value:"Olá Bot"`: frase com 2–5 palavras, até 50 caracteres.
+- `/assistant phrase value:"Olá macaco"`: frase com 2–5 palavras, até 50 caracteres.
 - `/assistant channel value:#bot`: destino das confirmações e respostas.
 - `/assistant enable` e `/assistant disable`: ligar/desligar por servidor.
+
+A frase é procurada em qualquer posição do texto, por palavras consecutivas,
+ignorando maiúsculas, acentos e pontuação: «ola macaco», «Olá, Macaco» e
+«OLÁ MACACO!» ativam o mesmo pedido. `/assistant phrase value:"outra frase"`
+altera a frase usada pelo servidor.
 
 Alterações exigem **Gerir Servidor**, são persistidas e cancelam pedidos pendentes.
 O destino inicial é o canal de resumo da chamada; sem acesso a um destino válido,

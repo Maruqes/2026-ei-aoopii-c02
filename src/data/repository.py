@@ -1537,7 +1537,7 @@ class DataRepository:
                     "FROM guild_transcription_settings WHERE guild_id = %s",
                     (guild_id,),
                 )
-                row = cur.fetchone() or (True, "Hey Bot", None, 0)
+                row = cur.fetchone() or (True, "Olá macaco", None, 0)
         return dict(zip(("enabled", "phrase", "channel_id", "revision"), row))
 
     def update_assistant_settings(self, guild_id: str, changes: dict) -> dict:

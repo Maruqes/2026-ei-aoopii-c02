@@ -434,3 +434,50 @@ func TestAssistantCoverageRechecksQueuedWarningAfterRecovery(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 }
+
+func TestAssistantPhraseContainsIgnoresAccentsCaseAndPunctuation(t *testing.T) {
+	for _, text := range []string{"ola macaco", "Olá, Macaco", "Antes: (OLÁ, MACACO!), Explica Go?", "Ola\u0301, Macaco"} {
+		t.Run(text, func(t *testing.T) {
+			h := newAssistantHarness(t)
+			h.a.configure(assistantSettings{Enabled: true, Phrase: "Olá macaco", Revision: 1})
+			h.final("ana", "wake", text, 0, 1)
+			if h.waiting() {
+				t.Fatalf("phrase did not trigger: %s", text)
+			}
+			if strings.HasPrefix(text, "Antes:") {
+				h.a.mu.Lock()
+				question := h.a.request.text
+				h.a.mu.Unlock()
+				if question != "Explica Go?" {
+					t.Fatalf("wrong contains suffix: %q", question)
+				}
+			}
+		})
+	}
+	for _, text := range []string{"olamacaco", "ola macacolas", "macaco ola", "ola meu macaco"} {
+		t.Run(text, func(t *testing.T) {
+			h := newAssistantHarness(t)
+			h.a.configure(assistantSettings{Enabled: true, Phrase: "Olá macaco", Revision: 1})
+			h.final("ana", "other", text, 0, 1)
+			if !h.waiting() {
+				t.Fatalf("partial/out-of-order phrase triggered: %s", text)
+			}
+		})
+	}
+	h := newAssistantHarness(t)
+	h.a.configure(assistantSettings{Enabled: true, Phrase: "Olá macaco", Revision: 1})
+	h.final("ana", "first", "OLA,", 0, 1)
+	h.final("ana", "second", "Macaco! Explica Go?", 1, 2)
+	if h.waiting() {
+		t.Fatal("accent-insensitive phrase failed across segments")
+	}
+	h.a.configure(assistantSettings{Enabled: true, Phrase: "Ó amigo", Revision: 2})
+	h.final("ana", "old", "Olá macaco", 2, 3)
+	if !h.waiting() {
+		t.Fatal("old phrase still activated after configuration change")
+	}
+	h.final("ana", "new", "O, AMIGO!", 3, 4)
+	if h.waiting() {
+		t.Fatal("changed phrase did not activate")
+	}
+}

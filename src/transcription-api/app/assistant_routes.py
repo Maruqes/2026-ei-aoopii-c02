@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import re
+import unicodedata
 
 from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator
@@ -21,7 +22,9 @@ class AssistantChanges(BaseModel):
         ):
             raise ValueError("Provide enabled, phrase or channel_id")
         if self.phrase is not None:
-            words = re.findall(r"[^\W_]+", self.phrase.lower())
+            words = re.findall(
+                r"[^\W_]+", unicodedata.normalize("NFC", self.phrase).lower()
+            )
             if not 2 <= len(words) <= 5 or any(
                 not any(c.isalpha() for c in word) for word in words
             ):

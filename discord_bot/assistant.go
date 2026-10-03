@@ -107,7 +107,32 @@ func newAssistantController(s *discordgo.Session, state *voiceConnectionState) *
 	return a
 }
 func assistantWords(text string) []string {
-	return strings.FieldsFunc(strings.ToLower(text), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsNumber(r) })
+	// Fold Portuguese/Latin accents, including decomposed combining marks.
+	text = strings.Map(func(r rune) rune {
+		switch r {
+		case 'á', 'à', 'â', 'ã', 'ä', 'å':
+			return 'a'
+		case 'é', 'è', 'ê', 'ë':
+			return 'e'
+		case 'í', 'ì', 'î', 'ï':
+			return 'i'
+		case 'ó', 'ò', 'ô', 'õ', 'ö':
+			return 'o'
+		case 'ú', 'ù', 'û', 'ü':
+			return 'u'
+		case 'ç':
+			return 'c'
+		case 'ñ':
+			return 'n'
+		case 'ý', 'ÿ':
+			return 'y'
+		}
+		if unicode.Is(unicode.Mn, r) {
+			return -1
+		}
+		return r
+	}, strings.ToLower(text))
+	return strings.FieldsFunc(text, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsNumber(r) })
 }
 func (a *assistantController) destination() string {
 	if a.settings.ChannelID != nil {
@@ -531,13 +556,13 @@ func (a *assistantController) updateCoverage(now time.Time) {
 	}
 	a.coverage = coverage
 	a.coverageNoticeAt = now
-	a.notice("", "Hey Bot sem Realtime para: "+coverage+". Estas pessoas não podem ativar o assistente.")
+	a.notice("", "Assistente sem Realtime para: "+coverage+". Estas pessoas não podem ativar o assistente.")
 }
 
 func assistantCommand() *discordgo.ApplicationCommand {
 	options := []*discordgo.ApplicationCommandOption{}
 	for _, name := range []string{"status", "phrase", "channel", "enable", "disable"} {
-		option := &discordgo.ApplicationCommandOption{Type: discordgo.ApplicationCommandOptionSubCommand, Name: name, Description: "Hey Bot: " + name}
+		option := &discordgo.ApplicationCommandOption{Type: discordgo.ApplicationCommandOptionSubCommand, Name: name, Description: "Assistente: " + name}
 		if name == "phrase" {
 			option.Options = []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionString, Name: "value", Description: "Wake phrase, 2 to 5 words", Required: true, MaxLength: 50}}
 		}
@@ -546,7 +571,7 @@ func assistantCommand() *discordgo.ApplicationCommand {
 		}
 		options = append(options, option)
 	}
-	return &discordgo.ApplicationCommand{Name: "assistant", Description: "Configure Hey Bot or inspect Realtime coverage", Options: options}
+	return &discordgo.ApplicationCommand{Name: "assistant", Description: "Configure the voice assistant or inspect Realtime coverage", Options: options}
 }
 func assistantHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	if i.GuildID == "" {
@@ -629,5 +654,5 @@ func assistantHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			coverage = "Realtime: a aguardar sincronização das reservas."
 		}
 	}
-	respondLongText(s, i, fmt.Sprintf("Hey Bot ativo: %t · Frase: %s · Destino: %s\n%s", config.Enabled, config.Phrase, channel, coverage))
+	respondLongText(s, i, fmt.Sprintf("Assistente ativo: %t · Frase: %s · Destino: %s\n%s", config.Enabled, config.Phrase, channel, coverage))
 }
