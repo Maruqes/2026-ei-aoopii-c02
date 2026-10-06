@@ -21,6 +21,8 @@ class BoundedClient(ConversationClient):
     def _chat(self, **kwargs):
         self.inputs.append(kwargs)
         assert len(kwargs["system"]) + len(kwargs["user"]) + 128 <= self.context_chars
+        if not kwargs["user"].startswith('{"slice":'):
+            assert "Do not narrate your sources or processing" in kwargs["system"]
         if kwargs.get("json_format"):
             return json.dumps(
                 dict(

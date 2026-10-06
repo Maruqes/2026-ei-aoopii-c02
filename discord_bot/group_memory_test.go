@@ -11,17 +11,42 @@ import (
 	"time"
 )
 
-func TestMemeGIFSearchUsesProviderResultsAndMemeQuery(t *testing.T) {
+func TestMemeGIFSearchUsesContextAndAvoidsRecentResults(t *testing.T) {
+	t.Cleanup(func() {
+		recentReactionGIFs.Lock()
+		defer recentReactionGIFs.Unlock()
+		delete(recentReactionGIFs.byGuild, t.Name())
+		delete(recentReactionGIFs.byGuild, t.Name()+"-other-guild")
+	})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("q") != "this is fine dog meme" || r.URL.Query().Get("api_key") != "test-key" {
-			t.Errorf("incorrect meme search")
+		if r.URL.Query().Get("q") != "juggling too many tasks" || r.URL.Query().Get("api_key") != "test-key" || r.URL.Query().Get("limit") != "12" || r.URL.Query().Get("rating") != "pg-13" {
+			t.Errorf("incorrect contextual GIF search")
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"url": "https://evil.example/meme"}, {"url": "https://giphy.com/gifs/this-is-fine"}}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{
+			{"url": "https://evil.example/meme"},
+			{"url": "http://giphy.com/gifs/insecure"},
+			{"url": "https://user@giphy.com/gifs/credentials"},
+			{"url": "https://giphy.com.evil.example/gifs/spoof"},
+			{"url": "https://giphy.com/gifs/juggling"},
+			{"url": "https://giphy.com/gifs/spinning-plates"},
+		}})
 	}))
 	defer server.Close()
-	gif, err := searchMemeGIF(context.Background(), server.Client(), server.URL, "test-key", "this is fine dog")
-	if err != nil || gif != "https://giphy.com/gifs/this-is-fine" {
-		t.Fatalf("gif=%q err=%v", gif, err)
+	seen := map[string]bool{}
+	for range 2 {
+		gif, err := searchMemeGIF(context.Background(), server.Client(), server.URL, "test-key", " juggling too many tasks ", t.Name())
+		if err != nil || (gif != "https://giphy.com/gifs/juggling" && gif != "https://giphy.com/gifs/spinning-plates") || seen[gif] {
+			t.Fatalf("repeated or invalid gif=%q err=%v", gif, err)
+		}
+		seen[gif] = true
+	}
+	gif, err := searchMemeGIF(context.Background(), server.Client(), server.URL, "test-key", "juggling too many tasks", t.Name())
+	if err != nil || gif != "" {
+		t.Fatalf("exhausted results should omit GIF: gif=%q err=%v", gif, err)
+	}
+	gif, err = searchMemeGIF(context.Background(), server.Client(), server.URL, "test-key", "juggling too many tasks", t.Name()+"-other-guild")
+	if err != nil || !seen[gif] {
+		t.Fatalf("another guild should have independent history: gif=%q err=%v", gif, err)
 	}
 }
 
@@ -87,9 +112,12 @@ func TestProactiveVoiceUsesCurrentCallSilenceWithoutWaitingForFinals(t *testing.
 	if !h.a.proactiveReady(h.now.Add(10*time.Second), true) {
 		t.Fatal("quiet call was blocked by a missing final")
 	}
-	// Departed participants leave their old assistant streams behind.
+	// Departure cancels conversations immediately and removes the current stream.
+	retired := h.a.streams["bob"]
+	h.a.mu.Unlock()
 	h.a.state.streaming.leave("bob")
-	h.a.streams["bob"].failed = true
+	h.a.mu.Lock()
+	retired.failed = true
 	if !h.a.proactiveReady(h.now.Add(10*time.Second), true) {
 		t.Fatal("departed participant blocked voice")
 	}
@@ -129,7 +157,12 @@ func TestProactiveReactionClaimsOnceBeforePublishing(t *testing.T) {
 	h.a.state.streaming.synced = true
 	h.a.voiceEnabled = true
 	var spoken int
-	h.a.speak = func(ctx context.Context, text string) error {
+	h.a.speak = func(ctx context.Context, text string, ready func() error) error {
+		if ready != nil {
+			if err := ready(); err != nil {
+				return err
+			}
+		}
 		spoken++
 		deadline, ok := ctx.Deadline()
 		if text != "Esse plano está no modo this is fine." || !ok || time.Until(deadline) < time.Minute {

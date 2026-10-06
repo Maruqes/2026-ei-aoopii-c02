@@ -38,8 +38,18 @@ func TestSpeechPortugueseSynthesisProducesDiscordOpusWhileMusicPaused(t *testing
 	p.paused = true
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := p.Speak(ctx, "Boa! 😂"); err != nil {
+	ready := false
+	if err := p.speak(ctx, "Boa! 😂", func() error {
+		if ready || len(p.vc.OpusSend) != 0 {
+			t.Error("publication must happen once, before the first voice packet")
+		}
+		ready = true
+		return nil
+	}); err != nil {
 		t.Fatal(err)
+	}
+	if !ready {
+		t.Fatal("voice started without publishing the synchronized text")
 	}
 	if !p.Snapshot().Paused || p.IsBusy() {
 		t.Fatal("speech changed the manual music pause or remained busy")

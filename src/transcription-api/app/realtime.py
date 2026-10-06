@@ -203,6 +203,8 @@ async def open_provider(settings, pool, reservation):
                             "language": settings.speechmatics_realtime_language,
                             "model": settings.speechmatics_realtime_model,
                             "enable_partials": True,
+                            "max_delay": 2,
+                            "max_delay_mode": "flexible",
                             **({"additional_vocab": [{"content": t} for t in settings.speechmatics_additional_vocab]} if settings.speechmatics_additional_vocab else {}),
                         },
                     }
@@ -418,8 +420,8 @@ async def bridge(
                                 "discord_id": user,
                                 "recording_id": recording_id,
                                 "generation": generation,
-                                "start": start,
-                                "end": end,
+                                "start": min(w["start"] for w in words) if words else start,
+                                "end": max(w["end"] for w in words) if words else end,
                             }
                         )
                     if kind == "AddTranscript":

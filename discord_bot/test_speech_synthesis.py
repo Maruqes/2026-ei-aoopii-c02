@@ -77,6 +77,31 @@ class SpeechExpressionTests(unittest.TestCase):
             self.assertEqual(second.args[1].volume, EXPRESSIONS["sad"].volume)
             self.assertGreater(len(output.getvalue()), 2 * len(Chunk.audio_int16_bytes))
 
+    def test_first_chunk_is_flushed_before_synthesizing_the_next(self):
+        class Output(io.BytesIO):
+            flushed = False
+
+            def flush(self):
+                self.flushed = True
+
+        class Chunk:
+            audio_int16_bytes = b"\x01\x00" * 2205
+
+        output = Output()
+
+        def chunks(*_):
+            yield Chunk()
+            self.assertTrue(output.flushed)
+            self.assertEqual(output.getvalue(), Chunk.audio_int16_bytes)
+            yield Chunk()
+
+        with patch("piper.PiperVoice.load") as load:
+            voice = load.return_value
+            voice.config.sample_rate = 22050
+            voice.synthesize.side_effect = chunks
+            synthesize("voice.onnx", "Primeira frase. Segunda frase.", output)
+        self.assertGreater(len(output.getvalue()), 2 * len(Chunk.audio_int16_bytes))
+
 
 if __name__ == "__main__":
     unittest.main()

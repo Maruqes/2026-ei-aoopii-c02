@@ -51,19 +51,28 @@ def run_group_memory_tick(*, repository, llm_factory, docs, settings, now=None):
                     cutoff = now - timedelta(
                         minutes=settings.group_memory_reaction_cooldown_minutes
                     )
+                    recent_reactions = [
+                        b
+                        for b in memory.recent_bulks(repository, guild, 100)
+                        if b["reaction_text"]
+                    ]
                     allowed = (
                         settings.group_memory_reactions_enabled
                         and assistant["enabled"]
                         and start + timedelta(minutes=minutes)
                         >= now - timedelta(minutes=minutes)
-                        and not any(
-                            b["reaction_text"] and b["created_at"] > cutoff
-                            for b in memory.recent_bulks(repository, guild, 100)
-                        )
+                        and not any(b["created_at"] > cutoff for b in recent_reactions)
                     )
                     previous_text = "\n\n".join(
                         f"Bulk {b['start_at'].isoformat()} – {b['end_at'].isoformat()}:\n{b['summary']}\nLore: {b['lore']}\nBot reaction (generated): {b['reaction_text']}"
                         for b in reversed(previous)
+                    )
+                    previous_text += (
+                        "\n\nRecent bot reactions (generated; avoid repeating jokes and GIF searches):\n"
+                        + "\n".join(
+                            f"{b['reaction_text']} | GIF search: {b['gif_query']}"
+                            for b in reversed(recent_reactions[:5])
+                        )
                     )
                     generated = llm.analyze_group_bulk(
                         observations=f"Window {start.isoformat()} – {(start + timedelta(minutes=minutes)).isoformat()}\n"

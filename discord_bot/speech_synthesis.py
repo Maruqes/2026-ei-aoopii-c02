@@ -126,15 +126,14 @@ def synthesize(model, text, output):
             phrase = phrase.rstrip(" ,;:")
             phrase += (". " if phrase and phrase[-1] not in ".!?" else " ") + expression.reaction
         config = SynthesisConfig(length_scale=expression.length, volume=expression.volume)
-        chunks = [chunk.audio_int16_bytes for chunk in voice.synthesize(phrase, config)]
-        if not chunks:
-            continue
-        silence = bytes(round(rate * expression.pause) * 2)
-        audio = expressive_audio(silence.join(chunks), expression, rate)
-        if previous_pause:
-            output.write(bytes(round(rate * previous_pause) * 2))
-        output.write(audio)
-        previous_pause = expression.pause
+        for chunk in voice.synthesize(phrase, config):
+            if not chunk.audio_int16_bytes:
+                continue
+            if previous_pause:
+                output.write(bytes(round(rate * previous_pause) * 2))
+            output.write(expressive_audio(chunk.audio_int16_bytes, expression, rate))
+            output.flush()  # Let Discord start speaking before the whole reply is ready.
+            previous_pause = expression.pause
 
 
 if __name__ == "__main__":

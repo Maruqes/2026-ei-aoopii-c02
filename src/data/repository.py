@@ -1361,7 +1361,12 @@ class DataRepository:
             )
             conn.commit()
 
-    def get_session_messages(self, session_id: int) -> list[dict]:
+    def get_session_messages(
+        self, session_id: int, *, since: datetime | None = None,
+        until: datetime | None = None, limit: int | None = None,
+    ) -> list[dict]:
+        if limit is not None and not 1 <= limit <= 501:
+            raise ValueError("Session message limit must be between 1 and 501")
         with closing(connect(self.database_url)) as conn:
             cur = conn.cursor()
             cur.execute(
@@ -1371,9 +1376,12 @@ class DataRepository:
                 FROM messages m
                 JOIN users u ON u.id = m.user_id
                 WHERE m.session_id = %s AND m.source_type = 'voice'
-                ORDER BY m.tstamp ASC, m.id ASC
+                  AND (%s::timestamptz IS NULL OR m.tstamp >= %s)
+                  AND (%s::timestamptz IS NULL OR m.tstamp <= %s)
+                ORDER BY m.tstamp DESC, m.id DESC
+                LIMIT %s
                 """,
-                (session_id,),
+                (session_id, since, since, until, until, limit),
             )
             return [
                 {
@@ -1386,7 +1394,7 @@ class DataRepository:
                     "id": row[6],
                     "recording_id": row[7],
                 }
-                for row in cur.fetchall()
+                for row in reversed(cur.fetchall())
             ]
 
     def get_session_participants(self, session_id: int) -> list[SessionParticipant]:

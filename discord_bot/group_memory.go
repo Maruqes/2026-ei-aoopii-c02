@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -23,6 +26,12 @@ type groupReaction struct {
 	Speak     bool   `json:"speak"`
 	GIFQuery  string `json:"gif_query"`
 }
+
+// ponytail: recent GIFs live in memory; persist them if repeat avoidance must survive bot restarts.
+var recentReactionGIFs = struct {
+	sync.Mutex
+	byGuild map[string][]string
+}{byGuild: make(map[string][]string)}
 
 func runGroupReactions(ctx context.Context, s *discordgo.Session, client *TranscriptionClient) {
 	ticker := time.NewTicker(10 * time.Second)
@@ -52,7 +61,7 @@ func runGroupReactions(ctx context.Context, s *discordgo.Session, client *Transc
 
 // Caller holds a.mu. Only speak when the whole monitored call has been quiet.
 func (a *assistantController) proactiveReady(now time.Time, speak bool) bool {
-	if !a.configured || !a.settings.Enabled || a.stopped || a.request != nil || a.proactiveCancel != nil || !a.canRespond() {
+	if !a.configured || !a.settings.Enabled || a.stopped || a.conversation != nil || a.request != nil || a.proactiveCancel != nil || !a.canRespond() {
 		return false
 	}
 	if !speak || !a.voiceEnabled {
@@ -142,7 +151,7 @@ func deliverGroupReaction(ctx context.Context, s *discordgo.Session, client *Tra
 	content := reaction.Text
 	if reaction.GIFQuery != "" && os.Getenv("GIPHY_API_KEY") != "" {
 		gifCtx, gifCancel := context.WithTimeout(ctx, 5*time.Second)
-		gif, gifErr := searchMemeGIF(gifCtx, http.DefaultClient, "https://api.giphy.com/v1/gifs/search", os.Getenv("GIPHY_API_KEY"), reaction.GIFQuery)
+		gif, gifErr := searchMemeGIF(gifCtx, http.DefaultClient, "https://api.giphy.com/v1/gifs/search", os.Getenv("GIPHY_API_KEY"), reaction.GIFQuery, reaction.GuildID)
 		gifCancel()
 		if gifErr == nil && gif != "" {
 			content += "\n\n" + gif
@@ -153,7 +162,7 @@ func deliverGroupReaction(ctx context.Context, s *discordgo.Session, client *Tra
 		ready := assistant.proactiveReady(time.Now(), false)
 		assistant.mu.Unlock()
 		if ready {
-			err = assistant.send(channel, content)
+			err = assistant.send(ctx, channel, content)
 		} else {
 			err = fmt.Errorf("reaction superseded by a direct request")
 		}
@@ -183,7 +192,7 @@ func deliverGroupReaction(ctx context.Context, s *discordgo.Session, client *Tra
 	_ = client.postJSON(resultCtx, fmt.Sprintf("/v1/memory/reactions/%d/result", reaction.ID), map[string]string{"status": status}, nil)
 	resultCancel()
 	if voiceCtx != nil {
-		voiceErr := assistant.speak(voiceCtx, reaction.Text)
+		voiceErr := assistant.speak(voiceCtx, reaction.Text, nil)
 		voiceCancel()
 		assistant.mu.Lock()
 		assistant.proactiveCancel = nil
@@ -194,8 +203,8 @@ func deliverGroupReaction(ctx context.Context, s *discordgo.Session, client *Tra
 	}
 }
 
-func searchMemeGIF(ctx context.Context, client *http.Client, endpoint, key, query string) (string, error) {
-	values := url.Values{"api_key": {key}, "q": {strings.TrimSpace(query) + " meme"}, "limit": {"3"}, "rating": {"pg-13"}}
+func searchMemeGIF(ctx context.Context, client *http.Client, endpoint, key, query, guildID string) (string, error) {
+	values := url.Values{"api_key": {key}, "q": {strings.TrimSpace(query)}, "limit": {"12"}, "rating": {"pg-13"}}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+values.Encode(), nil)
 	if err != nil {
 		return "", fmt.Errorf("invalid GIF request")
@@ -216,11 +225,27 @@ func searchMemeGIF(ctx context.Context, client *http.Client, endpoint, key, quer
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&data); err != nil {
 		return "", fmt.Errorf("invalid GIF response")
 	}
+	recentReactionGIFs.Lock()
+	defer recentReactionGIFs.Unlock()
+	recent := recentReactionGIFs.byGuild[guildID]
+	candidates := make([]string, 0, len(data.Data))
 	for _, gif := range data.Data {
 		parsed, err := url.Parse(gif.URL)
 		if err == nil && parsed.Scheme == "https" && parsed.Hostname() == "giphy.com" && parsed.User == nil {
-			return gif.URL, nil
+			if !slices.Contains(recent, parsed.Path) {
+				candidates = append(candidates, gif.URL)
+			}
 		}
 	}
-	return "", nil
+	if len(candidates) == 0 {
+		return "", nil
+	}
+	gif := candidates[rand.IntN(len(candidates))]
+	parsed, _ := url.Parse(gif)
+	recent = append(recent, parsed.Path)
+	if len(recent) > 20 {
+		recent = recent[len(recent)-20:]
+	}
+	recentReactionGIFs.byGuild[guildID] = recent
+	return gif, nil
 }

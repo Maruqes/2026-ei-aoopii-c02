@@ -85,7 +85,7 @@ def recent_bulks(repository, guild_id: str, limit: int = 3) -> list[dict]:
     with closing(connect(repository.database_url)) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id, start_at, end_at, summary, lore, reaction_text, created_at FROM group_memory_bulks "
+                "SELECT id, start_at, end_at, summary, lore, reaction_text, created_at, gif_query FROM group_memory_bulks "
                 "WHERE guild_id = %s ORDER BY end_at DESC LIMIT %s",
                 (guild_id, limit),
             )
@@ -100,6 +100,7 @@ def recent_bulks(repository, guild_id: str, limit: int = 3) -> list[dict]:
                             "lore",
                             "reaction_text",
                             "created_at",
+                            "gif_query",
                         ),
                         row,
                     )

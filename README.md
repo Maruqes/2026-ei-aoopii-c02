@@ -96,10 +96,11 @@ recuperação, debug e testes, consultar [a documentação da API](src/transcrip
 
 Com Realtime ativo (`/streaming mode:on`), o assistente fica disponível por defeito
 para humanos com reserva na chamada. Diz «Olá macaco» para ouvir «Diz» e receber
-a confirmação no chat e
-faz a pergunta; também aceita «Olá macaco, explica polimorfismo…». Depois de responder,
-a próxima pergunta exige novamente a frase. O assistente responde em português e
-consulta a memória do servidor. Cada conversa fica guardada e atualiza o perfil e
+a confirmação no chat. Faz a pergunta e continua a conversar sem repetir a ativação;
+também aceita «Olá macaco, explica polimorfismo…». «Adeus macaco» ou «obrigado,
+adeus macaco» termina com uma despedida curta. O assistente responde em PT-PT,
+com 2–4 frases por defeito e mais detalhe a pedido, usando os últimos cinco minutos
+da chamada atual e até 12 trocas recentes do diálogo. Cada conversa fica guardada e atualiza o perfil e
 a lore de quem falou em segundo plano, sem esperar pelo fim da chamada. As respostas
 do bot são contexto identificado, nunca factos sobre a pessoa. Não executa comandos.
 
@@ -125,8 +126,10 @@ Espera pelo assistente, pela música e pela fala; uma nova fala cancela a voz es
 Sem cobertura Realtime completa, publica apenas texto. Não obriga a fazer uma piada
 por bloco e respeita `GROUP_MEMORY_REACTION_COOLDOWN_MINUTES=10`.
 
-GIFs são memes escolhidos para o incidente, como “this is fine”, usando pesquisa
-GIPHY com `GIPHY_API_KEY`. A integração não acede aos favoritos ou ao seletor privado
+GIFs usam ações, cenas e analogias visuais ligadas à conversa, apenas quando a piada
+surge naturalmente. A pesquisa GIPHY com `GIPHY_API_KEY` varia entre resultados e evita
+os últimos 20 GIFs escolhidos por servidor enquanto o bot está ligado; sem resultados
+novos, publica apenas texto. A integração não acede aos favoritos ou ao seletor privado
 de GIFs do Discord; sem chave, continua com texto/voz. `ASSISTANT_VOICE_ENABLED=false`
 desliga voz. `GROUP_MEMORY_REACTIONS_ENABLED=false` desliga as intervenções mantendo
 memória e perfis; `/assistant disable` silencia as reações desse servidor.
@@ -134,8 +137,12 @@ memória e perfis; `/assistant disable` silencia as reações desse servidor.
 Alterações exigem **Gerir Servidor**, são persistidas e cancelam pedidos pendentes.
 O destino inicial é o canal de resumo da chamada; sem acesso a um destino válido,
 o assistente não inicia pedidos. Só o autor da ativação fornece a pergunta. Há uma
-interação de cada vez; outras ativações recebem um aviso de ocupado, sem fila.
-«Cancela» como enunciado isolado cancela a captura; sair da chamada também cancela.
+conversa de cada vez; outras ativações recebem um aviso de ocupado, sem fila.
+Toda a fala do autor durante a conversa é dirigida ao bot; as outras vozes servem
+como contexto. Nova fala reconhecida do autor interrompe geração ou voz, preserva
+uma pergunta ainda sem resposta entregue e inicia o próximo turno. Se a resposta
+já estava no chat, o histórico identifica a voz interrompida. «Cancela» como enunciado
+isolado encerra a conversa; sair da chamada também cancela imediatamente.
 
 A pergunta junta os segmentos do mesmo autor e termina após um período contínuo
 sem som desse autor. Define `ASSISTANT_SILENCE_SECONDS=5` no `.env` para esperar
@@ -144,13 +151,30 @@ Voltar a falar reinicia o contador; outras vozes e finais atrasados não o reini
 O contador usa o áudio recebido e os tempos de fala reconhecida, para incluir fala
 baixa. Depois do silêncio, ainda aguarda os finais correspondentes ao áudio.
 Só texto final
-entra no pedido à IA; números, datas e pontuação são preservados. Há 10 segundos
-para começar e 30 segundos de captura a partir do reconhecimento da ativação,
-e 30 segundos para o LLM. Finais em falta ou falhas de streaming cancelam o pedido;
-Batch continua a servir as gravações, mas nunca ativa o assistente.
+entra no pedido à IA; números, datas e pontuação são preservados.
+`ASSISTANT_INACTIVITY_SECONDS=30` dá 30 segundos disponíveis para responder e encerra
+silenciosamente a conversa se não houver fala. Geração e voz suspendem esse relógio;
+o fim de uma resposta ou aviso recuperável abre uma janela nova.
+`ASSISTANT_CAPTURE_SECONDS=60` limita cada turno a 60 segundos; ambos os valores
+aceitam 5–300 segundos. O limite de 2000 caracteres também se mantém: não se envia
+uma pergunta cortada. O LLM conserva o prazo independente de 30 segundos.
+Finais em falta, falhas de streaming ou do LLM produzem um aviso curto e mantêm a
+conversa para repetir sem ativação. Batch continua a servir as gravações, mas nunca
+ativa nem alimenta turnos do assistente.
 Tempos sobrepostos nos finais não cancelam a captura; palavras já recebidas e
 marcadores vazios não repetem a pergunta. Tempos inválidos continuam a ser rejeitados.
-Os limites encerram apenas o pedido: a escuta volta a ficar disponível na chamada.
+Os limites encerram apenas o turno: a mesma pessoa pode continuar a conversa.
+Uma mudança normal de gravação/SSRC mantém a pergunta e aguarda os finais da gravação
+anterior, ordenados pelos tempos de áudio. Silêncio ou finais vazios após a ativação
+não antecipam o prazo para começar a pergunta. O Speechmatics usa finais com
+`max_delay=2` e modo flexível, preservando a formatação de números e datas.
+A voz é sintetizada por segmentos; a confirmação e a resposta no chat são publicadas
+quando o primeiro áudio está pronto para tocar. Se a síntese falhar, mantém a
+resposta por texto. Uma pergunta já incluída na ativação dispensa o «Diz» por voz.
+A confirmação só ocorre na abertura; o histórico ativo fica em memória e é limpo após encerramento
+ou reinício. O prompt completo respeita `LLM_CONTEXT_CHARS`: prioriza o diálogo
+recente e identifica cobertura parcial quando falta espaço, sem resumir cada turno
+através de outra chamada ao LLM.
 
 O limite de reservas Realtime existente mantém-se. `/assistant status` e avisos de
 cobertura identificam quem está sem reserva Realtime. Os avisos aguardam a primeira
@@ -158,7 +182,9 @@ sincronização e 15 segundos de estado estável, com no máximo um aviso por mi
 Não se garante
 cobertura para todos sem confirmar a capacidade da conta. Silêncio enviado para
 fechar enunciados também consome minutos Realtime; consulta `/keys` e os logs
-`assistant activation`/`assistant response` para medir consumo e latência.
+`assistant activation`, `assistant turn closed`, `assistant delivery` e
+`assistant response` para medir abertura, fecho, primeira entrega e fim; `/keys`
+mostra consumo. `voice_ready=true` identifica entrega no início da voz.
 
 A deteção de fala usa inicialmente energia PCM (`ASSISTANT_SPEECH_RMS=500`); deve ser validada com microfones,
 ruído e música reais. O ensaio Discord, capacidade e metas de latência ainda estão
@@ -186,12 +212,15 @@ O modelo carrega uma única vez por resposta; após 12 mudanças de expressão, 
 restante texto é lido com a voz normal.
 
 `ASSISTANT_VOICE_ENABLED=true` é o default. Usa `false` para resposta apenas no chat.
-Depois de atualizar, reconstrói o bot com `docker compose up -d --build discord-bot`.
+Depois de atualizar, reconstrói API e bot com
+`docker compose up -d --build api discord-bot`.
 Para execução fora do Docker, instala `piper-tts==1.8.0` e descarrega o
 [modelo Tugão](https://huggingface.co/rhasspy/piper-voices/tree/v1.0.0/pt/pt_PT/tug%C3%A3o/medium)
 e a configuração `.onnx.json` para o mesmo diretório. Coloca `piper` no `PATH` e
 define `ASSISTANT_VOICE_MODEL` com o caminho do `.onnx` (22 050 Hz, mono).
-O [plano](plan/hey-bot.md) mantém o ensaio Discord e a avaliação de qualidade pendentes.
+O [plano da conversa contínua](plan/voice-conversation.md) mantém o ensaio Discord,
+as medições de primeira voz/consumo e a avaliação com duas pessoas, ruído e música
+pendentes.
 
 
 ## Deepgram and Speechmatics

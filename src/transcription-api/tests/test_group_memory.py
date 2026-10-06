@@ -149,6 +149,7 @@ def test_closed_bulk_profiles_both_speakers_and_recalls_recent_lore(
     tick(repository, tmp_path, llm, now + timedelta(minutes=5))
     assert len(llm.bulk_calls) == 2
     assert "Go correu mal" in llm.bulk_calls[1]["previous_bulks"]
+    assert "GIF search: this is fine dog" in llm.bulk_calls[1]["previous_bulks"]
     assert llm.bulk_calls[1]["reaction_allowed"] is False
     assert len(memory.recent_bulks(repository, "one")) == 2
 
@@ -294,7 +295,18 @@ def test_bulk_prompt_memes_and_provider_output_validation():
         reaction_allowed=False,
     )
     assert result["reaction_text"] == result["gif_query"] == "" and not result["speak"]
-    assert "MEME search" in client.input["system"]
+    assert "concrete action, scene or visual analogy" in client.input["system"]
+    assert "previously used queries or jokes" in client.input["system"]
+    assert "Leave gif_query empty" in client.input["system"]
+    assert "surprised pikachu" not in client.input["system"]
+    assert "Do not narrate your sources or processing" in client.input["system"]
+    client.output = client.output | {"reaction_text": "", "gif_query": "juggling tasks"}
+    result = client.analyze_group_bulk(
+        observations="Ana: Vamos aguardar os resultados.",
+        previous_bulks="",
+        reaction_allowed=True,
+    )
+    assert result["reaction_text"] == result["gif_query"] == "" and not result["speak"]
     client.output = client.output | {"speak": "yes"}
     with pytest.raises(ValueError):
         client.analyze_group_bulk(

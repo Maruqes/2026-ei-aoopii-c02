@@ -511,14 +511,24 @@ independente; uma linha criada só para o assistente herda o default streaming d
 `POST /v1/assistant/question` recebe `{"question":"Explica polimorfismo?"}` e devolve
 `question`/`answer`. O bot envia também `session_id`, `discord_id`, `username` e
 `display_name`: a API guarda a pergunta e a resposta na tabela `messages` com origem
-`assistant`, consulta mensagens e perfis da memória do servidor e inicia a atualização
-do perfil/lore do autor em segundo plano. As respostas geradas ficam identificadas
+`assistant`, consulta os finais de voz dos últimos cinco minutos dessa chamada
+(até 500 mensagens, em ordem temporal, incluindo unidades Realtime ainda abertas)
+e inicia a atualização do perfil/lore do autor em segundo plano. As respostas geradas ficam identificadas
 como contexto do bot e não são evidência biográfica. Atualizações falhadas continuam
 pendentes para `/syncprofiles` ou a sincronização periódica; a conversa já guardada
-fica disponível nas perguntas seguintes e em `/oracle`. Os perfis continuam a agregar
+fica disponível na memória persistida e em `/oracle`. Os perfis continuam a agregar
 observações do membro entre servidores, como nas atualizações de voz e texto.
 Sem identidade de sessão/autor, mantém uma resposta geral sem guardar memória.
-Usa o cliente LLM selecionado, PT-PT e timeout de geração de 30 segundos, sem tools.
+O bot também envia `history`, uma lista de até 24 mensagens com `role` (`user` ou
+`assistant`), `content` e `interrupted` opcional para voz do bot já publicada e cortada.
+Cada fala do autor aceita até 2000 caracteres; uma resposta no histórico aceita até
+12000. Histórico exige identidade completa de chamada/autor e preserva perguntas
+anteriores ainda sem resposta entregue. O prompt identifica o autor, prioriza os
+turnos recentes, preenche o restante orçamento com contexto da chamada e sinaliza
+cobertura parcial. `LLM_CONTEXT_CHARS` limita o prompt completo, sem cortar a pergunta
+atual nem usar uma chamada adicional para sumarização. O histórico ativo é transitório.
+Usa o cliente LLM selecionado, PT-PT, 2–4 frases por defeito e timeout de geração de
+30 segundos, sem tools.
 É um endpoint interno; as permissões Discord são verificadas no bot.
 
 O WebSocket agora devolve `ready` com `recording_id`/`generation` e eventos `final`
@@ -527,9 +537,13 @@ apenas depois de persistir cada segmento novo. Cada final inclui `session_id`,
 com tempos relativos ao PCM daquela unidade. Pontuação é preservada nas palavras.
 Números e datas formatados como entidades também fazem parte de `words`.
 Eventos `speech` levam só `session_id`, `discord_id`, `recording_id`, `generation`,
-`start` e `end`: indicam fala ainda por finalizar, sem texto nem ativação.
+`start` e `end`: são emitidos apenas para parciais não vazios do fornecedor. Indicam
+fala ainda por finalizar, sem texto nem ativação; podem interromper a resposta e
+abrir um turno quando já existe uma conversa desse autor.
 Duplicados, parciais e recuperação Batch não geram eventos de ativação. Falha de
-persistência/entrega termina o stream com `fallback`; o bot cancela o pedido afetado.
+persistência/entrega termina o stream com `fallback`; o bot descarta o turno incompleto,
+avisa uma vez e conserva a conversa até ao timeout. A recuperação Realtime permite
+repetir; Batch não entrega fala antiga à conversa.
 
 No silêncio/DTX, o Go envia zeros para o Realtime e escreve os mesmos frames no WAV.
 O relógio e as fronteiras RTP descontam esse padding para evitar silêncio duplicado.

@@ -4,10 +4,13 @@ import asyncio
 import copy
 import re
 import unicodedata
+from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from fastapi import BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
+from .agent import format_transcript
 from .profile_updater import run_text_profile_sync
 
 
@@ -39,12 +42,27 @@ class AssistantChanges(BaseModel):
         return self
 
 
+class AssistantMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=12000)
+    interrupted: bool = False
+
+    @model_validator(mode="after")
+    def validate_message(self):
+        if not self.content.strip() or (self.role == "user" and len(self.content) > 2000):
+            raise ValueError("Invalid conversation message")
+        if self.interrupted and self.role != "assistant":
+            raise ValueError("Only assistant playback can be interrupted")
+        return self
+
+
 class AssistantQuestion(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     session_id: int | None = Field(default=None, gt=0)
     discord_id: str | None = Field(default=None, min_length=1, max_length=100)
     username: str | None = Field(default=None, min_length=1, max_length=100)
     display_name: str | None = Field(default=None, max_length=100)
+    history: list[AssistantMessage] = Field(default_factory=list, max_length=24)
 
     @model_validator(mode="after")
     def validate_identity(self):
@@ -55,6 +73,8 @@ class AssistantQuestion(BaseModel):
                 or not self.discord_id.strip()
             ):
                 raise ValueError("Provide both session_id and discord_id for memory")
+        if self.history and self.session_id is None:
+            raise ValueError("Conversation history requires a voice session and speaker")
         return self
 
 
@@ -100,13 +120,15 @@ def install_assistant_routes(
                 display_name=request.display_name,
                 question=text,
             )
-            memory = await asyncio.to_thread(
-                repository.get_guild_oracle_context, session.guild_id, text
+            now = datetime.now(timezone.utc)
+            messages = await asyncio.to_thread(
+                repository.get_session_messages, session.id,
+                since=now - timedelta(minutes=5), until=now, limit=501,
             )
-            memory = (
-                f"Current speaker: {request.username or request.discord_id} [user={request.discord_id}]\n\n"
-                + memory
-            )
+            memory = "Current call, last 5 minutes (confirmed voice only):\n"
+            if len(messages) > 500:
+                memory += "[Partial coverage: newest 500 messages only]\n"
+            memory += format_transcript(messages[-500:])
             background_tasks.add_task(
                 run_text_profile_sync,
                 repository=repository,
@@ -127,6 +149,12 @@ def install_assistant_routes(
                 kwargs = {"question": text, "language": "pt"}
                 if memory:
                     kwargs["guild_context"] = memory
+                    kwargs["current_speaker"] = (
+                        f"{request.display_name or request.username or request.discord_id} "
+                        f"[user={request.discord_id}]"
+                    )
+                if request.history:
+                    kwargs["history"] = [m.model_dump() for m in request.history]
                 answer = await asyncio.to_thread(bounded.answer_question, **kwargs)
         except TimeoutError:
             raise HTTPException(504, "Assistant timed out") from None

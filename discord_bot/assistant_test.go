@@ -19,6 +19,7 @@ type assistantHarness struct {
 	mu        sync.Mutex
 	messages  []string
 	questions []string
+	histories [][]assistantMessage
 	answers   chan string
 	now       time.Time
 }
@@ -29,16 +30,18 @@ func newAssistantHarness(t *testing.T) *assistantHarness {
 	state := &voiceConnectionState{sessionID: 1, summaryChannelID: "chat"}
 	state.streaming = newStreamingController(state)
 	h.a = newAssistantController(nil, state)
+	state.assistant = h.a
 	h.a.voiceEnabled = false
-	h.a.send = func(channel, text string) error {
+	h.a.send = func(_ context.Context, channel, text string) error {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		h.messages = append(h.messages, channel+":"+text)
 		return nil
 	}
-	h.a.ask = func(ctx context.Context, userID, text string) (string, error) {
+	h.a.ask = func(ctx context.Context, userID, text string, history []assistantMessage) (string, error) {
 		h.mu.Lock()
 		h.questions = append(h.questions, text)
+		h.histories = append(h.histories, append([]assistantMessage(nil), history...))
 		h.mu.Unlock()
 		select {
 		case answer := <-h.answers:
@@ -147,7 +150,7 @@ func TestAssistantWaitsForAudioFinalsAndFailsIncompleteQuestion(t *testing.T) {
 	h.audio["ana"].speechFrame = 5 * sampleRate
 	h.audio["ana"].lastSpeech = h.now.Add(5 * time.Second)
 	h.audio["ana"].audioMu.Unlock()
-	h.a.tick(h.now.Add(15 * time.Second))
+	h.a.tick(h.now.Add(35 * time.Second))
 	if !h.waiting() {
 		t.Fatal("missing finals did not cancel")
 	}
@@ -166,10 +169,10 @@ func TestAssistantCancelLimitsAndInvalidation(t *testing.T) {
 			case "cancel":
 				h.final("ana", "cancel", "Cancela!", 1, 2)
 			case "empty":
-				h.a.tick(h.now.Add(12 * time.Second))
-			case "long":
-				h.final("ana", "q", "Pergunta", 1, 2)
 				h.a.tick(h.now.Add(32 * time.Second))
+			case "long":
+				h.final("ana", "q", "Pergunta demasiado longa", 1, 62)
+				h.a.tick(h.now.Add(67 * time.Second))
 			case "leave":
 				h.a.state.streaming.leave("ana")
 				h.a.tick(h.now.Add(4 * time.Second))
@@ -201,7 +204,7 @@ func TestAssistantCancelLimitsAndInvalidation(t *testing.T) {
 			h.mu.Lock()
 			defer h.mu.Unlock()
 			for _, message := range h.messages {
-				if strings.Contains(message, "**Pergunta:**") {
+				if strings.Contains(message, "**Pergunta:**") && mode != "llm-error" {
 					t.Fatalf("cancelled reply: %s", message)
 				}
 			}
@@ -253,7 +256,7 @@ func TestAssistantKeepsReadingWhileConfirmationPublishes(t *testing.T) {
 	h := newAssistantHarness(t)
 	publishing := make(chan struct{})
 	release := make(chan struct{})
-	h.a.send = func(channel, text string) error {
+	h.a.send = func(_ context.Context, channel, text string) error {
 		if strings.Contains(text, "Diz") {
 			close(publishing)
 			<-release
@@ -294,13 +297,18 @@ func TestAssistantEmptyDestinationAndReplacementStream(t *testing.T) {
 	old := h.audio["ana"]
 	replacement := &realtimeAudioClient{startedAt: h.now}
 	h.a.begin("ana", replacement)
-	if !h.waiting() {
-		t.Fatal("stream replacement did not cancel")
+	if h.waiting() {
+		t.Fatal("healthy stream replacement cancelled the question")
 	}
-	h.a.event("ana", old, realtimeEvent{Type: "final", SessionID: 1, DiscordID: "ana", RecordingID: 10, Generation: 2, Identity: "late", Text: "Hey Bot", Start: 2, End: 3}, h.now)
-	if !h.waiting() {
-		t.Fatal("replaced connection activated")
+	h.a.mu.Lock()
+	request := h.a.request
+	h.a.mu.Unlock()
+	h.a.event("ana", old, realtimeEvent{Type: "final", SessionID: 1, DiscordID: "ana", RecordingID: 10, Generation: 2, Identity: "late", Text: "Hey Bot", Start: 1, End: 2}, h.now)
+	h.a.mu.Lock()
+	if h.a.request != request {
+		t.Error("retired connection started another request")
 	}
+	h.a.mu.Unlock()
 	h.a.relocate()
 	h.a.mu.Lock()
 	defer h.a.mu.Unlock()
@@ -324,7 +332,7 @@ func TestAssistantCoverageDoesNotAnnounceStartupOrRetiredFailure(t *testing.T) {
 			defer server.Close()
 			h.a.state.transcriptionClient = testAPIClient(server)
 			messages := make(chan string, 10)
-			h.a.send = func(channel, text string) error { messages <- text; return nil }
+			h.a.send = func(_ context.Context, channel, text string) error { messages <- text; return nil }
 			if mode == "startup" {
 				h.a.state.streaming.mu.Lock()
 				h.a.state.streaming.grants = nil
@@ -354,7 +362,7 @@ func TestAssistantCoverageWaitsForStableLossAndLimitsNotices(t *testing.T) {
 	c.synced = true
 	c.mu.Unlock()
 	messages := make(chan string, 10)
-	h.a.send = func(channel, text string) error { messages <- text; return nil }
+	h.a.send = func(_ context.Context, channel, text string) error { messages <- text; return nil }
 	setCovered := func(ana, bob bool) {
 		c.mu.Lock()
 		defer c.mu.Unlock()
@@ -423,7 +431,7 @@ func TestAssistantCoverageRechecksQueuedWarningAfterRecovery(t *testing.T) {
 	c.grants = nil
 	c.mu.Unlock()
 	messages := make(chan string, 1)
-	h.a.send = func(channel, text string) error { messages <- text; return nil }
+	h.a.send = func(_ context.Context, channel, text string) error { messages <- text; return nil }
 	h.a.publishMu.Lock()
 	h.a.updateCoverage(h.now)
 	h.a.updateCoverage(h.now.Add(16 * time.Second))
@@ -708,6 +716,77 @@ func TestAssistantDelayedWakeDoesNotExpireBeforeQuestion(t *testing.T) {
 	}
 }
 
+func TestAssistantWakeTailAndEmptyFinalAllowTimeToAsk(t *testing.T) {
+	h := newAssistantHarness(t)
+	h.final("ana", "wake", "Hey Bot", 0, 1)
+	audio := h.audio["ana"]
+	audio.audioMu.Lock()
+	audio.frames, audio.speechFrame = 7*sampleRate, 1200*sampleRate/1000
+	audio.lastSpeech = h.now.Add(1200 * time.Millisecond)
+	audio.audioMu.Unlock()
+	h.a.event("ana", audio, realtimeEvent{Type: "final", SessionID: 1, DiscordID: "ana", RecordingID: 10, Generation: 2, Identity: "silence", Start: 1, End: 7}, h.now.Add(7*time.Second))
+	h.a.tick(h.now.Add(7 * time.Second))
+	if h.waiting() {
+		t.Fatal("wake tail or empty final cancelled before the question start deadline")
+	}
+	h.final("ana", "question", "Explica Go?", 7, 8)
+	h.a.tick(h.now.Add(13 * time.Second))
+	h.answers <- "Resposta."
+	h.wait(t, h.waiting)
+}
+
+func TestAssistantHealthyRotationPreservesDelayedQuestionFinals(t *testing.T) {
+	h := newAssistantHarness(t)
+	h.final("ana", "wake", "Hey Bot Explica", 0, 2)
+	old := h.audio["ana"]
+	old.audioMu.Lock()
+	old.frames, old.speechFrame = 4*sampleRate, 4*sampleRate
+	old.lastSpeech = h.now.Add(4 * time.Second)
+	old.audioMu.Unlock()
+	replacement := &realtimeAudioClient{startedAt: h.now.Add(5 * time.Second)}
+	h.a.begin("ana", replacement)
+	h.audio["ana"] = replacement
+	h.a.event("ana", replacement, realtimeEvent{Type: "ready", RecordingID: 11, Generation: 1}, h.now.Add(5*time.Second))
+	replacement.audioMu.Lock()
+	replacement.frames, replacement.speechFrame = sampleRate, sampleRate
+	replacement.lastSpeech = h.now.Add(6 * time.Second)
+	replacement.audioMu.Unlock()
+	h.a.event("ana", replacement, realtimeEvent{Type: "final", SessionID: 1, DiscordID: "ana", RecordingID: 11, Generation: 1, Identity: "new", Start: 0, End: 1, Text: "com exemplo."}, h.now.Add(6*time.Second))
+	h.a.tick(h.now.Add(11 * time.Second))
+	h.mu.Lock()
+	if len(h.questions) != 0 {
+		t.Error("sent a question with an old stream final still pending")
+	}
+	h.mu.Unlock()
+	h.a.event("ana", old, realtimeEvent{Type: "final", SessionID: 1, DiscordID: "ana", RecordingID: 10, Generation: 2, Identity: "late", Start: 2, End: 4, Text: "Go"}, h.now.Add(11*time.Second))
+	h.a.tick(h.now.Add(11 * time.Second))
+	h.answers <- "Resposta."
+	h.wait(t, h.waiting)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.questions) != 1 || h.questions[0] != "Explica Go com exemplo." {
+		t.Fatalf("rotation lost/reordered the question: %v", h.questions)
+	}
+}
+
+func TestAssistantRetiredStreamFailureCancelsOnlyUnfinishedCapture(t *testing.T) {
+	for _, responding := range []bool{false, true} {
+		t.Run(fmt.Sprint(responding), func(t *testing.T) {
+			h := newAssistantHarness(t)
+			h.final("ana", "wake", "Hey Bot Explica Go?", 0, 2)
+			old := h.audio["ana"]
+			h.a.mu.Lock()
+			h.a.request.responding = responding
+			h.a.mu.Unlock()
+			h.a.begin("ana", &realtimeAudioClient{startedAt: h.now.Add(3 * time.Second)})
+			h.a.fail("ana", old)
+			if h.waiting() == responding {
+				t.Fatalf("retired stream failure mishandled responding=%t", responding)
+			}
+		})
+	}
+}
+
 func TestAssistantPartialTimingCannotActivateOrSupplyQuestion(t *testing.T) {
 	h := newAssistantHarness(t)
 	audio := h.audio["ana"]
@@ -831,11 +910,17 @@ func TestAssistantSpeaksAcknowledgementAndAnswerWithChatFallback(t *testing.T) {
 			h := newAssistantHarness(t)
 			h.a.voiceEnabled = true
 			spoken := make(chan string, 2)
-			h.a.speak = func(ctx context.Context, text string) error {
-				spoken <- text
+			h.a.speak = func(ctx context.Context, text string, ready func() error) error {
 				if failed {
-					return errors.New("synthesis failed")
+					spoken <- text
+					return errors.New("synthesis failed before playback")
 				}
+				if ready != nil {
+					if err := ready(); err != nil {
+						return err
+					}
+				}
+				spoken <- text
 				return nil
 			}
 			h.final("ana", "wake", "Hey Bot", 0, 1)
@@ -872,11 +957,120 @@ func TestAssistantSpeaksAcknowledgementAndAnswerWithChatFallback(t *testing.T) {
 	}
 }
 
+func TestAssistantPublishesAtPlaybackAndWaitsForAudibleCue(t *testing.T) {
+	for _, acknowledgement := range []bool{true, false} {
+		t.Run(fmt.Sprint(acknowledgement), func(t *testing.T) {
+			h := newAssistantHarness(t)
+			h.a.voiceEnabled = true
+			preparing, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			t.Cleanup(func() { once.Do(func() { close(release) }) })
+			h.a.speak = func(ctx context.Context, text string, ready func() error) error {
+				close(preparing)
+				select {
+				case <-release:
+					return ready()
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			target := "Diz"
+			if acknowledgement {
+				h.final("ana", "wake", "Hey Bot", 0, 1)
+			} else {
+				target = "Resposta sincronizada."
+				h.final("ana", "question", "Hey Bot Explica Go?", 0, 2)
+				h.a.tick(h.now.Add(7 * time.Second))
+				h.answers <- target
+			}
+			select {
+			case <-preparing:
+			case <-time.After(time.Second):
+				t.Fatal("synthesis never started")
+			}
+			h.mu.Lock()
+			for _, message := range h.messages {
+				if strings.Contains(message, target) {
+					t.Error("published text while voice was still being prepared")
+				}
+			}
+			h.mu.Unlock()
+			if acknowledgement {
+				h.a.mu.Lock()
+				h.a.request.openedAt = time.Now().Add(-15 * time.Second)
+				h.a.mu.Unlock()
+				h.a.tick(time.Now())
+				if h.waiting() {
+					t.Fatal("expired before the audible cue")
+				}
+			}
+			deliveredAt := time.Now()
+			once.Do(func() { close(release) })
+			h.wait(t, func() bool {
+				h.a.mu.Lock()
+				defer h.a.mu.Unlock()
+				if acknowledgement {
+					return h.a.request != nil && !h.a.request.ackPending && !h.a.request.openedAt.Before(deliveredAt)
+				}
+				return h.a.request == nil
+			})
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			count := 0
+			for _, message := range h.messages {
+				if strings.Contains(message, target) {
+					count++
+				}
+			}
+			if count != 1 {
+				t.Fatalf("expected one synchronized publication, got %d", count)
+			}
+		})
+	}
+}
+
+func TestAssistantVoiceDeadlineFallsBackToTextButCancellationStaysSilent(t *testing.T) {
+	for _, cancelled := range []bool{false, true} {
+		t.Run(fmt.Sprint(cancelled), func(t *testing.T) {
+			h := newAssistantHarness(t)
+			h.final("ana", "question", "Hey Bot Explica Go?", 0, 2)
+			h.a.speak = func(ctx context.Context, text string, ready func() error) error { return ctx.Err() }
+			ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			if cancelled {
+				ctx, cancel = context.WithCancel(context.Background())
+				cancel()
+			}
+			defer cancel()
+			h.a.mu.Lock()
+			request := h.a.request
+			h.a.mu.Unlock()
+			err := h.a.deliver(ctx, request, "Resposta.", "Resposta.", true, false)
+			if cancelled && !errors.Is(err, context.Canceled) || !cancelled && err != nil {
+				t.Fatalf("unexpected delivery result: %v", err)
+			}
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			found := false
+			for _, message := range h.messages {
+				found = found || strings.Contains(message, "Resposta.")
+			}
+			if found == cancelled {
+				t.Fatalf("text fallback=%t cancellation=%t", found, cancelled)
+			}
+		})
+	}
+}
+
 func TestAssistantDisableCancelsSpokenAnswerWithoutWaitingForPlayback(t *testing.T) {
 	h := newAssistantHarness(t)
 	h.a.voiceEnabled = true
 	started, stopped := make(chan struct{}), make(chan struct{})
-	h.a.speak = func(ctx context.Context, text string) error {
+	h.a.speak = func(ctx context.Context, text string, ready func() error) error {
+		if ready != nil {
+			if err := ready(); err != nil {
+				return err
+			}
+		}
 		if text == "Diz" {
 			return nil
 		}
@@ -907,5 +1101,463 @@ func TestAssistantDisableCancelsSpokenAnswerWithoutWaitingForPlayback(t *testing
 	case <-stopped:
 	case <-time.After(time.Second):
 		t.Fatal("disabled assistant kept speaking")
+	}
+}
+
+func TestAssistantContinuousDialogueAndBoundedHistory(t *testing.T) {
+	h := newAssistantHarness(t)
+	h.final("ana", "wake", "Hey Bot", 0, 1)
+	h.wait(t, func() bool {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return len(h.messages) == 1
+	})
+	for i := 0; i < 15; i++ {
+		start := float64(2 + i*8)
+		h.final("ana", fmt.Sprint(i), "Dá outro exemplo?", start, start+1)
+		h.a.tick(h.now.Add(time.Duration(start+6) * time.Second))
+		h.answers <- fmt.Sprintf("Exemplo %d.", i)
+		h.wait(t, h.waiting)
+		// Advance the synthetic playback completion time with this turn's audio clock.
+		h.a.mu.Lock()
+		h.a.conversation.idleSince = h.now.Add(time.Duration(start+6) * time.Second)
+		h.a.mu.Unlock()
+		if i == 0 {
+			h.final("bob", "busy", "Hey Bot pergunta de outra pessoa", start, start+1)
+		}
+	}
+	h.a.mu.Lock()
+	if h.a.conversation == nil || h.a.conversation.user != "ana" || len(h.a.conversation.history) != 24 || h.a.proactiveReady(time.Now(), false) {
+		h.a.mu.Unlock()
+		t.Fatal("lost ownership, unbounded history or spontaneous reaction during dialogue")
+	}
+	h.a.mu.Unlock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.questions) != 15 || len(h.histories[1]) != 2 || h.histories[1][1].Content != "Exemplo 0." || len(h.histories[14]) != 24 {
+		t.Fatalf("lost dialogue: %v", h.histories)
+	}
+	confirmations := 0
+	for _, message := range h.messages {
+		if strings.Contains(message, ", Diz") {
+			confirmations++
+		}
+	}
+	if confirmations != 1 {
+		t.Fatalf("confirmation repeated %d times", confirmations)
+	}
+}
+
+func TestAssistantInactivityIgnoresOtherVoicesNoiseAndLateText(t *testing.T) {
+	for _, late := range []bool{false, true} {
+		t.Run(fmt.Sprint(late), func(t *testing.T) {
+			h := newAssistantHarness(t)
+			h.final("ana", "wake", "Hey Bot", 0, 1)
+			h.wait(t, func() bool { h.mu.Lock(); defer h.mu.Unlock(); return len(h.messages) == 1 })
+			h.a.mu.Lock()
+			deadline := h.a.conversation.idleSince.Add(h.a.inactivity)
+			h.a.mu.Unlock()
+			h.final("bob", "other", "Conversa de lado", 20, 21)
+			audio := h.audio["ana"]
+			audio.audioMu.Lock()
+			audio.frames, audio.speechFrame, audio.lastSpeech = 29*sampleRate, 29*sampleRate, deadline.Add(-time.Second)
+			audio.audioMu.Unlock()
+			h.a.tick(deadline.Add(-time.Millisecond))
+			if h.waiting() {
+				t.Fatal("inactivity expired early")
+			}
+			if late {
+				h.a.event("ana", audio, realtimeEvent{Type: "final", SessionID: 1, DiscordID: "ana", RecordingID: 10, Generation: 2, Identity: "late", Start: 20, End: 21, Text: "texto antigo"}, deadline)
+			} else {
+				h.a.tick(deadline)
+			}
+			h.a.mu.Lock()
+			defer h.a.mu.Unlock()
+			if h.a.conversation != nil || h.a.request != nil {
+				t.Fatal("noise, other voice or delayed text renewed inactivity")
+			}
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			if len(h.messages) != 1 || len(h.questions) != 0 {
+				t.Fatal("inactivity must end silently")
+			}
+		})
+	}
+}
+
+func TestAssistantGoodbyeAndQuotedGoodbye(t *testing.T) {
+	for _, goodbye := range []string{"ADEUS, MACACO!", "Obrigado, adeus macaco.", "Obrigada, adeus macaco!"} {
+		t.Run(goodbye, func(t *testing.T) {
+			h := newAssistantHarness(t)
+			h.final("ana", "wake", "Hey Bot O que significa «adeus macaco»?", 0, 2)
+			h.a.tick(h.now.Add(7 * time.Second))
+			h.answers <- "É uma despedida."
+			h.wait(t, h.waiting)
+			h.final("bob", "bye", "Adeus macaco", 3, 4)
+			h.final("ana", "bye", goodbye, 4, 5)
+			h.a.tick(h.now.Add(10 * time.Second))
+			h.wait(t, func() bool { h.a.mu.Lock(); defer h.a.mu.Unlock(); return h.a.conversation == nil })
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			if len(h.questions) != 1 || !strings.Contains(h.messages[len(h.messages)-1], "Até à próxima!") {
+				t.Fatalf("farewell used LLM or quote ended the conversation: %v", h.messages)
+			}
+		})
+	}
+}
+
+func TestAssistantAuthorInterruptsGenerationAndPreservesUnansweredQuestion(t *testing.T) {
+	h := newAssistantHarness(t)
+	cancelled := make(chan struct{})
+	ask := h.a.ask
+	h.a.ask = func(ctx context.Context, user, text string, history []assistantMessage) (string, error) {
+		answer, err := ask(ctx, user, text, history)
+		if ctx.Err() != nil {
+			close(cancelled)
+		}
+		return answer, err
+	}
+	h.final("ana", "question", "Hey Bot Explica herança", 0, 2)
+	h.a.tick(h.now.Add(7 * time.Second))
+	h.wait(t, func() bool { h.mu.Lock(); defer h.mu.Unlock(); return len(h.questions) == 1 })
+	h.final("bob", "other", "Hey Bot outra pergunta", 3, 4)
+	h.a.tick(h.now.Add(5 * time.Minute)) // Generation suspends inactivity.
+	h.a.mu.Lock()
+	if h.a.request == nil || !h.a.request.responding {
+		h.a.mu.Unlock()
+		t.Fatal("another participant interrupted generation")
+	}
+	h.a.mu.Unlock()
+	h.final("ana", "amend", "e usa Python", 3, 4)
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("author did not cancel generation")
+	}
+	h.a.tick(h.now.Add(9 * time.Second))
+	h.answers <- "Exemplo em Python."
+	h.wait(t, h.waiting)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.questions) != 2 || h.questions[1] != "e usa Python" || len(h.histories[1]) != 1 || h.histories[1][0].Content != "Explica herança" {
+		t.Fatalf("lost unanswered question: %v / %v", h.questions, h.histories)
+	}
+	for _, message := range h.messages {
+		if strings.Contains(strings.ToLower(message), "não consegui responder") {
+			t.Fatal("cancelled generation published an obsolete failure")
+		}
+	}
+}
+
+func TestAssistantInterruptsVoiceOnProviderSpeechAndMarksDeliveredAnswer(t *testing.T) {
+	h := newAssistantHarness(t)
+	h.a.voiceEnabled = true
+	started, cancelled := make(chan struct{}), make(chan struct{})
+	h.a.speak = func(ctx context.Context, text string, ready func() error) error {
+		if err := ready(); err != nil {
+			return err
+		}
+		if text == "Resposta inicial." {
+			close(started)
+			<-ctx.Done()
+			close(cancelled)
+			return ctx.Err()
+		}
+		return nil
+	}
+	h.final("ana", "question", "Hey Bot Explica Go?", 0, 2)
+	h.a.tick(h.now.Add(7 * time.Second))
+	h.answers <- "Resposta inicial."
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("voice never started")
+	}
+	h.a.tick(h.now.Add(5 * time.Minute)) // Playback also suspends inactivity.
+	h.final("bob", "other", "Não interrompas", 3, 4)
+	audio := h.audio["ana"]
+	audio.audioMu.Lock()
+	audio.frames, audio.speechFrame = 4*sampleRate, 4*sampleRate
+	audio.lastSpeech = h.now.Add(4 * time.Second)
+	audio.audioMu.Unlock()
+	h.a.event("ana", audio, realtimeEvent{Type: "speech", SessionID: 1, DiscordID: "ana", RecordingID: 10, Generation: 2, Start: 3, End: 4}, h.now.Add(4*time.Second))
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("confirmed author speech did not stop voice")
+	}
+	h.final("ana", "followup", "Porquê?", 3, 4)
+	h.a.tick(h.now.Add(8999 * time.Millisecond))
+	h.a.mu.Lock()
+	if h.a.request == nil || h.a.request.responding {
+		h.a.mu.Unlock()
+		t.Fatal("did not wait for five seconds of silence")
+	}
+	h.a.mu.Unlock()
+	h.a.tick(h.now.Add(9 * time.Second))
+	h.answers <- "Porque sim."
+	h.wait(t, h.waiting)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	history := h.histories[1]
+	if len(history) != 2 || history[1].Content != "Resposta inicial." || !history[1].Interrupted {
+		t.Fatalf("delivered answer lost interruption marker: %+v", history)
+	}
+}
+
+func TestAssistantRecoverableFailuresKeepConversation(t *testing.T) {
+	for _, failure := range []string{"llm", "realtime", "missing-finals", "length"} {
+		t.Run(failure, func(t *testing.T) {
+			h := newAssistantHarness(t)
+			h.final("ana", "question", "Hey Bot Pergunta?", 0, 2)
+			switch failure {
+			case "llm":
+				h.a.tick(h.now.Add(7 * time.Second))
+				h.answers <- "error"
+				h.wait(t, h.waiting)
+			case "realtime":
+				h.a.fail("ana", h.audio["ana"])
+				audio := &realtimeAudioClient{startedAt: h.now}
+				h.audio["ana"] = audio
+				h.a.begin("ana", audio)
+				h.a.event("ana", audio, realtimeEvent{Type: "ready", RecordingID: 10, Generation: 2}, h.now)
+			case "missing-finals":
+				audio := h.audio["ana"]
+				audio.audioMu.Lock()
+				audio.frames, audio.speechFrame, audio.lastSpeech = 4*sampleRate, 4*sampleRate, h.now.Add(4*time.Second)
+				audio.audioMu.Unlock()
+				h.a.tick(h.now.Add(14 * time.Second))
+			case "length":
+				h.final("ana", "long", strings.Repeat("á", 2001), 3, 4)
+			}
+			h.a.mu.Lock()
+			if h.a.conversation == nil || h.a.request != nil {
+				h.a.mu.Unlock()
+				t.Fatal("recoverable failure ended the conversation")
+			}
+			h.a.mu.Unlock()
+			h.final("ana", "repeat", "Repito a pergunta?", 5, 6)
+			h.a.tick(h.now.Add(11 * time.Second))
+			h.answers <- "Recuperado."
+			h.wait(t, h.waiting)
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			if h.questions[len(h.questions)-1] != "Repito a pergunta?" {
+				t.Fatalf("recovery needed another wake phrase: %v", h.questions)
+			}
+		})
+	}
+}
+
+func TestAssistantCaptureAndCharacterLimits(t *testing.T) {
+	for _, tc := range []struct {
+		end  float64
+		text string
+		ok   bool
+	}{{61, "Pergunta de sessenta segundos", true}, {62, "Pergunta demasiado longa", false}, {2, strings.Repeat("á", 2000), true}, {2, strings.Repeat("á", 2001), false}} {
+		t.Run(fmt.Sprint(tc.end, len(tc.text)), func(t *testing.T) {
+			h := newAssistantHarness(t)
+			h.final("ana", "wake", "Hey Bot", 0, 1)
+			if tc.end > 2 {
+				audio := h.audio["ana"]
+				audio.audioMu.Lock()
+				audio.frames = 2 * sampleRate
+				audio.audioMu.Unlock()
+				h.a.event("ana", audio, realtimeEvent{Type: "speech", SessionID: 1, DiscordID: "ana", RecordingID: 10, Generation: 2, Start: 1, End: 2}, h.now.Add(2*time.Second))
+			}
+			h.final("ana", "question", tc.text, 1, tc.end)
+			h.a.tick(h.now.Add(time.Duration(tc.end+5) * time.Second))
+			if tc.ok {
+				h.answers <- "Resposta."
+				h.wait(t, h.waiting)
+			}
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			if (len(h.questions) == 1) != tc.ok {
+				t.Fatalf("partial or rejected valid question: %v", h.questions)
+			}
+		})
+	}
+}
+
+func TestAssistantAmbiguousPublicationIsNotRetriedOrRememberedAsDelivered(t *testing.T) {
+	h := newAssistantHarness(t)
+	publications := 0
+	h.a.send = func(_ context.Context, channel, text string) error {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if strings.Contains(text, "**Pergunta:**") {
+			publications++
+		}
+		return errors.New("Discord timeout; outcome unknown")
+	}
+	h.final("ana", "question", "Hey Bot Pergunta?", 0, 2)
+	h.a.tick(h.now.Add(7 * time.Second))
+	h.answers <- "Texto possivelmente publicado."
+	h.wait(t, h.waiting)
+	h.a.mu.Lock()
+	defer h.a.mu.Unlock()
+	if h.a.conversation == nil || len(h.a.conversation.history) != 1 {
+		t.Fatal("ambiguous publication entered delivered dialogue")
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if publications != 1 {
+		t.Fatal("ambiguous publication retried")
+	}
+}
+
+func TestAssistantDurationEnvironmentValidation(t *testing.T) {
+	for _, value := range []string{"", "NaN", "Inf", "0", "301", "bad", "45"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("ASSISTANT_INACTIVITY_SECONDS", value)
+			t.Setenv("ASSISTANT_CAPTURE_SECONDS", value)
+			h := newAssistantHarness(t)
+			idle, capture := 30*time.Second, 60*time.Second
+			if value == "45" {
+				idle, capture = 45*time.Second, 45*time.Second
+			}
+			if h.a.inactivity != idle || h.a.captureLimit != capture {
+				t.Fatalf("invalid duration settings: %s/%s", h.a.inactivity, h.a.captureLimit)
+			}
+		})
+	}
+}
+
+func TestAssistantDisableCancelsDiscordPublicationImmediately(t *testing.T) {
+	h := newAssistantHarness(t)
+	started, cancelled := make(chan struct{}), make(chan struct{})
+	h.a.send = func(ctx context.Context, channel, text string) error {
+		if !strings.Contains(text, "**Pergunta:**") {
+			return nil
+		}
+		close(started)
+		<-ctx.Done()
+		close(cancelled)
+		return ctx.Err()
+	}
+	h.final("ana", "question", "Hey Bot Pergunta?", 0, 2)
+	h.a.tick(h.now.Add(7 * time.Second))
+	h.answers <- "Resposta."
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("publication did not start")
+	}
+	configured := make(chan struct{})
+	go func() {
+		h.a.configure(assistantSettings{Enabled: false, Phrase: "Hey Bot", Revision: 1})
+		close(configured)
+	}()
+	for _, done := range []chan struct{}{configured, cancelled} {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("disable waited for publication instead of cancelling it")
+		}
+	}
+}
+
+func TestAssistantRotationBetweenTurnsKeepsLateWordsInOrder(t *testing.T) {
+	h := newAssistantHarness(t)
+	h.final("ana", "question", "Hey Bot Explica Go?", 0, 2)
+	h.a.tick(h.now.Add(7 * time.Second))
+	h.answers <- "Resposta."
+	h.wait(t, h.waiting)
+	old := h.audio["ana"]
+	old.audioMu.Lock()
+	old.frames, old.speechFrame, old.lastSpeech = 4*sampleRate, 4*sampleRate, h.now.Add(4*time.Second)
+	old.audioMu.Unlock()
+	replacement := &realtimeAudioClient{startedAt: h.now.Add(5 * time.Second)}
+	h.a.begin("ana", replacement)
+	h.a.event("ana", replacement, realtimeEvent{Type: "ready", RecordingID: 11, Generation: 1}, h.now.Add(5*time.Second))
+	replacement.audioMu.Lock()
+	replacement.frames, replacement.speechFrame, replacement.lastSpeech = sampleRate, sampleRate, h.now.Add(6*time.Second)
+	replacement.audioMu.Unlock()
+	h.a.event("ana", replacement, realtimeEvent{Type: "final", SessionID: 1, DiscordID: "ana", RecordingID: 11, Generation: 1, Identity: "new", Start: 0, End: 1, Text: "com exemplo?"}, h.now.Add(6*time.Second))
+	h.a.tick(h.now.Add(11 * time.Second))
+	h.a.mu.Lock()
+	if h.a.request == nil || h.a.request.responding {
+		h.a.mu.Unlock()
+		t.Fatal("new turn ignored a pending final across rotation")
+	}
+	h.a.mu.Unlock()
+	h.a.event("ana", old, realtimeEvent{Type: "final", SessionID: 1, DiscordID: "ana", RecordingID: 10, Generation: 2, Identity: "late", Start: 3, End: 4, Text: "E em Python"}, h.now.Add(11*time.Second))
+	h.a.tick(h.now.Add(11 * time.Second))
+	h.answers <- "Novo exemplo."
+	h.wait(t, h.waiting)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.questions) != 2 || h.questions[1] != "E em Python com exemplo?" || len(h.histories[1]) != 2 {
+		t.Fatalf("rotation lost dialogue or word order: %v", h.questions)
+	}
+}
+
+func TestAssistantNoiseCannotInterruptAndFinishedVoiceOpensFreshInactivity(t *testing.T) {
+	h := newAssistantHarness(t)
+	h.a.voiceEnabled = true
+	started, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+	h.a.speak = func(ctx context.Context, text string, ready func() error) error {
+		if err := ready(); err != nil {
+			return err
+		}
+		if text == "Diz" {
+			return nil
+		}
+		close(started)
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			t.Error("PCM noise interrupted voice")
+			return ctx.Err()
+		}
+	}
+	h.final("ana", "question", "Hey Bot Pergunta?", 0, 2)
+	h.a.tick(h.now.Add(7 * time.Second))
+	h.answers <- "Resposta."
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("voice did not start")
+	}
+	audio := h.audio["ana"]
+	audio.audioMu.Lock()
+	audio.frames, audio.speechFrame, audio.lastSpeech = 20*sampleRate, 20*sampleRate, h.now.Add(20*time.Second)
+	audio.audioMu.Unlock()
+	h.a.tick(h.now.Add(5 * time.Minute))
+	once.Do(func() { close(release) })
+	h.wait(t, h.waiting)
+	h.a.mu.Lock()
+	deadline := h.a.conversation.idleSince.Add(h.a.inactivity)
+	h.a.mu.Unlock()
+	h.a.tick(deadline.Add(-time.Millisecond))
+	h.a.mu.Lock()
+	active := h.a.conversation != nil
+	h.a.mu.Unlock()
+	if !active {
+		t.Fatal("voice duration consumed the user's reply window")
+	}
+	h.a.tick(deadline)
+	h.a.mu.Lock()
+	defer h.a.mu.Unlock()
+	if h.a.conversation != nil {
+		t.Fatal("noise renewed inactivity after playback")
+	}
+}
+
+func TestAssistantEmptyRotationDoesNotInventAuthorActivity(t *testing.T) {
+	h := newAssistantHarness(t)
+	h.final("ana", "question", "Hey Bot Pergunta?", 0, 2)
+	h.a.begin("ana", &realtimeAudioClient{startedAt: h.now.Add(6 * time.Second)})
+	h.a.tick(h.now.Add(7 * time.Second))
+	h.answers <- "Resposta sem esperar pelo WAV vazio."
+	h.wait(t, h.waiting)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.questions) != 1 {
+		t.Fatal("empty recording boundary restarted the silence clock")
 	}
 }

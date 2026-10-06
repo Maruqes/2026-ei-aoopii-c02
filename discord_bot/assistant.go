@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -14,6 +13,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -26,6 +26,20 @@ type assistantSettings struct {
 }
 
 const assistantDefaultSilence = 5 * time.Second
+
+type assistantMessage struct {
+	Role        string `json:"role"`
+	Content     string `json:"content"`
+	Interrupted bool   `json:"interrupted,omitempty"`
+	turn        *assistantRequest
+}
+type assistantConversation struct {
+	user      string
+	closing   bool
+	idleSince time.Time
+	history   []assistantMessage
+	previous  []*assistantStream
+}
 
 type assistantWord struct {
 	Text         string  `json:"text"`
@@ -60,16 +74,21 @@ type assistantStream struct {
 	failed        bool
 }
 type assistantRequest struct {
-	id            uint64
-	user          string
-	stream        *assistantStream
-	activation    time.Time
-	openedAt      time.Time
-	questionEnded time.Time
-	boundary      float64
-	text          string
-	responding    bool
-	cancel        context.CancelFunc
+	user           string
+	stream         *assistantStream
+	previous       []*assistantStream
+	words          []assistantWord
+	ackPending     bool
+	activation     time.Time
+	openedAt       time.Time
+	questionEnded  time.Time
+	captureStarted time.Time
+	text           string
+	answer         string
+	interrupted    bool
+	conversation   *assistantConversation
+	responding     bool
+	cancel         context.CancelFunc
 }
 type assistantController struct {
 	publishMu          sync.Mutex
@@ -78,11 +97,14 @@ type assistantController struct {
 	session            *discordgo.Session
 	settings           assistantSettings
 	silence            time.Duration
+	inactivity         time.Duration
+	captureLimit       time.Duration
 	voiceEnabled       bool
 	configured         bool
 	stopped            bool
 	streams            map[string]*assistantStream
 	request            *assistantRequest
+	conversation       *assistantConversation
 	serial             uint64
 	busyAt             map[string]time.Time
 	coverage           string
@@ -92,9 +114,9 @@ type assistantController struct {
 	proactiveCancel    context.CancelFunc
 	proactiveStartedAt time.Time
 	// Injectable effects keep timing/state tests independent of Discord and paid providers.
-	send  func(string, string) error
-	ask   func(context.Context, string, string) (string, error)
-	speak func(context.Context, string) error
+	send  func(context.Context, string, string) error
+	ask   func(context.Context, string, string, []assistantMessage) (string, error)
+	speak func(context.Context, string, func() error) error
 }
 
 func newAssistantController(s *discordgo.Session, state *voiceConnectionState) *assistantController {
@@ -106,10 +128,12 @@ func newAssistantController(s *discordgo.Session, state *voiceConnectionState) *
 	if voiceErr != nil {
 		voiceEnabled = true
 	}
-	a := &assistantController{state: state, session: s, silence: time.Duration(seconds * float64(time.Second)), voiceEnabled: voiceEnabled, streams: map[string]*assistantStream{}, busyAt: map[string]time.Time{}}
-	a.speak = func(ctx context.Context, text string) error { return state.music.Speak(ctx, text) }
-	a.send = func(channel, text string) error {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	a := &assistantController{state: state, session: s, silence: time.Duration(seconds * float64(time.Second)), inactivity: assistantDuration("ASSISTANT_INACTIVITY_SECONDS", 30, 5, 300), captureLimit: assistantDuration("ASSISTANT_CAPTURE_SECONDS", 60, 5, 300), voiceEnabled: voiceEnabled, streams: map[string]*assistantStream{}, busyAt: map[string]time.Time{}}
+	a.speak = func(ctx context.Context, text string, ready func() error) error {
+		return state.music.speak(ctx, text, ready)
+	}
+	a.send = func(parent context.Context, channel, text string) error {
+		ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 		defer cancel()
 		for _, part := range splitDiscordMessage(text) {
 			_, err := s.ChannelMessageSendComplex(channel, &discordgo.MessageSend{Content: part, AllowedMentions: noMentions()}, discordgo.WithContext(ctx))
@@ -119,7 +143,7 @@ func newAssistantController(s *discordgo.Session, state *voiceConnectionState) *
 		}
 		return nil
 	}
-	a.ask = func(ctx context.Context, userID, question string) (string, error) {
+	a.ask = func(ctx context.Context, userID, question string, history []assistantMessage) (string, error) {
 		var result struct {
 			Answer string `json:"answer"`
 		}
@@ -127,6 +151,7 @@ func newAssistantController(s *discordgo.Session, state *voiceConnectionState) *
 		err := state.transcriptionClient.postJSON(ctx, "/v1/assistant/question", map[string]any{
 			"question": question, "session_id": state.sessionID, "discord_id": userID,
 			"username": user.Username, "display_name": user.DisplayName,
+			"history": history,
 		}, &result)
 		if err == nil && strings.TrimSpace(result.Answer) == "" {
 			err = fmt.Errorf("empty assistant answer")
@@ -134,6 +159,14 @@ func newAssistantController(s *discordgo.Session, state *voiceConnectionState) *
 		return result.Answer, err
 	}
 	return a
+}
+
+func assistantDuration(name string, fallback, low, high float64) time.Duration {
+	seconds, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv(name)), 64)
+	if err != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds < low || seconds > high {
+		seconds = fallback
+	}
+	return time.Duration(seconds * float64(time.Second))
 }
 func assistantWords(text string) []string {
 	// Fold Portuguese/Latin accents, including decomposed combining marks.
@@ -193,6 +226,7 @@ func (a *assistantController) reset() {
 		a.request.cancel()
 	}
 	a.request = nil
+	a.conversation = nil
 	a.serial++
 	for _, stream := range a.streams {
 		stream.window = nil
@@ -200,9 +234,100 @@ func (a *assistantController) reset() {
 		stream.speechFloor = frames
 	}
 }
+
+// Finish only the turn; the author and recent dialogue stay active.
+func (a *assistantController) finishTurn(now time.Time) {
+	if a.request != nil && a.request.cancel != nil {
+		a.request.cancel()
+	}
+	a.request = nil
+	a.serial++
+	if a.conversation != nil {
+		a.conversation.idleSince = now
+		kept := a.conversation.previous[:0]
+		for _, stream := range a.conversation.previous {
+			if !stream.failed {
+				kept = append(kept, stream)
+			}
+		}
+		a.conversation.previous = kept
+	}
+}
+
+func (a *assistantController) recoverTurn(now time.Time, text string) {
+	user := a.conversation.user
+	a.finishTurn(now)
+	for _, stream := range a.conversation.previous {
+		frames, _, _ := stream.audio.progress()
+		stream.speechFloor = frames
+	}
+	a.conversation.previous = nil
+	if stream := a.streams[user]; stream != nil {
+		frames, _, _ := stream.audio.progress()
+		stream.speechFloor = frames
+	}
+	a.notice(user, text)
+}
+
+func (c *assistantConversation) remember(message assistantMessage) {
+	c.history = append(c.history, message)
+	if len(c.history) > 24 {
+		c.history = append([]assistantMessage(nil), c.history[len(c.history)-24:]...)
+	}
+}
+
+func (a *assistantController) capture(stream *assistantStream, started, now time.Time) *assistantRequest {
+	r := &assistantRequest{user: a.conversation.user, stream: stream, previous: append([]*assistantStream(nil), a.conversation.previous...), activation: started, openedAt: now, conversation: a.conversation}
+	// The current stream can also be retained after rotation.
+	for i, previous := range r.previous {
+		if previous == stream {
+			r.previous = append(r.previous[:i], r.previous[i+1:]...)
+			break
+		}
+	}
+	a.request = r
+	return r
+}
+
+func (a *assistantController) authorSpeech(stream *assistantStream, started, ended, now time.Time) {
+	if a.conversation == nil || a.conversation.closing {
+		return
+	}
+	r := a.request
+	if r != nil && r.responding {
+		if !ended.After(r.questionEnded) {
+			return
+		}
+		r.interrupted = true
+		if r.cancel != nil {
+			r.cancel()
+		}
+		for i := range a.conversation.history {
+			if a.conversation.history[i].turn == r && a.conversation.history[i].Role == "assistant" {
+				a.conversation.history[i].Interrupted = true
+			}
+		}
+		a.request = nil
+		a.serial++
+	}
+	if a.request == nil {
+		a.capture(a.streams[a.conversation.user], started, now)
+	}
+	r = a.request
+	if r.ackPending {
+		if r.cancel != nil {
+			r.cancel()
+		}
+		r.ackPending = false
+	}
+	if r.captureStarted.IsZero() || started.Before(r.captureStarted) {
+		r.captureStarted = started
+	}
+	if ended.After(a.conversation.idleSince) {
+		a.conversation.idleSince = ended
+	}
+}
 func (a *assistantController) configure(settings assistantSettings) {
-	a.publishMu.Lock()
-	defer a.publishMu.Unlock()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.configured && settings.Revision <= a.settings.Revision {
@@ -215,8 +340,6 @@ func (a *assistantController) stop() {
 	if a == nil {
 		return
 	}
-	a.publishMu.Lock()
-	defer a.publishMu.Unlock()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.stopped = true
@@ -226,8 +349,6 @@ func (a *assistantController) relocate() {
 	if a == nil {
 		return
 	}
-	a.publishMu.Lock()
-	defer a.publishMu.Unlock()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.reset()
@@ -240,17 +361,181 @@ func (a *assistantController) relocate() {
 func (a *assistantController) begin(user string, audio *realtimeAudioClient) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if old := a.streams[user]; old != nil && a.request != nil && a.request.stream == old {
-		a.reset()
-		a.notice(user, "A captura mudou de stream. Diz a frase novamente.")
+	stream := &assistantStream{audio: audio, seen: map[string]bool{}}
+	if old := a.streams[user]; old != nil && a.conversation != nil && a.conversation.user == user && !old.failed {
+		a.conversation.previous = append(a.conversation.previous, old)
+		// Late finals only need the recent audio boundaries, never the whole call.
+		if len(a.conversation.previous) > 8 {
+			a.conversation.previous = append([]*assistantStream(nil), a.conversation.previous[len(a.conversation.previous)-8:]...)
+		}
 	}
-	a.streams[user] = &assistantStream{audio: audio, seen: map[string]bool{}}
+	if old := a.streams[user]; old != nil && a.request != nil && a.request.stream == old && !old.failed {
+		// WAV/SSRC rotation is an audio boundary, not a new conversation.
+		a.request.previous = append(a.request.previous, old)
+		a.request.stream = stream
+	}
+	a.streams[user] = stream
+}
+
+func (a *assistantController) leave(user string) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.conversation != nil && a.conversation.user == user {
+		a.reset()
+	}
+	delete(a.streams, user)
+	delete(a.busyAt, user)
+}
+
+func (r *assistantRequest) includes(stream *assistantStream) bool {
+	if r == nil {
+		return false
+	}
+	if r.stream == stream {
+		return true
+	}
+	for _, previous := range r.previous {
+		if previous == stream {
+			return true
+		}
+	}
+	return false
+}
+
+// The previous WAV can still deliver its last final while the next one opens.
+func (a *assistantController) audioStream(user string, audio *realtimeAudioClient) *assistantStream {
+	if stream := a.streams[user]; stream != nil && stream.audio == audio {
+		return stream
+	}
+	if a.request != nil && a.request.user == user {
+		for _, previous := range a.request.previous {
+			if previous.audio == audio {
+				return previous
+			}
+		}
+	}
+	if a.conversation != nil && a.conversation.user == user {
+		for _, previous := range a.conversation.previous {
+			if previous.audio == audio {
+				return previous
+			}
+		}
+	}
+	return nil
+}
+
+func (r *assistantRequest) appendWords(stream *assistantStream, words []assistantWord, phrase []string) {
+	for _, word := range words {
+		word.Start += stream.audio.startedAt.Sub(r.activation).Seconds()
+		r.words = append(r.words, word)
+	}
+	sort.SliceStable(r.words, func(i, j int) bool { return r.words[i].Start < r.words[j].Start })
+	r.text = assistantQuestionTokens(r.words, phrase)
 }
 func (a *assistantController) eligible(user string) bool {
 	return a.configured && a.settings.Enabled && !a.stopped && !isUserCapturePaused(user) && a.state.streaming.participantPresent(user) && a.state.streaming.grant(user).Token != ""
 }
+
+// deliver publishes at the playback boundary; synthesis failure still delivers text.
+func (a *assistantController) deliver(ctx context.Context, request *assistantRequest, spoken, content string, voice, acknowledgement bool) error {
+	published := false
+	voiceReady := false
+	var publishErr error
+	publish := func() error {
+		a.publishMu.Lock()
+		defer a.publishMu.Unlock()
+		a.mu.Lock()
+		valid := a.request == request && a.eligible(request.user) && a.canRespond() && (!acknowledgement || !request.responding)
+		channel := a.destination()
+		deliveryCtx := ctx
+		if valid && ctx.Err() == context.DeadlineExceeded {
+			var cancel context.CancelFunc
+			deliveryCtx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+			request.cancel = cancel // Configuration changes still cancel the text fallback.
+			defer cancel()
+		}
+		a.mu.Unlock()
+		if !valid || deliveryCtx.Err() == context.Canceled {
+			return context.Canceled
+		}
+		published = true // A timeout may mean Discord already accepted the message.
+		publishErr = a.send(deliveryCtx, channel, content)
+		if publishErr == nil && !acknowledgement {
+			log.Printf("assistant delivery session=%d user=%s latency_ms=%d voice_ready=%t", a.state.sessionID, request.user, time.Since(request.questionEnded).Milliseconds(), voiceReady)
+		}
+		if publishErr == nil && !acknowledgement && request.answer != "" {
+			a.mu.Lock()
+			if a.conversation != nil && a.conversation == request.conversation {
+				message := assistantMessage{Role: "assistant", Content: request.answer, Interrupted: request.interrupted, turn: request}
+				if text := []rune(message.Content); len(text) > 12000 {
+					message.Content = string(text[:11950]) + "\n[Resposta parcial; restante disponível no chat.]"
+				}
+				// A new turn can begin while Discord acknowledges this publication.
+				for i, previous := range a.conversation.history {
+					if previous.turn == request && previous.Role == "user" {
+						a.conversation.history = append(a.conversation.history[:i+1], append([]assistantMessage{message}, a.conversation.history[i+1:]...)...)
+						if len(a.conversation.history) > 24 {
+							a.conversation.history = append([]assistantMessage(nil), a.conversation.history[len(a.conversation.history)-24:]...)
+						}
+						break
+					}
+				}
+			}
+			a.mu.Unlock()
+		}
+		return publishErr
+	}
+	if voice {
+		err := a.speak(ctx, spoken, func() error { voiceReady = true; return publish() })
+		if err == nil && published {
+			return nil
+		}
+		if ctx.Err() == context.Canceled {
+			return ctx.Err()
+		}
+		if err != nil {
+			log.Printf("assistant voice failed session=%d user=%s: %v", a.state.sessionID, request.user, err)
+		}
+	}
+	if !published {
+		return publish()
+	}
+	return publishErr
+}
+
 func (a *assistantController) notice(user, text string) {
+	if text == "Diz" && a.request != nil {
+		request := a.request
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		request.cancel = cancel
+		voice := a.voiceEnabled && request.text == ""
+		request.ackPending = voice
+		go func() {
+			err := a.deliver(ctx, request, text, "<@"+user+">, "+text, voice, true)
+			cancel()
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			if a.request != request || request.responding {
+				return
+			}
+			request.ackPending = false
+			if err != nil && request.text == "" && request.captureStarted.IsZero() {
+				a.finishTurn(time.Now())
+			} else if now := time.Now(); now.After(request.openedAt) {
+				request.openedAt = now // Start the question deadline after the audible cue.
+				if a.conversation != nil && request.text == "" {
+					a.conversation.idleSince = now
+				}
+			}
+			log.Printf("assistant activation session=%d user=%s latency_ms=%d delivered=%t", a.state.sessionID, user, time.Since(request.activation).Milliseconds(), err == nil)
+		}()
+		return
+	}
 	channel, serial := a.destination(), a.serial
+	conversation := a.conversation
 	if channel == "" {
 		return
 	}
@@ -273,53 +558,40 @@ func (a *assistantController) notice(user, text string) {
 		if user != "" {
 			prefix = "<@" + user + ">, "
 		}
-		err := a.send(channel, prefix+text)
+		err := a.send(context.Background(), channel, prefix+text)
+		a.mu.Lock()
+		if conversation != nil && a.conversation == conversation && a.request == nil && serial == a.serial && user == conversation.user {
+			conversation.idleSince = time.Now()
+		}
+		a.mu.Unlock()
 		if err != nil {
 			log.Printf("assistant notice failed session=%d: %v", a.state.sessionID, err)
 		}
-		var voiceCtx context.Context
-		var voiceCancel context.CancelFunc
-		if text == "Diz" {
-			a.mu.Lock()
-			if a.request != nil && a.request.id == serial {
-				log.Printf("assistant activation session=%d user=%s latency_ms=%d delivered=%t", a.state.sessionID, user, time.Since(a.request.activation).Milliseconds(), err == nil)
-				if err != nil {
-					a.reset()
-				} else if a.voiceEnabled && !a.request.responding {
-					voiceCtx, voiceCancel = context.WithTimeout(context.Background(), 10*time.Second)
-					a.request.cancel = voiceCancel
-				}
-			}
-			a.mu.Unlock()
-		}
 		a.publishMu.Unlock()
-		if voiceCtx != nil {
-			defer voiceCancel()
-			if err := a.speak(voiceCtx, text); err != nil && voiceCtx.Err() == nil {
-				log.Printf("assistant voice acknowledgement failed session=%d user=%s: %v", a.state.sessionID, user, err)
-			}
-		}
 	}()
 }
 func (a *assistantController) fail(user string, audio *realtimeAudioClient) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	stream := a.streams[user]
-	if stream == nil || stream.audio != audio {
+	stream := a.audioStream(user, audio)
+	if stream == nil || stream.failed {
 		return
 	}
 	stream.failed = true
 	stream.window = nil
-	if a.request != nil && a.request.stream == stream {
-		a.reset()
-		a.notice(user, "O Realtime falhou. Tenta novamente quando estiver disponível.")
+	if a.conversation != nil && a.conversation.user == user && (a.request == nil && a.streams[user] == stream || a.request.includes(stream) && !a.request.responding) {
+		a.recoverTurn(time.Now(), "O Realtime falhou. Repete quando estiver disponível.")
 	}
 }
 func (a *assistantController) event(user string, audio *realtimeAudioClient, event realtimeEvent, now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	stream := a.streams[user]
-	if stream == nil || stream.audio != audio || stream.failed {
+	stream := a.audioStream(user, audio)
+	if stream == nil || stream.failed {
+		return
+	}
+	if a.conversation != nil && (a.request == nil || !a.request.responding && !a.request.ackPending && a.request.captureStarted.IsZero()) && now.Sub(a.conversation.idleSince) >= a.inactivity {
+		a.reset()
 		return
 	}
 	if event.Type == "ready" {
@@ -336,9 +608,8 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 	if math.IsNaN(event.Start) || math.IsNaN(event.End) || math.IsInf(event.Start, 0) || math.IsInf(event.End, 0) || event.Start < 0 || event.End < event.Start || event.End > frames+0.1 || len(stream.seen) >= 4096 {
 		log.Printf("assistant invalid final session=%d user=%s recording=%d start=%f end=%f frames=%f", a.state.sessionID, user, event.RecordingID, event.Start, event.End, frames)
 		stream.failed = true
-		if a.request != nil && a.request.stream == stream {
-			a.reset()
-			a.notice(user, "Recebi tempos Realtime inválidos. Tenta novamente.")
+		if a.request.includes(stream) {
+			a.recoverTurn(now, "Recebi tempos Realtime inválidos. Repete a pergunta.")
 		}
 		return
 	}
@@ -352,6 +623,10 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 			}
 			stream.speechThrough = event.End
 			stream.lastSpeechAt = audio.startedAt.Add(time.Duration(event.End * float64(time.Second)))
+			// The API emits speech only for a nonempty provider partial; no text is forwarded.
+			if a.conversation != nil && a.conversation.user == user && a.eligible(user) {
+				a.authorSpeech(stream, audio.startedAt.Add(time.Duration(event.Start*float64(time.Second))), stream.lastSpeechAt, now)
+			}
 		}
 		return
 	}
@@ -381,9 +656,8 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 	for _, word := range words {
 		if math.IsNaN(word.Start) || math.IsNaN(word.End) || math.IsInf(word.Start, 0) || math.IsInf(word.End, 0) || word.Start < 0 || word.End < word.Start || word.End > frames+0.1 {
 			stream.failed = true
-			if a.request != nil && a.request.stream == stream {
-				a.reset()
-				a.notice(user, "Recebi tempos Realtime inválidos. Tenta novamente.")
+			if a.request.includes(stream) {
+				a.recoverTurn(now, "Recebi tempos Realtime inválidos. Repete a pergunta.")
 			}
 			return
 		}
@@ -407,24 +681,22 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 	if len(phrase) < 2 {
 		return
 	}
-	if a.request != nil && a.request.user == user {
-		if a.request.stream != stream {
-			return
-		}
-		if a.request.responding {
-			return
-		}
+	if a.conversation != nil && a.conversation.user == user {
 		if len(tokens) == 1 && tokens[0].Text == "cancela" {
 			a.reset()
 			a.notice(user, "Cancelado.")
 			return
 		}
-		// A repeated wake phrase is acknowledgement, never another request.
-		text := assistantQuestionTokens(tokens, phrase)
-		a.request.text = strings.TrimSpace(a.request.text + " " + text)
-		if len(a.request.text) > 2000 {
-			a.reset()
-			a.notice(user, "Faz uma pergunta mais curta.")
+		started := audio.startedAt.Add(time.Duration(tokens[0].Start * float64(time.Second)))
+		ended := audio.startedAt.Add(time.Duration(tokens[len(tokens)-1].End * float64(time.Second)))
+		a.authorSpeech(stream, started, ended, now)
+		if !a.request.includes(stream) || a.request.responding {
+			return
+		}
+		// A repeated wake phrase is acknowledgement, never another conversation.
+		a.request.appendWords(stream, tokens, phrase)
+		if utf8.RuneCountInString(a.request.text) > 2000 {
+			a.recoverTurn(now, "Faz uma pergunta mais curta.")
 		}
 		return
 	}
@@ -455,10 +727,10 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 		if !contiguousSpeech {
 			continue
 		}
-		if a.request != nil {
+		if a.conversation != nil {
 			if now.Sub(a.busyAt[user]) >= 5*time.Second {
 				a.busyAt[user] = now
-				a.notice(user, "Estou ocupado. Diz a frase novamente depois da resposta.")
+				a.notice(user, "Estou a conversar com outra pessoa. Tenta depois de terminarmos.")
 			}
 			stream.window = nil
 			return
@@ -472,11 +744,15 @@ func (a *assistantController) event(user string, audio *realtimeAudioClient, eve
 		}
 		question := append([]assistantWord(nil), combined[prefixStart:i]...)
 		question = append(question, combined[end:]...)
-		a.request = &assistantRequest{id: a.serial, user: user, stream: stream, activation: audio.startedAt.Add(time.Duration(boundary * float64(time.Second))), openedAt: now, boundary: boundary, text: assistantQuestionTokens(question, phrase)}
+		a.conversation = &assistantConversation{user: user, idleSince: now}
+		a.capture(stream, audio.startedAt.Add(time.Duration(boundary*float64(time.Second))), now)
+		a.request.appendWords(stream, question, phrase)
+		if len(question) > 0 {
+			a.request.captureStarted = audio.startedAt.Add(time.Duration(question[0].Start * float64(time.Second)))
+		}
 		stream.window = nil
-		if len(a.request.text) > 2000 {
-			a.reset()
-			a.notice(user, "Faz uma pergunta mais curta.")
+		if utf8.RuneCountInString(a.request.text) > 2000 {
+			a.recoverTurn(now, "Faz uma pergunta mais curta.")
 			return
 		}
 		a.notice(user, "Diz")
@@ -582,62 +858,108 @@ func assistantQuestionTokens(tokens []assistantWord, phrase []string) string {
 	}
 	return strings.Join(words, " ")
 }
+func assistantGoodbye(text string) bool {
+	switch strings.Join(assistantWords(text), " ") {
+	case "adeus macaco", "obrigado adeus macaco", "obrigada adeus macaco", "muito obrigado adeus macaco", "muito obrigada adeus macaco":
+		return true
+	}
+	return false
+}
+
 func (a *assistantController) tick(now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	conversation := a.conversation
+	if conversation == nil {
+		return
+	}
+	if !a.configured || !a.settings.Enabled || a.stopped || isUserCapturePaused(conversation.user) || !a.state.streaming.participantPresent(conversation.user) || !a.canRespond() {
+		a.reset()
+		return
+	}
 	request := a.request
 	if request == nil {
+		if now.Sub(conversation.idleSince) >= a.inactivity {
+			a.reset()
+		}
 		return
 	}
-	if !a.eligible(request.user) || request.stream.failed || !a.canRespond() {
-		a.reset()
-		a.notice(request.user, "Pedido cancelado: autor ou Realtime indisponível.")
+	if !a.eligible(request.user) {
+		a.recoverTurn(now, "O Realtime está indisponível. Repete quando recuperar.")
 		return
 	}
-	if request.responding {
+	if request.responding || request.ackPending && request.text == "" {
 		return
 	}
-	_, speech, lastSpeech := request.stream.audio.progress()
-	speech = max(speech, request.stream.speechThrough)
-	hasSpeech := speech > request.boundary+0.02 || request.text != ""
-	if !hasSpeech && now.Sub(request.openedAt) >= 10*time.Second {
-		a.reset()
-		a.notice(request.user, "Não ouvi uma pergunta. Diz a frase para tentar novamente.")
+	// A wake tail, noise and empty flush markers cannot start a turn or renew inactivity.
+	if request.text == "" && request.captureStarted.IsZero() {
+		if now.Sub(conversation.idleSince) >= a.inactivity {
+			a.reset()
+		}
 		return
 	}
-	if now.Sub(request.openedAt) >= 30*time.Second {
-		a.reset()
-		a.notice(request.user, "Faz uma pergunta mais curta.")
-		return
-	}
-	quietSince := lastSpeech
-	recognizedEnd := request.stream.audio.startedAt.Add(time.Duration(request.stream.wordThrough * float64(time.Second)))
-	// These are audio times, not transcript arrival times. Late results do not
-	// restart the author's silence interval; recognized words cover quiet speech.
-	for _, activity := range []time.Time{request.stream.lastSpeechAt, recognizedEnd} {
-		if activity.After(quietSince) {
-			quietSince = activity
+	quietSince := time.Time{}
+	pendingFinal := false
+	hasSpeech := request.text != "" || !request.captureStarted.IsZero()
+	for _, stream := range append([]*assistantStream{request.stream}, request.previous...) {
+		if stream.failed {
+			a.recoverTurn(now, "O Realtime falhou. Repete quando estiver disponível.")
+			return
+		}
+		_, speech, lastSpeech := stream.audio.progress()
+		speech = max(speech, stream.speechThrough)
+		if speech > stream.speechFloor && (stream != request.stream || stream.audio.startedAt.Add(time.Duration(speech*float64(time.Second))).After(request.activation.Add(20*time.Millisecond))) {
+			hasSpeech = true
+			pendingFinal = pendingFinal || stream.through+0.02 < speech
+			if request.captureStarted.IsZero() {
+				request.captureStarted = lastSpeech
+			}
+		}
+		recognizedEnd := time.Time{}
+		if stream.wordThrough > stream.speechFloor {
+			recognizedEnd = stream.audio.startedAt.Add(time.Duration(stream.wordThrough * float64(time.Second)))
+		}
+		for _, activity := range []time.Time{lastSpeech, stream.lastSpeechAt, recognizedEnd} {
+			if activity.After(quietSince) {
+				quietSince = activity
+			}
 		}
 	}
-	if !hasSpeech || now.Sub(quietSince) < a.silence {
+	if !hasSpeech {
+		if now.Sub(conversation.idleSince) >= a.inactivity {
+			a.reset() // No farewell or warning for inactivity.
+		}
 		return
 	}
-	if request.stream.through+0.02 < speech {
+	quiet := now.Sub(quietSince) >= a.silence
+	if !request.captureStarted.IsZero() && (quietSince.Sub(request.captureStarted) > a.captureLimit || !quiet && now.Sub(request.captureStarted) > a.captureLimit) {
+		a.recoverTurn(now, "Faz uma pergunta mais curta.")
+		return
+	}
+	if !quiet {
+		return
+	}
+	if pendingFinal {
 		if now.Sub(quietSince) >= a.silence+5*time.Second {
-			a.reset()
-			a.notice(request.user, "Os finais Realtime não chegaram a tempo. Repete a pergunta.")
+			a.recoverTurn(now, "Os finais Realtime não chegaram a tempo. Repete a pergunta.")
 		}
 		return
 	}
 	if strings.TrimSpace(request.text) == "" {
-		a.reset()
-		a.notice(request.user, "Não consegui reconhecer a pergunta. Tenta novamente.")
+		a.recoverTurn(now, "Não consegui reconhecer a pergunta. Repete, por favor.")
 		return
 	}
 	request.responding = true
-	request.questionEnded = lastSpeech
-	if recognizedEnd.After(request.questionEnded) {
-		request.questionEnded = recognizedEnd
+	request.questionEnded = quietSince
+	for _, stream := range append([]*assistantStream{request.stream}, request.previous...) {
+		stream.speechFloor = max(stream.speechFloor, stream.wordThrough)
+	}
+	log.Printf("assistant turn closed session=%d user=%s silence_ms=%d capture_ms=%d", a.state.sessionID, request.user, now.Sub(quietSince).Milliseconds(), quietSince.Sub(request.captureStarted).Milliseconds())
+	history := append([]assistantMessage{}, conversation.history...)
+	goodbye := assistantGoodbye(request.text)
+	conversation.closing = goodbye
+	if !goodbye {
+		conversation.remember(assistantMessage{Role: "user", Content: request.text, turn: request})
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if request.cancel != nil {
@@ -645,51 +967,42 @@ func (a *assistantController) tick(now time.Time) {
 	}
 	request.cancel = cancel
 	go func() {
-		answer, err := a.ask(ctx, request.user, request.text)
+		answer, err := "Até à próxima!", error(nil)
+		if !goodbye {
+			answer, err = a.ask(ctx, request.user, request.text, history)
+		}
 		cancel()
-		a.publishMu.Lock()
 		a.mu.Lock()
-		if a.request != request || !a.eligible(request.user) || !a.canRespond() {
-			if a.request == request {
-				a.reset()
-			}
+		if a.request != request || a.conversation != conversation || !a.eligible(request.user) || !a.canRespond() {
 			a.mu.Unlock()
-			a.publishMu.Unlock()
 			return
 		}
-		channel := a.destination()
+		voiceCtx, voiceCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		request.cancel = voiceCancel
+		if err == nil {
+			request.answer = answer
+		}
+		voice := err == nil && a.voiceEnabled
 		a.mu.Unlock()
 		content := "<@" + request.user + "> · **Pergunta:** " + request.text + "\n\n" + answer
 		if err != nil {
-			content = "<@" + request.user + ">, não consegui responder a tempo. Tenta novamente."
+			content = "<@" + request.user + "> · **Pergunta:** " + request.text + "\n\nNão consegui responder. Repete, por favor."
 		}
-		sendErr := a.send(channel, content)
+		sendErr := a.deliver(voiceCtx, request, answer, content, voice, false)
+		voiceCancel()
 		if sendErr != nil {
 			log.Printf("assistant reply failed session=%d: %v", a.state.sessionID, sendErr)
 		}
 		log.Printf("assistant response session=%d user=%s latency_ms=%d answered=%t delivered=%t", a.state.sessionID, request.user, time.Since(request.questionEnded).Milliseconds(), err == nil, sendErr == nil)
-		a.mu.Lock()
-		var voiceCtx context.Context
-		var voiceCancel context.CancelFunc
-		if a.request == request && err == nil && a.voiceEnabled {
-			voiceCtx, voiceCancel = context.WithTimeout(context.Background(), 2*time.Minute)
-			request.cancel = voiceCancel
-		}
-		a.mu.Unlock()
-		a.publishMu.Unlock()
-		if voiceCtx != nil {
-			voiceErr := a.speak(voiceCtx, answer)
-			cancelled := errors.Is(voiceCtx.Err(), context.Canceled)
-			voiceCancel()
-			if voiceErr != nil && !cancelled {
-				log.Printf("assistant voice response failed session=%d user=%s: %v", a.state.sessionID, request.user, voiceErr)
-			}
-		}
 		// No retry: a Discord timeout can mean that the answer was already published.
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		if a.request == request {
-			a.reset()
+			if goodbye {
+				a.reset()
+			} else {
+				a.finishTurn(time.Now())
+			}
 		}
 	}()
 }

@@ -147,7 +147,6 @@ func (c *streamingController) leave(id string) {
 		return
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	delete(c.present, id)
 	delete(c.grants, id)
 	for i, existing := range c.order {
@@ -156,6 +155,8 @@ func (c *streamingController) leave(id string) {
 			break
 		}
 	}
+	c.mu.Unlock()
+	c.state.assistant.leave(id)
 }
 func (c *streamingController) reset(ids []string, channelIDs ...string) {
 	sort.Slice(ids, func(i, j int) bool { return discordIDLess(ids[i], ids[j]) })

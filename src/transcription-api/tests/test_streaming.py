@@ -172,6 +172,8 @@ class ProviderSimulator:
                         {
                             "message": "AddPartialTranscript",
                             "metadata": {**result, "transcript": "partial"},
+                            "results": [{"type": "word", "start_time": 0, "end_time": 0.005,
+                                         "alternatives": [{"content": "partial"}]}],
                         }
                     )
                 )
@@ -286,7 +288,7 @@ def test_websocket_pcm_final_flush_and_cleanup(
                 "recording_id": activity["recording_id"],
                 "generation": activity["generation"],
                 "start": 0,
-                "end": 0.01,
+                "end": 0.005,
             }
             final = ws.receive_json()
             assert final["type"] == "final"
@@ -302,6 +304,8 @@ def test_websocket_pcm_final_flush_and_cleanup(
             "language": "pt",
             "model": "enhanced",
             "enable_partials": True,
+            "max_delay": 2,
+            "max_delay_mode": "flexible",
         }
         assert len(provider.received) == 2
         assert "Olá, mundo." not in caplog.text

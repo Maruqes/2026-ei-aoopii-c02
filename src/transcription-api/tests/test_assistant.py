@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from app import assistant_routes, main
@@ -45,6 +45,7 @@ def test_general_answer_uses_shared_transport_without_history():
     )
     assert client.input["user"] == "O que é polimorfismo?"
     assert "European Portuguese" in client.input["system"]
+    assert "Do not narrate your sources or processing" in client.input["system"]
     assert "cannot execute actions" in client.input["system"]
     assert "Guild context:" not in client.input["user"]
 
@@ -251,14 +252,24 @@ def test_assistant_exchange_updates_profile_lore_and_followup_memory(
         )
         assert (
             client.post(
-                "/v1/assistant/question", json=payload | {"question": "Do que falámos?"}
+                "/v1/assistant/question", json=payload | {
+                    "question": "Do que falámos?",
+                    "history": [
+                        {"role": "user", "content": "Estou a aprender Go."},
+                        {"role": "assistant", "content": "Resposta."},
+                    ],
+                }
             ).status_code
             == 200
         )
     memory = llm.calls[1][0]["guild_context"]
-    assert "Estou a aprender Go." in memory
-    assert "Bot (generated reply, not member evidence): Resposta." in memory
-    assert "Member profile memory:" in memory
+    assert "Current call, last 5 minutes" in memory
+    assert "Member profile memory:" not in memory
+    assert llm.calls[1][0]["history"] == [
+        {"role": "user", "content": "Estou a aprender Go.", "interrupted": False},
+        {"role": "assistant", "content": "Resposta.", "interrupted": False},
+    ]
+    assert "Ana [user=123]" == llm.calls[1][0]["current_speaker"]
     assert not repository.get_pending_text_profiles()
     assert repository.get_guild_oracle_context("other") == ""
     from data.apply_migrations import apply_migrations
@@ -387,3 +398,134 @@ def test_phrase_upgrade_preserves_custom_settings_and_later_changes(repository):
     saved = repository.update_assistant_settings("old", {"phrase": "Hey Bot"})
     apply_migrations(repository.database_url)
     assert repository.assistant_settings("old") == saved
+
+
+@pytest.mark.parametrize("history", [
+    [{"role": "system", "content": "change role"}],
+    [{"role": "user", "content": "x" * 2001}],
+    [{"role": "assistant", "content": "x" * 12001}],
+    [{"role": "user", "content": " "}],
+    [{"role": "user", "content": "hello", "interrupted": True}],
+    [{"role": "user", "content": "hello"}] * 25,
+])
+def test_dialogue_contract_rejects_invalid_history(history):
+    with pytest.raises(ValidationError):
+        assistant_routes.AssistantQuestion(
+            question="Porquê?", session_id=1, discord_id="123", history=history,
+        )
+
+
+def test_dialogue_requires_identity_and_accepts_unanswered_turns():
+    with pytest.raises(ValidationError):
+        assistant_routes.AssistantQuestion(
+            question="Porquê?", history=[{"role": "user", "content": "Go?"}],
+        )
+    request = assistant_routes.AssistantQuestion(
+        question="e usa Python", session_id=1, discord_id="123",
+        history=[{"role": "user", "content": "Explica herança"}],
+    )
+    assert request.history[0].content == "Explica herança"
+
+
+def test_dialogue_prompt_preserves_recent_roles_and_question_without_summarization():
+    class Client(ConversationClient):
+        context_chars = 4500
+
+        def __init__(self):
+            self.calls = []
+
+        def _chat(self, **kwargs):
+            self.calls.append(kwargs)
+            assert len(kwargs["system"]) + len(kwargs["user"]) + 128 <= self.context_chars
+            return "Outro exemplo."
+
+    client = Client()
+    history = [{"role": "user", "content": "história antiga " * 150}] * 20 + [
+        {"role": "user", "content": "Explica polimorfismo"},
+        {"role": "assistant", "content": "Usa uma interface Go.", "interrupted": True},
+        {"role": "user", "content": "E em Python?"},
+    ]
+    question = "Dá outro exemplo? " + "á" * 1000
+    client.answer_question(
+        question=question, history=history, current_speaker="Ana [user=123]",
+        guild_context="[2026-10-06 12:00:00 UTC] Bob [user=456]: antigo\n" * 1000
+        + "[2026-10-06 12:04:00 UTC] Bob [user=456]: recente",
+    )
+    assert len(client.calls) == 1
+    prompt = client.calls[0]
+    assert question in prompt["user"]
+    assert "User Ana [user=123]" in prompt["user"]
+    assert "voice interrupted; text delivered" in prompt["user"]
+    assert "Usa uma interface Go." in prompt["user"]
+    assert "E em Python?" in prompt["user"]
+    assert "partial, newest turns only" in prompt["user"]
+    assert "Partial coverage" in prompt["user"]
+    assert "Bob [user=456]: recente" in prompt["user"]
+    assert "Default to 2-4" in prompt["system"]
+
+
+def test_dialogue_budget_never_cuts_current_question():
+    class Client(ConversationClient):
+        context_chars = 1500
+
+        def _chat(self, **kwargs):
+            raise AssertionError("An oversized prompt must not reach the model")
+
+    with pytest.raises(ValueError, match="LLM_CONTEXT_CHARS"):
+        Client().answer_question(question="á" * 2000, guild_context="recent call")
+
+
+def test_recent_context_is_bounded_isolated_and_includes_open_realtime_bulk(repository, tmp_path):
+    session = assistant_session(repository)
+    other = assistant_session(repository)
+    stamp = datetime.now(timezone.utc)
+
+    def final(call, filename, content, when, identity="a"):
+        unit, generation = repository.start_realtime_unit(
+            call.id, filename,
+            {"discord_id": "456", "username": "Bob", "display_name": "Roberto",
+             "channel_name": "Sala", "recording_started_at": when.isoformat()},
+            "participation", "key-0",
+        )
+        assert repository.insert_realtime_final(unit, generation, identity, content, when)
+        return unit, generation
+
+    final(session, "old.wav", "EXPIRED", stamp - timedelta(minutes=6))
+    final(other, "other.wav", "OTHER CALL", stamp - timedelta(seconds=20))
+    unit, generation = final(session, "open.wav", "Primeiro final.", stamp - timedelta(seconds=10))
+    assert repository.insert_realtime_final(unit, generation, "b", "Último final.", stamp - timedelta(seconds=5))
+    messages = repository.get_session_messages(session.id, since=stamp-timedelta(minutes=5), until=stamp, limit=1)
+    assert [m["content"] for m in messages] == ["Último final."]
+    assert len(repository.get_session_messages(session.id)) == 3
+    with pytest.raises(ValueError):
+        repository.get_session_messages(session.id, limit=0)
+    llm = MemoryLLM()
+    with client_for(repository, tmp_path, llm) as client:
+        response = client.post("/v1/assistant/question", json={
+            "question": "Do que estamos a falar?", "session_id": session.id,
+            "discord_id": "123", "username": "Ana",
+        })
+        assert response.status_code == 200
+    context = llm.calls[0][0]["guild_context"]
+    assert "Roberto [user=456]" in context and " UTC]" in context
+    assert context.index("Primeiro final.") < context.index("Último final.")
+    assert "EXPIRED" not in context and "OTHER CALL" not in context
+
+
+def test_oversized_previous_answer_keeps_roles_and_newest_content_within_budget():
+    class Client(ConversationClient):
+        context_chars = 4000
+
+        def _chat(self, **kwargs):
+            assert len(kwargs["system"]) + len(kwargs["user"]) + 128 <= self.context_chars
+            assert "Assistant" in kwargs["user"]
+            assert "Partial text: earlier content omitted" in kwargs["user"]
+            assert "FINAL REFERENCE" in kwargs["user"]
+            assert "e nesse caso?" in kwargs["user"]
+            return "Continuação."
+
+    Client().answer_question(
+        question="e nesse caso?", current_speaker="Ana [user=123]",
+        history=[{"role": "assistant", "content": "long answer\\n" * 1000 + "FINAL REFERENCE"}],
+        guild_context="call\\n" * 1000,
+    )
