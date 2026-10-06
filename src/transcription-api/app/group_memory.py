@@ -54,7 +54,7 @@ def run_group_memory_tick(*, repository, llm_factory, docs, settings, now=None):
                     recent_reactions = [
                         b
                         for b in memory.recent_bulks(repository, guild, 100)
-                        if b["reaction_text"]
+                        if b["reaction_text"] or b["gif_query"]
                     ]
                     allowed = (
                         settings.group_memory_reactions_enabled
@@ -83,6 +83,8 @@ def run_group_memory_tick(*, repository, llm_factory, docs, settings, now=None):
                     # Enforce cooldown even for an LLM provider returning a reaction despite the flag.
                     if not allowed:
                         generated.update(reaction_text="", gif_query="", speak=False)
+                    elif not generated["reaction_text"]:
+                        generated["speak"] = False
                     destination = assistant["channel_id"] or next(
                         (
                             m["destination"]

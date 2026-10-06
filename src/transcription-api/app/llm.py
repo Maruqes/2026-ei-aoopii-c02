@@ -98,13 +98,17 @@ class ConversationClient:
             "Use the last 1-3 bulks to make an occasional short, specific joke, callback or useful observation. "
             "React only if something in the NEW bulk earns it; otherwise reaction_text/gif_query are empty and speak false. "
             "Do not repeat previous reactions, force jokes, interrupt serious/sensitive conversations, or invent events. "
-            "No commands, actions or claims that you did something. Keep reaction_text under 600 characters. "
-            "Set speak true only for a short joke worth saying aloud. gif_query is an optional GIF search in English: "
+            "No commands, actions or claims that you did something. Keep reaction_text under 600 characters; "
+            "prefer one natural sentence and avoid explaining the joke. Choose text, text with a GIF, or a GIF alone "
+            "(empty reaction_text) when the image carries the whole punchline. "
+            "Set speak true only for a short text joke worth saying aloud, never for a GIF-only reaction. "
+            "gif_query is an optional GIF search in English using 2-6 searchable keywords, not a full sentence: "
             "describe a concrete action, scene or visual analogy tied to what just happened in the conversation. "
+            "For a visibly comic mishap, absurd escalation or celebration, prefer a fitting GIF when it adds to the joke. "
             "Be creative with imagery and search terms; avoid generic reaction memes and previously used queries or jokes. "
             "The GIF must add a fitting visual punchline, not decorate every reply. Leave gif_query empty when "
             "there is no natural visual joke, especially for serious topics or useful observations. "
-            "Never make recognition mistakes the punchline. No people's names or private facts, max 80 characters. "
+            "Never make recognition mistakes the punchline. No people's names or private facts, max 50 characters. "
             "summary and lore each at most 2400 characters. Reaction permitted: " + str(reaction_allowed)
         )
         evidence = self._distill(
@@ -119,10 +123,16 @@ class ConversationClient:
             if not isinstance(data.get(key), str) or len(data[key]) > limit:
                 raise ValueError(f"Invalid bulk field: {key}")
             data[key] = data[key].strip()
+        # GIPHY accepts at most 50 characters; keep memory generation even if the
+        # provider returns an otherwise valid, overly descriptive search phrase.
+        if len(data["gif_query"]) > 50:
+            data["gif_query"] = data["gif_query"][:51].rsplit(" ", 1)[0][:50].strip()
         if not data["summary"] or not isinstance(data.get("speak"), bool):
             raise ValueError("Bulk analysis requires a summary and boolean speak")
-        if not reaction_allowed or not data["reaction_text"]:
+        if not reaction_allowed:
             data.update(reaction_text="", gif_query="", speak=False)
+        elif not data["reaction_text"]:
+            data["speak"] = False
         return data
 
     def answer_question(

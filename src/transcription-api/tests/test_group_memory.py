@@ -306,12 +306,53 @@ def test_bulk_prompt_memes_and_provider_output_validation():
         previous_bulks="",
         reaction_allowed=True,
     )
-    assert result["reaction_text"] == result["gif_query"] == "" and not result["speak"]
+    assert result["reaction_text"] == "" and result["gif_query"] == "juggling tasks"
+    assert not result["speak"]
+    client.output = client.output | {"gif_query": "cat frantically juggling too many spinning plates at once on stage"}
+    result = client.analyze_group_bulk(
+        observations="Ana: Assumimos demasiadas tarefas.",
+        previous_bulks="",
+        reaction_allowed=True,
+    )
+    assert result["summary"] == "Go"
+    assert result["gif_query"] == "cat frantically juggling too many spinning plates"
+    assert not result["speak"]
     client.output = client.output | {"speak": "yes"}
     with pytest.raises(ValueError):
         client.analyze_group_bulk(
             observations="Go", previous_bulks="", reaction_allowed=True
         )
+
+
+def test_gif_only_reaction_is_pending_claimable_and_respects_cooldown(repository, tmp_path):
+    class GIFOnlyLLM(MemoryLLM):
+        def analyze_group_bulk(self, **kwargs):
+            return super().analyze_group_bulk(**kwargs) | {"reaction_text": ""}
+
+    now = clock()
+    llm = GIFOnlyLLM()
+    add_message(repository, now - timedelta(minutes=1))
+    tick(repository, tmp_path, llm, now)
+    reactions = memory.pending_reactions(repository, now, 5)
+    assert len(reactions) == 1
+    reaction = reactions[0]
+    assert reaction["text"] == "" and reaction["gif_query"] == "this is fine dog"
+    assert not reaction["speak"]
+    assert memory.claim_reaction(repository, reaction["id"], now, 5)
+    assert not memory.claim_reaction(repository, reaction["id"], now, 5)
+    memory.finish_reaction(repository, reaction["id"], "sent")
+    assert memory.pending_reactions(repository, now, 5) == []
+
+    add_message(repository, now + timedelta(minutes=1), content="O plano ainda arde.")
+    tick(repository, tmp_path, llm, now + timedelta(minutes=5))
+    assert not llm.bulk_calls[-1]["reaction_allowed"]
+    assert "GIF search: this is fine dog" in llm.bulk_calls[-1]["previous_bulks"]
+    assert memory.pending_reactions(repository, now + timedelta(minutes=5), 5) == []
+
+    add_message(repository, now + timedelta(minutes=11), content="Já resolvemos o problema.")
+    tick(repository, tmp_path, llm, now + timedelta(minutes=15))
+    assert llm.bulk_calls[-1]["reaction_allowed"]
+    assert len(memory.pending_reactions(repository, now + timedelta(minutes=15), 5)) == 1
 
 
 def test_memory_config_bounds(monkeypatch):

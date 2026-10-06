@@ -3,6 +3,10 @@
 - 31415 Gonçalo Marques
 - 31394 Ricardo Fernandes
 
+## Mapa do projeto
+
+Consultar o [contexto do projeto](docs/CONTEXTO.md) e o [índice de funcionalidades](docs/features/README.md) para encontrar cada feature pelo nome, ID e ficheiros onde está implementada.
+
 ## Run
 
 Copy `.env.example` to `.env`, configure Discord and the chosen transcription/LLM provider,
@@ -123,14 +127,21 @@ os perfis dos participantes. `GROUP_MEMORY_CONTEXT_BULKS=3` dá às reações os
 3 blocos (aceita 1–3); o histórico guardado continua pesquisável em `/oracle`.
 O bot pode comentar ou fazer uma piada por texto e, numa pausa da chamada, por voz.
 Espera pelo assistente, pela música e pela fala; uma nova fala cancela a voz espontânea.
-Sem cobertura Realtime completa, publica apenas texto. Não obriga a fazer uma piada
+Sem cobertura Realtime completa, publica no chat, sem voz. Não obriga a fazer uma piada
 por bloco e respeita `GROUP_MEMORY_REACTION_COOLDOWN_MINUTES=10`.
 
 GIFs usam ações, cenas e analogias visuais ligadas à conversa, apenas quando a piada
-surge naturalmente. A pesquisa GIPHY com `GIPHY_API_KEY` varia entre resultados e evita
-os últimos 20 GIFs escolhidos por servidor enquanto o bot está ligado; sem resultados
-novos, publica apenas texto. A integração não acede aos favoritos ou ao seletor privado
-de GIFs do Discord; sem chave, continua com texto/voz. `ASSISTANT_VOICE_ENABLED=false`
+surge naturalmente. Pode publicar texto com GIF ou apenas GIF, sem voz nesse último caso.
+A pesquisa GIPHY com `GIPHY_API_KEY` usa termos curtos em inglês, escolhe entre os
+melhores resultados novos e evita os últimos 20 IDs por servidor enquanto o bot está
+ligado. Se a primeira página estiver esgotada, tenta uma segunda dentro do mesmo
+limite de 5 segundos. Publica o ficheiro `.gif` animado, com preferência por uma versão
+compacta, em vez da página GIPHY; o canal precisa da permissão **Embed Links** para
+mostrar a animação. Falhas da pesquisa preservam o texto; uma reação só com GIF que
+falhe fica marcada como `failed`, sem enviar mensagens vazias. Os logs distinguem
+ausência de pesquisa/chave, erros GIPHY e resultados esgotados. A integração não acede
+aos favoritos ou ao seletor privado de GIFs do Discord; sem chave, continua com
+texto/voz. `ASSISTANT_VOICE_ENABLED=false`
 desliga voz. `GROUP_MEMORY_REACTIONS_ENABLED=false` desliga as intervenções mantendo
 memória e perfis; `/assistant disable` silencia as reações desse servidor.
 

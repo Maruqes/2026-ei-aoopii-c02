@@ -9,6 +9,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY discord_bot/go.mod discord_bot/go.sum ./
+COPY discord_bot/third_party/discordgo ./third_party/discordgo
 RUN go mod download
 
 COPY discord_bot ./

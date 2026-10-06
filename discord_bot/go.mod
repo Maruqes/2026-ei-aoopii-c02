@@ -16,4 +16,6 @@ require (
 	golang.org/x/sys v0.29.0 // indirect
 )
 
-replace github.com/bwmarrin/discordgo => github.com/yeongaori/discordgo v0.0.0-20260321152711-3d3293e4c765
+// Pinned yeongaori fork with the receive-buffer ownership fix;
+// see third_party/discordgo/PATCHES.md.
+replace github.com/bwmarrin/discordgo => ./third_party/discordgo

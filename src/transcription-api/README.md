@@ -494,11 +494,16 @@ repetidas ou sem novidade são suprimidas. O mínimo entre intervenções gerada
 `GET /v1/guilds/{guild}/memory` inspeciona os blocos. `GET /v1/memory/reactions`
 devolve as reações recentes pendentes; o bot verifica destino/permissões e disponibilidade,
 depois faz `POST /v1/memory/reactions/{id}/claim` e publica texto, opcionalmente com
-meme GIPHY (`GIPHY_API_KEY` no bot). Faz `POST .../{id}/result` com `sent`/`failed`.
+meme GIPHY (`GIPHY_API_KEY` no bot); também permite reações só com GIF, sem voz,
+com o mesmo cooldown. O bot envia a URL do ficheiro animado, evita os últimos 20 IDs
+por servidor e tenta uma segunda página se necessário, num máximo total de 5 segundos.
+Falhas GIPHY ficam nos logs e preservam o texto; se uma reação só com GIF falhar,
+não envia mensagem vazia. O destino precisa de **Embed Links** para mostrar o GIF.
+Faz `POST .../{id}/result` com `sent`/`failed`.
 A claim é atómica; não repete envios de resultado ambíguo nem claims após um crash.
 Uma reação expira um bloco depois do seu fim. Voz reutiliza o TTS existente, espera
 silêncio Realtime e música parada e é cancelada por nova fala. Sem monitorização
-completa, texto continua disponível. Não existe acesso à loja/favoritos privados de GIFs.
+completa, reações no chat continuam disponíveis. Não existe acesso à loja/favoritos privados de GIFs.
 `GROUP_MEMORY_REACTIONS_ENABLED=false` mantém a memória sem publicar reações.
 
 ### Contrato Hey Bot (pedidos explícitos)

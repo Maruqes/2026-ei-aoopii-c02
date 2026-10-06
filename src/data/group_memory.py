@@ -141,7 +141,7 @@ def save_bulk(
                     generated["speak"],
                     generated["gif_query"],
                     "pending"
-                    if generated["reaction_text"] and channel_id
+                    if (generated["reaction_text"] or generated["gif_query"]) and channel_id
                     else "silent",
                 ),
             )
