@@ -9,6 +9,64 @@ from app.docs_client import LocalMarkdownProfileClient
 from data.repository import MessageInsert
 
 
+@pytest.mark.parametrize("operation", ["batch", "realtime", "retry"])
+def test_session_admission_allows_realtime_foreign_key_lock(repository, monkeypatch, operation):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    import psycopg2
+    from psycopg2.extensions import cursor
+
+    from data import repository as repository_module
+
+    r = repository
+    call = session(r)
+    metadata = {"discord_id": "123", "username": "Alice", "channel_name": "general"}
+    unit, _ = r.start_realtime_unit(call.id, "streaming.wav", metadata, "token", "key")
+    locked = threading.Event()
+    proceed = threading.Event()
+
+    class AdmissionCursor(cursor):
+        def execute(self, sql, params=None):
+            result = super().execute(sql, params)
+            if "FROM voice_sessions WHERE id = %s FOR" in sql:
+                locked.set()
+                assert proceed.wait(5), "test did not release admission"
+            return result
+
+    monkeypatch.setattr(
+        repository_module, "connect",
+        lambda url: psycopg2.connect(url, cursor_factory=AdmissionCursor),
+    )
+
+    def admit():
+        if operation == "batch":
+            return r.start_recording(session_id=call.id, recording_filename="streaming.wav", discord_id="123", metadata=metadata)
+        if operation == "realtime":
+            return r.start_realtime_unit(call.id, "next.wav", metadata, "token", "key")
+        return r.retry_session(call.id)
+
+    # Reproduce the lock order from the VM: the old Realtime transaction owns
+    # its recording while admission owns the session. Its FK check must still
+    # obtain KEY SHARE, otherwise admission and Realtime can wait on each other.
+    held = psycopg2.connect(r.database_url)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with held.cursor() as cur:
+                cur.execute("SELECT id FROM voice_recordings WHERE id = %s FOR UPDATE", (unit,))
+                future = executor.submit(admit)
+                try:
+                    assert locked.wait(3), "admission never acquired its session lock"
+                    cur.execute("SELECT id FROM voice_sessions WHERE id = %s FOR KEY SHARE NOWAIT", (call.id,))
+                    assert cur.fetchone() == (call.id,)
+                finally:
+                    held.rollback()
+                    proceed.set()
+                future.result(timeout=5)
+    finally:
+        held.close()
+
+
 def session(r, guild="one"):
     return r.create_voice_session(
         guild_id=guild,

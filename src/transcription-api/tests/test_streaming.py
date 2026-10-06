@@ -212,6 +212,39 @@ def client_for(r, directory, url):
     return TestClient(app), settings
 
 
+def test_bot_disconnect_preserves_provider_health_and_reservation(repository, tmp_path, caplog):
+    import time
+
+    call = session(repository)
+    metadata = meta(call)
+    with ProviderSimulator() as provider:
+        client, _ = client_for(repository, tmp_path, provider.url)
+        assert client.post("/v1/guilds/g/streaming", json={"mode": "on"}).status_code == 200
+        grants = client.post(
+            f"/v1/sessions/{call.id}/streaming", json={"users": ["123"]}
+        ).json()["assignments"]
+        metadata["token"] = token = grants["123"]["token"]
+        with client.websocket_connect("/v1/streaming/audio") as ws:
+            ws.send_json(metadata)
+            assert ws.receive_json()["type"] == "ready"
+            ws.close()  # Same transport close as the bot's late-RTP abort.
+            deadline = time.monotonic() + 3
+            pool = client.app.state.realtime_pool
+            while time.monotonic() < deadline:
+                if not pool.reservations[token].active:
+                    break
+                time.sleep(0.01)
+            assert not pool.reservations[token].active
+        assert repository.get_session_recording_counts(call.id) == {"fallback_pending": 1}
+        assert pool.registry.state(pool.reservations[token].key, "streaming") == "healthy"
+        next_grant = client.post(
+            f"/v1/sessions/{call.id}/streaming", json={"users": ["123"]}
+        ).json()["assignments"]["123"]
+        assert next_grant["token"] == token
+        assert next_grant["key_name"] == grants["123"]["key_name"]
+        assert "reason=client_disconnected" in caplog.text
+
+
 def test_websocket_pcm_final_flush_and_cleanup(
     repository, tmp_path, caplog, monkeypatch
 ):

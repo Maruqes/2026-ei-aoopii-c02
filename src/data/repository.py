@@ -1047,7 +1047,9 @@ class DataRepository:
                 cur = conn.cursor()
                 if session_id is not None:
                     cur.execute(
-                        "SELECT status, credits_exhausted FROM voice_sessions WHERE id = %s FOR UPDATE",
+                        # Serialize admission against session changes without
+                        # blocking FK KEY SHARE locks held by Realtime updates.
+                        "SELECT status, credits_exhausted FROM voice_sessions WHERE id = %s FOR NO KEY UPDATE",
                         (session_id,),
                     )
                     session = cur.fetchone()
@@ -1117,7 +1119,7 @@ class DataRepository:
         with closing(connect(self.database_url)) as conn:
             cur = conn.cursor()
             cur.execute(
-                "SELECT id FROM voice_sessions WHERE id = %s FOR UPDATE", (session_id,)
+                "SELECT id FROM voice_sessions WHERE id = %s FOR NO KEY UPDATE", (session_id,)
             )
             cur.execute(
                 "UPDATE voice_profile_jobs pj SET status = 'pending', error = NULL, revision = revision + 1 "
@@ -1741,7 +1743,7 @@ class DataRepository:
         with closing(connect(self.database_url)) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT status, credits_exhausted FROM voice_sessions WHERE id = %s FOR UPDATE",
+                    "SELECT status, credits_exhausted FROM voice_sessions WHERE id = %s FOR NO KEY UPDATE",
                     (session_id,),
                 )
                 if cur.fetchone() != ("open", False):

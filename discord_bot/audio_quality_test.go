@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -11,6 +13,116 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"gopkg.in/hraban/opus.v2"
 )
+
+func TestRealtimeRecoveredLossConsumesAlreadySentSilence(t *testing.T) {
+	for _, tc := range []struct{ silence, recovered, padding int }{
+		{0, 960, 480}, {0, 960, 960}, {960, 960, 480},
+		{960, 960, 1200}, {960, 960, 1920},
+	} {
+		t.Run(fmt.Sprintf("silence=%d/recovered=%d/padding=%d", tc.silence, tc.recovered, tc.padding), func(t *testing.T) {
+			writer, err := NewWAVWriter(filepath.Join(t.TempDir(), "loss.wav"), sampleRate, channels, bitsPerSample)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer writer.Close()
+			rt := &realtimeAudioClient{queue: make(chan []byte, 10), done: make(chan struct{}), abort: make(chan struct{})}
+			r := &userAudioRecording{wav: writer, realtime: rt}
+			pcm := make([]int16, 960*channels)
+			for i := range pcm {
+				pcm[i] = 1000
+			}
+			if err := r.writeRTPPacket(10, 1, 0, 0, nil, pcm, 960); err != nil {
+				t.Fatal(err)
+			}
+			if err := writer.WriteSilence(tc.padding); err != nil {
+				t.Fatal(err)
+			}
+			rt.silence(tc.padding)
+			r.idlePadding = tc.padding
+			recovered := make([]int16, tc.recovered*channels)
+			for i := range recovered {
+				recovered[i] = 500
+			}
+			if err := r.writeRTPPacket(10, 3, uint32(960+tc.silence+tc.recovered), tc.silence, recovered, pcm, 960); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-rt.abort:
+				t.Fatal("concealed loss incorrectly aborted Realtime")
+			default:
+			}
+			wantFrames := 1920 + tc.silence + tc.recovered
+			var sent []byte
+			for len(rt.queue) > 0 {
+				sent = append(sent, <-rt.queue...)
+			}
+			if writer.FramesWritten() != int64(wantFrames) || len(sent)/2 != wantFrames || r.idlePadding != 0 {
+				t.Fatalf("clocks diverged: WAV=%d live=%d want=%d", writer.FramesWritten(), len(sent)/2, wantFrames)
+			}
+			data, err := os.ReadFile(writer.f.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for frame := 0; frame < wantFrames; frame++ {
+				want := int16(1000)
+				if frame >= 960 && frame < 960+tc.silence {
+					want = 0
+				} else if frame >= 960+tc.silence && frame < wantFrames-960 {
+					want = 500
+				}
+				for channel := 0; channel < channels; channel++ {
+					at := 44 + (frame*channels+channel)*2
+					if got := int16(binary.LittleEndian.Uint16(data[at:])); got != want {
+						t.Fatalf("WAV lost recovery at frame %d: got=%d want=%d", frame, got, want)
+					}
+				}
+				liveWant := want
+				if frame >= 960 && frame < 960+tc.padding {
+					liveWant = 0 // Already sent speculative silence cannot be retracted.
+				}
+				if got := int16(binary.LittleEndian.Uint16(sent[frame*2:])); got != liveWant {
+					t.Fatalf("live audio repeated/skipped at frame %d: got=%d want=%d", frame, got, liveWant)
+				}
+			}
+		})
+	}
+}
+
+func TestRealtimeSilenceWaitsForBufferedAudioAndJitter(t *testing.T) {
+	writer, err := NewWAVWriter(filepath.Join(t.TempDir(), "pending.wav"), sampleRate, channels, bitsPerSample)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	rt := &realtimeAudioClient{queue: make(chan []byte, 10), done: make(chan struct{}), abort: make(chan struct{})}
+	now := time.Now()
+	r := &userAudioRecording{wav: writer, realtime: rt, lastPacketAt: now}
+	if err := r.writeRTPPacket(10, 1, 0, 0, nil, make([]int16, 960*channels), 960); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.padRealtimeSilence(now.Add(200*time.Millisecond), nil); err != nil {
+		t.Fatal(err)
+	}
+	if writer.FramesWritten() != 960 {
+		t.Fatal("ordinary network jitter was padded as silence")
+	}
+	b := discordAudioBuffer{}
+	b.add(&discordgo.Packet{SSRC: 10, Sequence: 2}, now, "speaker")
+	if err := r.padRealtimeSilence(now.Add(time.Second), b); err != nil {
+		t.Fatal(err)
+	}
+	if writer.FramesWritten() != 960 {
+		t.Fatal("buffered speech was padded as silence")
+	}
+	delete(b, 10)
+	b.add(&discordgo.Packet{SSRC: 11}, now, "other")
+	if err := r.padRealtimeSilence(now.Add(time.Second), b); err != nil {
+		t.Fatal(err)
+	}
+	if writer.FramesWritten() != 36000 {
+		t.Fatal("another speaker prevented actual DTX silence")
+	}
+}
 
 func TestDiscordAudioBufferWindowWrapDuplicatesAndBound(t *testing.T) {
 	now := time.Now()
@@ -108,7 +220,7 @@ func TestRealtimeLateSpeechPreservedForBatchWithoutStretching(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 40 ms beyond the first packet have already been sent as silence.
-	if err := r.padRealtimeSilence(r.lastPacketAt.Add(120 * time.Millisecond)); err != nil {
+	if err := r.padRealtimeSilence(r.lastPacketAt.Add(realtimeSilenceGrace+60*time.Millisecond), nil); err != nil {
 		t.Fatal(err)
 	}
 	for seq := uint16(2); seq <= 4; seq++ {
@@ -133,7 +245,7 @@ func TestRealtimeLateSpeechPreservedForBatchWithoutStretching(t *testing.T) {
 			t.Fatal("late speech was replaced with silence")
 		}
 	}
-	if err := r.padRealtimeSilence(r.lastPacketAt.Add(time.Second)); err != nil || writer.FramesWritten() != 4*defaultOpusFrameSamples {
+	if err := r.padRealtimeSilence(r.lastPacketAt.Add(time.Second), nil); err != nil || writer.FramesWritten() != 4*defaultOpusFrameSamples {
 		t.Fatal("failed Realtime continued to pad Batch audio")
 	}
 }

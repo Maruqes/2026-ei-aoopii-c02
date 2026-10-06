@@ -26,6 +26,7 @@ const (
 	bitsPerSample           = 16
 	maxFrameMs              = 120
 	audioReorderWindow      = 60 * time.Millisecond
+	realtimeSilenceGrace    = 250 * time.Millisecond
 	defaultOpusFrameMs      = 20
 	maxConcealedOpusPackets = 6
 	defaultOpusFrameSamples = sampleRate * defaultOpusFrameMs / 1000
@@ -597,7 +598,7 @@ func ListenAndWriteOpusToWAV(
 			}
 		case tick := <-idleTicker.C:
 			for id, recording := range userRecordings {
-				if err := recording.padRealtimeSilence(tick); err != nil {
+				if err := recording.padRealtimeSilence(tick, buffer); err != nil {
 					return err
 				}
 				if !recording.lastPacketAt.IsZero() && tick.Sub(recording.lastPacketAt) >= recordingIdleTimeout() || recording.streamToken != streaming.grant(id).Token || (recording.realtime != nil && recording.realtime.failed.Load()) || streaming.suspended() {
@@ -662,8 +663,8 @@ func ListenAndWriteOpusToWAV(
 }
 
 // Feed DTX silence while keeping the safety WAV and upstream clock identical.
-func (recording *userAudioRecording) padRealtimeSilence(now time.Time) error {
-	if recording.realtime == nil || recording.lastPacketAt.IsZero() {
+func (recording *userAudioRecording) padRealtimeSilence(now time.Time, pending discordAudioBuffer) error {
+	if recording.realtime == nil || recording.lastPacketAt.IsZero() || len(pending[recording.ssrc]) > 0 {
 		return nil
 	}
 	select {
@@ -673,7 +674,9 @@ func (recording *userAudioRecording) padRealtimeSilence(now time.Time) error {
 		return nil
 	default:
 	}
-	expected := int((now.Sub(recording.lastPacketAt) - audioReorderWindow).Seconds() * sampleRate)
+	// Silence is speculative until the next RTP timestamp arrives. Leave room
+	// for network jitter as well as reordering before advancing the live clock.
+	expected := int((now.Sub(recording.lastPacketAt) - realtimeSilenceGrace).Seconds() * sampleRate)
 	padding := max(0, expected-recording.idlePadding-recording.lastPacketFrames)
 	if padding == 0 {
 		return nil
@@ -772,12 +775,13 @@ func (recording *userAudioRecording) writeRTPPacket(
 		return fmt.Errorf("WAV PCM incompleto: frames=%d channels=%d samples=%d", frames, recording.wav.channels, len(pcm))
 	}
 
-	// Padding may cover late speech. Preserve the full decoded audio in the WAV
-	// and fall back to Batch, since upstream silence cannot be retracted.
+	realtimeSilenceFrames := silenceFrames
+	realtimeRecoveredPCM := recoveredPCM
+	// Padding can cover a lost packet reconstructed by FEC/PLC. Replace that
+	// speculative silence in the WAV, but send only the unsent part of the gap
+	// upstream. Only overlap with the received speech requires Batch fallback.
 	if recording.idlePadding > silenceFrames {
-		if recording.realtime != nil {
-			recording.realtime.abortOnce.Do(func() { close(recording.realtime.abort) })
-		}
+		padding := recording.idlePadding
 		dataSize := recording.wav.dataSize - uint32(recording.idlePadding*int(recording.wav.channels)*2)
 		if err := recording.wav.f.Truncate(44 + int64(dataSize)); err != nil {
 			return err
@@ -787,9 +791,19 @@ func (recording *userAudioRecording) writeRTPPacket(
 		}
 		recording.wav.dataSize = dataSize
 		recording.idlePadding = 0
-		log.Printf("Late RTP overlaps Realtime silence; full WAV retained for Batch user=%s", recording.user.DiscordID)
+		recoveredFrames := len(recoveredPCM) / int(recording.wav.channels)
+		if padding > silenceFrames+recoveredFrames {
+			if recording.realtime != nil {
+				recording.realtime.abortOnce.Do(func() { close(recording.realtime.abort) })
+			}
+			log.Printf("Late RTP overlaps Realtime silence; full WAV retained for Batch user=%s ssrc=%d sequence=%d padding_frames=%d gap_frames=%d recovered_frames=%d", recording.user.DiscordID, ssrc, sequence, padding, silenceFrames+recoveredFrames, recoveredFrames)
+		} else {
+			realtimeSilenceFrames = 0
+			realtimeRecoveredPCM = recoveredPCM[(padding-silenceFrames)*int(recording.wav.channels):]
+		}
 	} else {
 		silenceFrames -= recording.idlePadding
+		realtimeSilenceFrames = silenceFrames
 		recording.idlePadding = 0
 	}
 
@@ -804,8 +818,8 @@ func (recording *userAudioRecording) writeRTPPacket(
 	}
 
 	if recording.realtime != nil {
-		recording.realtime.silence(silenceFrames)
-		recording.realtime.enqueue(recoveredPCM)
+		recording.realtime.silence(realtimeSilenceFrames)
+		recording.realtime.enqueue(realtimeRecoveredPCM)
 		recording.realtime.enqueue(pcm[:samples])
 	}
 	recording.lastPacketFrames = frames

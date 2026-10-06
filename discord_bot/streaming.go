@@ -426,12 +426,18 @@ func (r *realtimeAudioClient) wait(ctx context.Context) {
 func (r *realtimeAudioClient) run(client *TranscriptionClient, request TranscriptionRequest, grant streamGrant) {
 	successful := false
 	defer func() {
+		locallyAborted := false
+		select {
+		case <-r.abort:
+			locallyAborted = true
+		default:
+		}
 		if !successful {
 			r.failed.Store(true)
 			if r.assistant != nil {
 				r.assistant.fail(r.user, r)
 			}
-			if r.controller != nil {
+			if r.controller != nil && !locallyAborted {
 				r.controller.mu.Lock()
 				if r.controller.grants[r.user].Token == grant.Token {
 					delete(r.controller.grants, r.user)
@@ -440,7 +446,7 @@ func (r *realtimeAudioClient) run(client *TranscriptionClient, request Transcrip
 			}
 		}
 		close(r.done)
-		if !successful && r.controller != nil {
+		if !successful && r.controller != nil && !locallyAborted {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			_, _ = r.controller.sync(ctx)

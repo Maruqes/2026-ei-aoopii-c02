@@ -265,6 +265,7 @@ async def bridge(
     sent_frames = 0
     completed = False
     unit_finished = False
+    client_disconnected = False
     failure_reason = "recoverable"
     session_id = None
     attempt_id = None
@@ -512,9 +513,13 @@ async def bridge(
         await asyncio.to_thread(RecordingCleanup(repository=repository, settings=settings).cleanup_completed_file, filename)
         await websocket.send_json({"type": "completed"})
     except Exception as exc:
-        kind = (deepgram_error(exc) if reservation and reservation.key.provider == "deepgram"
+        client_disconnected = isinstance(exc, WebSocketDisconnect)
+        kind = ("client_disconnected" if client_disconnected else
+                deepgram_error(exc) if reservation and reservation.key.provider == "deepgram"
                 and not isinstance(exc, ProviderError) else error_kind(exc))
-        if reservation is not None:
+        # A bot abort (late RTP, queue overflow or transport loss) says nothing
+        # about upstream health. Keep its reservation usable for the next WAV.
+        if reservation is not None and not client_disconnected:
             pool.registry.mark(reservation.key, "streaming", kind)
             reservation.retiring = True
         if session_id is not None:
@@ -560,7 +565,7 @@ async def bridge(
                     await upstream.close()
             finally:
                 if reservation is not None:
-                    if not completed:
+                    if not completed and not client_disconnected:
                         reservation.retiring = True
                     pool.release_epoch(reservation)
                 try:

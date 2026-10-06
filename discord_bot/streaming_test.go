@@ -101,6 +101,44 @@ func TestRealtimeQueueOverflowDoesNotBlockCapture(t *testing.T) {
 	}
 }
 
+func TestRealtimeLocalAbortKeepsGrantForNextWAV(t *testing.T) {
+	ready := make(chan struct{})
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		ws, err := upgrader.Upgrade(w, req, nil)
+		if err != nil {
+			return
+		}
+		defer ws.Close()
+		var meta map[string]any
+		if ws.ReadJSON(&meta) != nil {
+			return
+		}
+		_ = ws.WriteJSON(realtimeEvent{Type: "ready"})
+		close(ready)
+		_, _, _ = ws.ReadMessage()
+	}))
+	defer server.Close()
+	client := testAPIClient(server)
+	state := &voiceConnectionState{sessionID: 1, transcriptionClient: client}
+	c := newStreamingController(state)
+	grant := streamGrant{Token: "reservation"}
+	c.grants["123"] = grant
+	rt := newRealtimeAudioClient(client, TranscriptionRequest{SessionID: 1, DiscordID: "123", AudioPath: "unit.wav", RecordingStartedAt: time.Now(), Streaming: c}, grant)
+	select {
+	case <-ready:
+	case <-time.After(time.Second):
+		t.Fatal("Realtime did not become ready")
+	}
+	rt.abortOnce.Do(func() { close(rt.abort) })
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	rt.wait(ctx)
+	if !rt.failed.Load() || c.grant("123").Token != grant.Token {
+		t.Fatal("local capture abort revoked a healthy streaming reservation")
+	}
+}
+
 func TestInterruptedSafetyWAVRepair(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "unit.wav")
 	w, err := NewWAVWriter(path, sampleRate, channels, bitsPerSample)
@@ -353,23 +391,23 @@ func TestRealtimeDTXSilenceUsesSameWAVClockAndKeepsSpeechBoundary(t *testing.T) 
 	if err = recording.writeRTPPacket(10, 1, 0, 0, nil, pcm, defaultOpusFrameSamples); err != nil {
 		t.Fatal(err)
 	}
-	if err = recording.padRealtimeSilence(recording.lastPacketAt.Add(time.Second)); err != nil {
+	if err = recording.padRealtimeSilence(recording.lastPacketAt.Add(time.Second), nil); err != nil {
 		t.Fatal(err)
 	}
 	frames, speech, _ := rt.progress()
-	if frames != 0.94 || speech != 0.02 || writer.FramesWritten() != sampleRate-2880 {
+	if frames != 0.75 || speech != 0.02 || writer.FramesWritten() != sampleRate-12000 {
 		t.Fatalf("audio clocks: frames=%f speech=%f WAV=%d", frames, speech, writer.FramesWritten())
 	}
-	if err = recording.padRealtimeSilence(recording.lastPacketAt.Add(time.Second)); err != nil {
+	if err = recording.padRealtimeSilence(recording.lastPacketAt.Add(time.Second), nil); err != nil {
 		t.Fatal(err)
 	}
-	if writer.FramesWritten() != sampleRate-2880 {
+	if writer.FramesWritten() != sampleRate-12000 {
 		t.Fatal("duplicated silence")
 	}
-	if err = recording.padRealtimeSilence(recording.lastPacketAt.Add(2 * time.Second)); err != nil {
+	if err = recording.padRealtimeSilence(recording.lastPacketAt.Add(2*time.Second), nil); err != nil {
 		t.Fatal(err)
 	}
-	if writer.FramesWritten() != 2*sampleRate-2880 {
+	if writer.FramesWritten() != 2*sampleRate-12000 {
 		t.Fatal("missing continuous DTX")
 	}
 }
