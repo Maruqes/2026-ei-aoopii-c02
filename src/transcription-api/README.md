@@ -297,6 +297,11 @@ TEXT_PROFILE_SYNC_ENABLED=true
 TEXT_PROFILE_SYNC_INTERVAL_HOURS=12
 ```
 
+`LLM_MAX_OUTPUT_TOKENS` bounds conversational replies. Structured JSON calls (group
+bulk analysis and member profiles) use at least 4096 tokens, and OpenCode Go receives
+`reasoning_effort=none` for them: reasoning tokens otherwise consumed the whole budget
+and returned `finish_reason=length` with no content.
+
 Hosted providers retry one transient failure through the SDK. Ollama has an explicit
 request deadline. Truncated completions and malformed/empty profiles are rejected;
 existing profiles remain available. Character budgets approximate model token budgets;
@@ -456,7 +461,9 @@ polling and removes WAVs/sidecars before confirming. Remote delete is attempted 
 
 The safety outbox is written before opening Realtime. When the bot restarts, WAVs with an
 incomplete header are repaired before replay. When the API restarts, Realtime units
-stay in fallback; the worker recovers files stable for at least 15 seconds.
+stay in fallback; the worker recovers files stable for at least 15 seconds. A unit whose
+WAV never appears within 60 seconds, or whose stale WAV cannot be repaired, is marked
+failed with an explicit error instead of being retried on every sweep.
 Completed or discarded units are not transcribed again by a restart or `/retry`.
 
 All keys confirmed to be without credits cause a terminal discard in Postgres **before**
