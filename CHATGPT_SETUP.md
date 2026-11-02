@@ -1,74 +1,74 @@
-# ChatGPT: login, modelos e reasoning effort
+# ChatGPT: login, models and reasoning effort
 
-Esta opção usa a conta ChatGPT para gerar resumos, atualizar perfis e responder
-aos comandos de AI. A transcrição continua a usar `TRANSCRIPTION_PROVIDER`.
-Há uma conta ativa por instância do bot.
+This option uses the ChatGPT account to generate summaries, update profiles and answer
+AI commands. Transcription keeps using `TRANSCRIPTION_PROVIDER`.
+There is one active account per bot instance.
 
-## Configuração
+## Configuration
 
-Precisas de Docker Compose, Python 3 no computador onde executas `make`, uma
-conta ChatGPT elegível para autorizar o uso do plano e acesso HTTPS a
-`auth.openai.com` e `api.openai.com`. A elegibilidade, os modelos e os limites
-dependem da conta e das políticas da OpenAI; esta opção não usa `OPENAI_API_KEY`.
+You need Docker Compose, Python 3 on the machine where you run `make`, a
+ChatGPT account eligible to authorise plan usage and HTTPS access to
+`auth.openai.com` and `api.openai.com`. Eligibility, models and limits
+depend on the account and OpenAI policies; this option does not use `OPENAI_API_KEY`.
 
-Mantém as variáveis de Discord, Postgres e transcrição e acrescenta ao `.env`:
+Keep the Discord, Postgres and transcription variables and add to `.env`:
 
 ```dotenv
 LLM_PROVIDER=chatgpt
-CHATGPT_ADMIN_PASSWORD=coloca_aqui_um_segredo_longo_e_unico
+CHATGPT_ADMIN_PASSWORD=put_a_long_unique_secret_here
 CHATGPT_MODEL=
 CHATGPT_REASONING_EFFORT=medium
 CHATGPT_REDIRECT_URI=http://127.0.0.1:1455/auth/callback
 ```
 
-Podes gerar o segredo com `openssl rand -hex 32`. `CHATGPT_ADMIN_PASSWORD`
-autoriza os pedidos de mudança de modelo e effort do bot à API; não é a password
-da conta ChatGPT e não é pedida no navegador.
+You can generate the secret with `openssl rand -hex 32`. `CHATGPT_ADMIN_PASSWORD`
+authorises the bot's model and effort change requests to the API; it is not the
+ChatGPT account password and is not requested in the browser.
 
-Deixa `CHATGPT_MODEL` vazio para escolher um modelo no Discord através de
-`/models`. `CHATGPT_REASONING_EFFORT` define o nível inicial. Uma escolha guardada
-por `/models` ou `/effort` tem prioridade sobre o `.env` e sobrevive a reinícios.
-Depois de editar o `.env`, recria os serviços:
+Leave `CHATGPT_MODEL` empty to choose a model in Discord through
+`/models`. `CHATGPT_REASONING_EFFORT` sets the initial level. A choice saved
+by `/models` or `/effort` takes priority over `.env` and survives restarts.
+After editing `.env`, recreate the services:
 
 ```bash
 docker compose up -d --build
 ```
 
-## Login no próprio computador
+## Login on your own computer
 
-Na raiz do projeto:
+At the project root:
 
 ```bash
 make codex
 ```
 
-O comando constrói um pequeno container de login, abre o endereço oficial da
-OpenAI no navegador do computador e aguarda a autorização. Faz login e autoriza
-o uso do plano ChatGPT. Depois da confirmação, podes fechar o separador.
-O comando não instala nem executa o Codex CLI: usa o fluxo oficial Sign in with
-ChatGPT diretamente para este projeto.
+The command builds a small login container, opens the official
+OpenAI address in your computer's browser and waits for authorisation. Log in and authorise
+ChatGPT plan usage. After confirmation, you can close the tab.
+The command does not install or run the Codex CLI: it uses the official Sign in with
+ChatGPT flow directly for this project.
 
-O login funciona mesmo com a API parada. O callback escuta apenas em
-`127.0.0.1:1455`; não há página de administração na porta 8000. O container de
-login usa a rede do host em Linux, e termina quando o login acaba ou é cancelado.
-O `make codex` usa a porta 1455 por omissão, mesmo que o `.env` ainda tenha um
-`CHATGPT_REDIRECT_URI` antigo. Escolhe outra porta com `CODEX_ARGS="--port 1456"`.
+Login works even with the API stopped. The callback listens only on
+`127.0.0.1:1455`; there is no administration page on port 8000. The login
+container uses the host network on Linux and exits when login finishes or is cancelled.
+`make codex` uses port 1455 by default, even if `.env` still has an old
+`CHATGPT_REDIRECT_URI`. Choose another port with `CODEX_ARGS="--port 1456"`.
 
-As credenciais ficam em `/app/.tmp/state/chatgpt/auth.json`, no volume
-`api_state`, partilhado com a API. A sessão renova-se automaticamente. O ficheiro
-tem permissões restritas e não deve ser partilhado. `docker compose down -v`
-apaga este volume, incluindo a sessão e as escolhas guardadas.
+Credentials are stored in `/app/.tmp/state/chatgpt/auth.json`, in the `api_state`
+volume shared with the API. The session renews automatically. The file
+has restricted permissions and must not be shared. `docker compose down -v`
+deletes this volume, including the session and saved choices.
 
-## Login na tua VM
+## Login on your VM
 
-No teu computador, abre um terminal e mantém este túnel ativo:
+On your computer, open a terminal and keep this tunnel active:
 
 ```bash
 ssh -N -o ExitOnForwardFailure=yes \
   -L 127.0.0.1:1455:127.0.0.1:1455 commov@vm.commov
 ```
 
-Noutro terminal, entra na VM e executa o login na pasta do projeto:
+In another terminal, enter the VM and run the login in the project folder:
 
 ```bash
 ssh commov@vm.commov
@@ -76,42 +76,41 @@ cd ~/2026-ei-aoopii-c02
 make codex
 ```
 
-Numa VM sem ambiente gráfico, o comando imprime o link. Copia-o para o navegador
-do teu computador e faz login. O navegador regressa a `127.0.0.1:1455`, e o túnel
-encaminha o callback para o processo de login na VM. Mantém o `make codex` ativo
-até aparecer a confirmação; depois podes fechar o túnel.
+On a VM without a graphical environment, the command prints the link. Copy it into the
+browser on your computer and log in. The browser returns to `127.0.0.1:1455`, and the tunnel
+forwards the callback to the login process on the VM. Keep `make codex` active
+until confirmation appears; afterwards you can close the tunnel.
 
-São dois processos simultâneos: o túnel no teu computador e o `make codex` na
-VM. Não feches o login para abrir o túnel. Se o `make codex` correr no teu
-computador, as credenciais ficam no Docker desse computador; o túnel para a VM
-não leva o callback a esse processo.
+There are two simultaneous processes: the tunnel on your computer and `make codex` on the
+VM. Do not close the login to open the tunnel. If `make codex` runs on your
+computer, the credentials stay in that computer's Docker; the tunnel to the VM
+does not carry the callback to that process.
 
-Se a porta estiver ocupada, usa a mesma porta dos dois lados, por exemplo:
+If the port is busy, use the same port on both sides, for example:
 
 ```bash
-# No teu computador:
+# On your computer:
 ssh -N -o ExitOnForwardFailure=yes \
   -L 127.0.0.1:1456:127.0.0.1:1456 commov@vm.commov
 
-# Na VM:
+# On the VM:
 make codex CODEX_ARGS="--port 1456"
 ```
 
-Para uma sessão já registada, pode mudar a porta; mantém o caminho
-`/auth/callback`. Atualiza o antigo `CHATGPT_REDIRECT_URI` no `.env` se ainda
-apontar para a porta 8000.
+For an already registered session, the port can change; keep the
+`/auth/callback` path. Update the old `CHATGPT_REDIRECT_URI` in `.env` if it still
+points to port 8000.
 
-## Modelo e effort no Discord
+## Model and effort in Discord
 
-Depois do login, usa `/models` para consultar o catálogo da conta, escolher um
-modelo e testar um pedido curto antes de o guardar. A mudança de modelo requer
-**Gerir Servidor**. O modelo selecionado passa a ser usado por todas as funções
-de AI.
+After logging in, use `/models` to query the account catalog, choose a
+model and test a short request before saving it. Changing the model requires
+**Manage Server**. The selected model is then used by all AI functions.
 
-Se um identificador não aparecer no catálogo, usa `/models model:<id>` (por
-exemplo, `/models model:gpt-6-astra`). O bot testa o acesso com a conta e a effort
-atuais e só ativa o modelo se o pedido terminar com sucesso. Um nome mostrado no
-ChatGPT/Codex pode não ser um identificador de modelo válido neste endpoint.
+If an identifier does not appear in the catalog, use `/models model:<id>` (for
+example, `/models model:gpt-6-astra`). The bot tests access with the current account and
+effort and only activates the model if the request succeeds. A name shown in
+ChatGPT/Codex may not be a valid model identifier on this endpoint.
 
 ```text
 /effort
@@ -121,94 +120,94 @@ ChatGPT/Codex pode não ser um identificador de modelo válido neste endpoint.
 /effort level:default
 ```
 
-`/effort` mostra o modelo e o nível atuais. Com `level`, testa o nível proposto
-no modelo ativo e só guarda a alteração se o pedido funcionar. O comando requer
-**Gerir Servidor** e a alteração aplica-se aos próximos pedidos sem reiniciar.
-Se ainda não escolheste um modelo, o teste usa o primeiro modelo do catálogo,
-sem o selecionar. Assim podes corrigir a effort inicial antes de usar `/models`.
+`/effort` shows the current model and level. With `level`, it tests the proposed level
+on the active model and only saves the change if the request works. The command requires
+**Manage Server** and the change applies to the next requests without a restart.
+If you have not chosen a model yet, the test uses the first model in the catalog,
+without selecting it. This lets you fix the initial effort before using `/models`.
 
-Os valores configuráveis são `default`, `none`, `minimal`, `low`, `medium`,
-`high`, `xhigh` e `max`; cada modelo aceita apenas alguns deles. `default`
-deixa o modelo escolher o seu nível. Se o modelo rejeitar o nível, o bot mantém
-a escolha anterior. O `/models` também testa o modelo novo com a effort atual.
+The configurable values are `default`, `none`, `minimal`, `low`, `medium`,
+`high`, `xhigh` and `max`; each model accepts only some of them. `default`
+lets the model choose its level. If the model rejects the level, the bot keeps
+the previous choice. `/models` also tests the new model with the current effort.
 
-No `.env`, a configuração equivalente é:
+In `.env`, the equivalent configuration is:
 
 ```dotenv
 CHATGPT_REASONING_EFFORT=low
 ```
 
-Menor effort pode reduzir o tempo de resposta e o consumo de raciocínio.
-Experimenta `low` para respostas mais rápidas, caso o modelo o aceite.
-Para trocar para um modelo que não aceita a effort atual, usa primeiro
-`/effort level:default`, depois `/models`, e escolhe o nível adequado.
+Lower effort can reduce response time and reasoning usage.
+Try `low` for faster answers if the model accepts it.
+To switch to a model that does not accept the current effort, first use
+`/effort level:default`, then `/models`, and choose the appropriate level.
 
-## Consultar, trocar de conta e terminar sessão
+## Checking status, switching accounts and logging out
 
 ```bash
 make codex CODEX_ARGS="--status"
 make codex CODEX_ARGS="--new-account"
-make codex CODEX_ARGS="--account CLIENT_ID_GUARDADO"
+make codex CODEX_ARGS="--account SAVED_CLIENT_ID"
 make codex CODEX_ARGS="--logout"
 ```
 
-`--status` mostra as contas guardadas e os seus IDs, sem tokens. `--new-account`
-abre um novo login; `--account` ativa um registo existente. Ao mudar de conta,
-a escolha guardada de modelo é removida: volta a escolher através de `/models`.
-O nível de effort é mantido.
+`--status` shows saved accounts and their IDs, without tokens. `--new-account`
+opens a new login; `--account` activates an existing registration. When switching accounts,
+the saved model choice is removed: choose again through `/models`.
+The effort level is kept.
 
-`--logout` tenta revogar a sessão ativa na OpenAI e remove os seus tokens locais.
-Se a revogação remota não for confirmada, o comando informa-te. Podes gerir o
-acesso e consultar os limites em [Utilização ChatGPT](https://chatgpt.com/settings/usage).
+`--logout` tries to revoke the active session on OpenAI and removes its local tokens.
+If remote revocation is not confirmed, the command tells you. You can manage
+access and check limits at [ChatGPT usage](https://chatgpt.com/settings/usage).
 
-## Resolver problemas
+## Troubleshooting
 
-| Sintoma | Ação |
+| Symptom | Action |
 | --- | --- |
-| `channel open failed` no túnel | Executa `make codex` na VM antes de abrir o link; confirma que a porta do túnel coincide com a do callback. |
-| Callback responde na VM mas falha pelo SSH no Fedora 44 | Confirma a versão de `selinux-policy`; a 44.7 tem uma regressão de encaminhamento SSH corrigida na 44.9. Atualiza os pacotes de política como indicado abaixo. |
-| Porta 1455 ocupada | Usa `--port 1456` e o túnel correspondente. |
-| Login expira ou callback inválido | Executa `make codex` novamente e usa o link novo. |
-| `/effort` ainda não aparece | Reconstrói e reinicia o bot para registar o novo comando Discord. |
-| Modelo rejeita a effort | Usa um nível aceite ou `default`; a escolha anterior mantém-se. |
-| `No route to host` / falha de DNS | Corrige a conectividade de saída da VM e dos containers. O login pela rede do host não corrige a rede da API. |
-| Limite ChatGPT atingido | Consulta a utilização da conta e aguarda a reposição dos limites. |
-| Sessão expirada ou revogada | Executa `make codex` novamente. |
+| `channel open failed` in the tunnel | Run `make codex` on the VM before opening the link; confirm that the tunnel port matches the callback port. |
+| Callback answers on the VM but fails through SSH on Fedora 44 | Check the `selinux-policy` version; 44.7 has an SSH forwarding regression fixed in 44.9. Update the policy packages as shown below. |
+| Port 1455 busy | Use `--port 1456` and the matching tunnel. |
+| Login expires or invalid callback | Run `make codex` again and use the new link. |
+| `/effort` does not appear yet | Rebuild and restart the bot to register the new Discord command. |
+| Model rejects the effort | Use an accepted level or `default`; the previous choice is kept. |
+| `No route to host` / DNS failure | Fix outbound connectivity for the VM and containers. Login over the host network does not fix the API network. |
+| ChatGPT limit reached | Check account usage and wait for limits to reset. |
+| Expired or revoked session | Run `make codex` again. |
 
-Com `make codex CODEX_ARGS="--port 1456"` ainda aberto na VM, verifica a escuta
-num segundo terminal da VM:
+With `make codex CODEX_ARGS="--port 1456"` still open on the VM, check the listener
+in a second VM terminal:
 
 ```bash
 ss -ltn 'sport = :1456'
 curl --max-time 3 -i http://127.0.0.1:1456/auth/callback
 ```
 
-É esperado aparecer `LISTEN` e o `curl` receber **HTTP 400** com estado de login
-inválido, pois este pedido de diagnóstico não contém um estado OAuth. Isso
-confirma que o callback está acessível sem consumir a tentativa de login.
-Se a ligação for recusada, o login não está ativo nessa VM/porta. Recomeça com
-`make codex`, mantém o comando aberto e usa o link novo.
+You should see `LISTEN` and `curl` should receive **HTTP 400** with an invalid login
+state, because this diagnostic request has no OAuth state. That
+confirms the callback is reachable without consuming the login attempt.
+If the connection is refused, login is not active on that VM/port. Start again with
+`make codex`, keep the command open and use the new link.
 
-No Fedora 44, `selinux-policy-44.7-1.fc44` tem uma
-[regressão conhecida de encaminhamento SSH](https://bugzilla.redhat.com/show_bug.cgi?id=2523732),
-corrigida em `selinux-policy-44.9-1.fc44`. Se o callback responder dentro da VM
-mas o túnel continuar com `connect failed`, verifica e atualiza a política na VM:
+On Fedora 44, `selinux-policy-44.7-1.fc44` has a
+[known SSH forwarding regression](https://bugzilla.redhat.com/show_bug.cgi?id=2523732),
+fixed in `selinux-policy-44.9-1.fc44`. If the callback answers inside the VM
+but the tunnel still shows `connect failed`, check and update the policy on the VM:
 
 ```bash
 rpm -q selinux-policy selinux-policy-targeted
 sudo dnf upgrade --refresh selinux-policy selinux-policy-targeted
 ```
 
-Depois abre uma nova ligação SSH, volta a iniciar o login e usa o link novo.
-Se continuar a falhar após a atualização, reproduz o erro e consulta os bloqueios
-recentes com `sudo ausearch -m AVC -ts recent -c sshd-session`. Isto permite
-confirmar a causa antes de alterar qualquer configuração de segurança.
+Then open a new SSH connection, start the login again and use the new link.
+If it still fails after the update, reproduce the error and check recent
+blocks with `sudo ausearch -m AVC -ts recent -c sshd-session`. This lets you
+confirm the cause before changing any security configuration.
 
-O login e as mudanças não foram executados na tua conta durante os testes;
-os testes usam respostas OAuth e de inferência simuladas.
+Login and changes were not performed on your account during testing;
+the tests use simulated OAuth and inference responses.
 
-## Referências oficiais
+## Official references
 
-- [Registo e login](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)
-- [Modelos e inferência com o plano ChatGPT](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
+- [Registration and login](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)
+- [Models and inference with the ChatGPT plan](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
 - [Reasoning effort](https://developers.openai.com/api/docs/guides/reasoning)

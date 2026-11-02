@@ -1,321 +1,321 @@
-# Plano: transcrição por gravação ou streaming
+# Plan: transcription by recording or streaming
 
-Data: 2026-10-03. Estado: implementação de código entregue; testes simulados executados; ensaio real por executar.
+Date: 2026-10-03. Status: code implementation delivered; simulated tests executed; real rehearsal still to run.
 
-## Objetivo e decisões
+## Objective and decisions
 
-Permitir escolher entre o processamento atual de gravações e transcrição Realtime da
-Speechmatics, reutilizando as mensagens, resumos e perfis existentes.
+Allow choosing between the current recording processing and Speechmatics Realtime
+transcription, reusing the existing messages, summaries and profiles.
 
-| Tema | Decisão |
+| Topic | Decision |
 | --- | --- |
-| Chamadas | Assumir uma única chamada ativa do bot. Não desenvolver coordenação entre chamadas nesta versão. |
-| Modo inicial | Definido no `.env`, com streaming desligado por defeito. |
-| Comando | `/streaming mode:on\|off\|status`, com permissões de gestão do servidor. A escolha é persistida por servidor e aplica-se à chamada atual. |
-| Precedência | Escolha persistida pelo comando; na sua ausência, valor inicial do ambiente. O ambiente não é um bloqueio ao comando. |
-| Capacidade | Duas vagas por key distinta. Por instrução do utilizador, assumir que cada key pertence a uma conta diferente; não acrescentar configuração de associação a contas. |
-| Atribuição | Ordem de entrada na chamada onde o bot está. Uma vaga pertence ao utilizador até sair, mesmo sem falar. |
-| Espera | FIFO da chamada; enquanto espera, o utilizador é gravado e transcrito por Batch. |
-| Promoção | Quando uma vaga fica livre, o primeiro utilizador elegível passa de gravação para streaming. |
-| Ordem desconhecida | Membros já presentes quando o bot começa a observar, incluindo reinício: desempate pelo ID numérico do Discord. |
-| Segurança | Manter áudio temporário também durante streaming; apagar após confirmação durável da transcrição. |
-| Créditos | Tentar outra key disponível. Se nenhuma tiver créditos, avisar no Discord, cancelar o áudio pendente afetado e eliminá-lo. Não guardar para retry posterior. |
-| Língua | Assumir fala em português de Portugal; API Realtime configurada com `language=pt`. Inglês automático fica fora desta versão. |
-| Resultados | Finais alimentam o armazenamento existente; parciais não entram em resumos nem perfis. |
-| Logs | Fila, atribuições, promoções e falhas são registadas no terminal, sem avisos automáticos no Discord. |
-| Debug | Flag de ambiente, desligada por defeito, permite imprimir texto parcial e final no terminal. |
+| Calls | Assume a single active bot call. Do not develop coordination between calls in this version. |
+| Initial mode | Defined in `.env`, with streaming off by default. |
+| Command | `/streaming mode:on\|off\|status`, with server management permissions. The choice is persisted per server and applies to the current call. |
+| Precedence | Choice persisted by the command; in its absence, the initial value from the environment. The environment is not a block on the command. |
+| Capacity | Two slots per distinct key. As instructed by the user, assume each key belongs to a different account; do not add configuration for associating accounts. |
+| Assignment | Order of entry into the call where the bot is. A slot belongs to the user until they leave, even without speaking. |
+| Waiting | FIFO of the call; while waiting, the user is recorded and transcribed by Batch. |
+| Promotion | When a slot becomes free, the first eligible user moves from recording to streaming. |
+| Unknown order | Members already present when the bot starts observing, including restart: tie-break by Discord numeric ID. |
+| Safety | Keep temporary audio also during streaming; delete after durable confirmation of the transcription. |
+| Credits | Try another available key. If none has credits, warn on Discord, cancel the affected pending audio and delete it. Do not keep it for a later retry. |
+| Language | Assume speech in European Portuguese; Realtime API configured with `language=pt`. Automatic English is outside this version. |
+| Results | Finals feed the existing storage; partials do not enter summaries or profiles. |
+| Logs | Queue, assignments, promotions and failures are logged in the terminal, without automatic warnings on Discord. |
+| Debug | Environment flag, off by default, allows printing partial and final text in the terminal. |
 
-A exceção aos logs é o aviso de créditos esgotados. As respostas aos comandos continuam
-a existir, preferencialmente efémeras; não são publicação de transcrições nem avisos de fila.
+The exception to the logs is the out-of-credits warning. Responses to commands continue
+to exist, preferably ephemeral; they are not publication of transcriptions nor queue warnings.
 
-A premissa de uma conta por key é uma opção deste projeto, não uma regra da Speechmatics:
-o limite Free documentado é por conta. Keys com segredo repetido não aumentam capacidade.
-Recusas reais de concorrência devem ser tratadas como falta de vaga e causar fallback
-para gravação, sem apagar áudio nem confundir esse erro com créditos esgotados.
+The premise of one account per key is an option of this project, not a Speechmatics rule:
+the documented Free limit is per account. Keys with a repeated secret do not increase capacity.
+Real concurrency refusals should be treated as lack of a slot and cause fallback
+to recording, without deleting audio or confusing that error with exhausted credits.
 
-## Base atual e pontos de integração
+## Current base and integration points
 
-- `discord_bot/audio.go`: entrada/saída, estado da chamada, SSRC, fecho e envio de resumo.
-  Regista atualmente ligações por servidor; esta feature assume apenas uma chamada ativa.
-- `discord_bot/audio_convert.go`: descodifica Opus para PCM S16LE, 48 kHz, estéreo,
-  recupera perdas RTP e escreve WAV. O decoder reutiliza buffers: copiar antes de enfileirar.
-- `discord_bot/transcription_client.go`: admissão Batch, outbox durável, retry e barreira
-  de finalização de sessão.
-- `discord_bot/main.go` e `discord_bot/bot_language.go`: comandos e permissões.
-- `src/transcription-api/app/main.py`: admissão de gravações e transformação de segmentos
-  em mensagens com timestamps absolutos.
+- `discord_bot/audio.go`: input/output, call state, SSRC, closing and sending the summary.
+  Currently logs connections per server; this feature assumes only one active call.
+- `discord_bot/audio_convert.go`: decodes Opus to PCM S16LE, 48 kHz, stereo,
+  recovers RTP losses and writes WAV. The decoder reuses buffers: copy before enqueuing.
+- `discord_bot/transcription_client.go`: Batch admission, durable outbox, retry and
+  session finalization barrier.
+- `discord_bot/main.go` and `discord_bot/bot_language.go`: commands and permissions.
+- `src/transcription-api/app/main.py`: admission of recordings and transformation of segments
+  into messages with absolute timestamps.
 - `src/transcription-api/app/config.py`, `transcriber.py`, `speechmatics_usage.py`:
-  configuração, keys e Batch. O consumo medido atualmente não representa saldo real.
-- `src/transcription-api/app/workers.py` e `recording_cleanup.py`: recuperação de jobs
-  e limpeza de áudio confirmado.
-- `src/data/repository.py` e `src/data/migrations/`: persistência, idempotência, readiness
-  de resumos e perfis.
-- `.env.example`, `docker-compose.yml`, READMEs e requirements: configuração e operação.
+  configuration, keys and Batch. The consumption currently measured does not represent the real balance.
+- `src/transcription-api/app/workers.py` and `recording_cleanup.py`: job recovery
+  and cleanup of confirmed audio.
+- `src/data/repository.py` and `src/data/migrations/`: persistence, idempotency, readiness
+  of summaries and profiles.
+- `.env.example`, `docker-compose.yml`, READMEs and requirements: configuration and operation.
 
-Há alterações locais em vários destes ficheiros durante a elaboração do plano. Antes de
-implementar, reler o estado atual e integrar sem substituir o trabalho existente.
+There are local changes in several of these files during the preparation of the plan. Before
+implementing, re-read the current state and integrate without replacing the existing work.
 
-## Arquitetura proposta
+## Proposed architecture
 
 ```mermaid
 flowchart LR
-    D[Discord Opus por utilizador] --> P[PCM e identificação]
-    P --> W[WAV temporário]
-    P --> R{Modo e vaga}
-    R -->|streaming| G[WebSocket Go → API Python]
+    D[Discord Opus per user] --> P[PCM and identification]
+    P --> W[Temporary WAV]
+    P --> R{Mode and slot}
+    R -->|streaming| G[Go WebSocket → Python API]
     G --> S[Speechmatics Realtime]
-    S --> F[Finais confirmados]
-    R -->|gravação ou espera| B[Outbox e Batch existentes]
-    W -->|falha recuperável| B
-    F --> DB[Mensagens normalizadas no Postgres]
+    S --> F[Confirmed finals]
+    R -->|recording or waiting| B[Existing outbox and Batch]
+    W -->|recoverable failure| B
+    F --> DB[Normalized messages in Postgres]
     B --> DB
-    DB --> L[Resumos e perfis existentes]
+    DB --> L[Existing summaries and profiles]
 ```
 
-Manter as keys apenas na API Python, como acontece hoje. O Go envia PCM e metadados à
-API; o Python gere as ligações Speechmatics e reserva as vagas atomicamente. A versão
-inicial usa o processo único de API do deployment atual. Várias réplicas ou processos
-Uvicorn exigiriam um coordenador partilhado e ficam fora do âmbito.
+Keep the keys only in the Python API, as happens today. Go sends PCM and metadata to the
+API; Python manages the Speechmatics connections and reserves the slots atomically. The initial
+version uses the single API process of the current deployment. Multiple replicas or Uvicorn
+processes would require a shared coordinator and are outside the scope.
 
-O bot controla a ordem dos participantes e a fila da chamada. A API é a autoridade
-sobre reservas e estado das keys; o bot só entra em streaming após confirmação.
-Se surgir inesperadamente uma segunda chamada, não criar outro pool com a mesma
-capacidade: recusar a atribuição Realtime nessa chamada, manter gravação e registar log.
-Não alterar nesta feature o comportamento geral de autojoin do bot.
+The bot controls the order of participants and the call queue. The API is the authority
+over reservations and key state; the bot only enters streaming after confirmation.
+If a second call unexpectedly appears, do not create another pool with the same
+capacity: refuse Realtime assignment in that call, keep recording and log it.
+Do not change the bot's general autojoin behaviour in this feature.
 
-## Configuração e comando
+## Configuration and command
 
-Configuração proposta; os nomes podem ser ajustados às convenções na implementação:
+Proposed configuration; the names may be adjusted to the conventions in the implementation:
 
 ```dotenv
-# Valor inicial para servidores sem preferência persistida.
+# Initial value for servers with no persisted preference.
 TRANSCRIPTION_STREAMING_ENABLED=false
 
-# Texto transcrito só aparece no terminal quando esta flag é true.
+# Transcribed text only appears in the terminal when this flag is true.
 TRANSCRIPTION_STREAMING_DEBUG=false
 
-# Configuração separada dos defaults Batch melia-1/multi.
+# Separate configuration from the Batch melia-1/multi defaults.
 SPEECHMATICS_REALTIME_URL=wss://eu.rt.speechmatics.com/v2/
 SPEECHMATICS_REALTIME_MODEL=enhanced
 SPEECHMATICS_REALTIME_LANGUAGE=pt
 ```
 
-- Guardar a preferência numa tabela de settings por guild, não num ficheiro `.env`
-  modificado pelo comando. Persistir antes de confirmar a alteração ao utilizador.
-- `status` informa modo efetivo, ocupação e tamanho da fila, sem revelar segredos.
-- `on` ordena os membros presentes pela entrada observada, preenche vagas e enfileira
-  o excedente. Transcrições Batch já admitidas continuam pelo seu percurso.
-- `off` deixa de admitir streams, fecha/flush as existentes e passa a gravação a partir
-  de um limite de áudio explícito. Não submeter novamente o áudio já confirmado.
-- Com fornecedor diferente de Speechmatics ou sem keys válidas, manter gravação e
-  devolver erro explicativo ao comando `on`; não mostrar streaming como efetivamente ativo.
-- Debug é configurado por ambiente no processo que recebe os resultados Realtime.
-  Logs normais contêm apenas metadados; nunca keys, tokens ou transcrição textual.
+- Store the preference in a per-guild settings table, not in an `.env` file
+  modified by the command. Persist before confirming the change to the user.
+- `status` reports the effective mode, occupancy and queue size, without revealing secrets.
+- `on` orders the members present by observed entry, fills slots and queues
+  the excess. Batch transcriptions already admitted continue along their path.
+- `off` stops admitting streams, closes/flushes the existing ones and switches to recording from
+  an explicit audio limit. Do not resubmit audio already confirmed.
+- With a provider other than Speechmatics or without valid keys, keep recording and
+  return an explanatory error to the `on` command; do not show streaming as effectively active.
+- Debug is configured by environment in the process that receives the Realtime results.
+  Normal logs contain only metadata; never keys, tokens or textual transcription.
 
-## Participação, fila e vagas
+## Participation, queue and slots
 
-1. Registar entradas reais com sequência monotónica antes de operações de rede.
-   Updates de mute/deafen e mudanças de SSRC não representam uma nova entrada.
-2. Considerar apenas utilizadores humanos presentes no canal atual e elegíveis para
-   captura. Bot, utilizadores pausados por `/forget` e membros de outros canais não
-   ocupam vaga nem entram na fila.
-3. Para o snapshot inicial de membros com chegada desconhecida, ordenar pelo ID
-   numérico, usando comparação numérica ou decimal segura, sem conversão para float.
-   Inserir novas entradas observadas depois desse grupo, em ordem de evento.
-4. Reservar no máximo duas vagas por segredo de key distinto. Escolher entre keys
-   saudáveis por menor ocupação, com desempate pela ordem de configuração existente.
-5. A vaga é uma reserva de utilizador, independente de um clip WAV ou ligação WS.
-   Inatividade não promove outra pessoa. Se o fornecedor fechar uma ligação ociosa,
-   reabri-la para o mesmo titular sem aumentar a contagem de reservas.
-6. Quem espera usa o pipeline Batch atual. Na promoção, fechar o clip Batch no limite
-   da transição, manter o seu outbox e começar uma nova unidade Realtime. Não enviar
-   retroativamente para Realtime o áudio já pertencente ao Batch.
-7. Ao sair ou mudar para outro canal, fechar a participação, remover da fila, finalizar
-   áudio e libertar a vaga uma única vez. Uma reentrada recebe uma nova posição.
-8. Ao mover o bot de canal, fechar streams e fila do canal anterior; construir a fila
-   do canal novo. Não misturar participantes nem prioridade entre canais.
-9. Reinício reconcilia presença real e reconstrói a ordem desconhecida por ID. Áudio de
-   segurança sem confirmação segue a recuperação Batch, exceto se estiver descartado
-   por falta de créditos ou apagado por `/forget`.
+1. Register real entries with a monotonic sequence before network operations.
+   Mute/deafen updates and SSRC changes do not represent a new entry.
+2. Consider only human users present in the current channel and eligible for
+   capture. The bot, users paused by `/forget` and members of other channels do not
+   occupy a slot nor enter the queue.
+3. For the initial snapshot of members with unknown arrival, order by numeric
+   ID, using a numeric or safe decimal comparison, without conversion to float.
+   Insert new entries observed after that group, in event order.
+4. Reserve at most two slots per distinct key secret. Choose among healthy keys
+   by lowest occupancy, with tie-break by the existing configuration order.
+5. The slot is a reservation of a user, independent of a WAV clip or WS connection.
+   Inactivity does not promote another person. If the provider closes an idle connection,
+   reopen it for the same holder without increasing the reservation count.
+6. Those waiting use the current Batch pipeline. On promotion, close the Batch clip at the
+   transition limit, keep its outbox and start a new Realtime unit. Do not send
+   retroactively to Realtime audio already belonging to Batch.
+7. On leaving or moving to another channel, close the participation, remove from the queue, finalize
+   audio and release the slot only once. A re-entry receives a new position.
+8. When moving the bot to another channel, close the streams and queue of the previous channel; build the
+   queue of the new channel. Do not mix participants or priority between channels.
+9. Restart reconciles real presence and rebuilds the unknown order by ID. Safety audio
+   without confirmation follows Batch recovery, except if it was discarded
+   for lack of credits or deleted by `/forget`.
 
-## Transporte e áudio
+## Transport and audio
 
-- Criar cliente Go e endpoint interno WebSocket Python para áudio por utilizador.
-  Metadados incluem sessão, Discord ID, participação, stream/epoch e unidade de áudio.
-- Negociar formato, receber `RecognitionStarted` e só então enviar áudio ao fornecedor.
-  Converter estéreo para mono com soma em precisão suficiente antes da divisão, sem
-  overflow. Validar 48 kHz no ensaio técnico; usar resampling explícito se necessário.
-- Preservar ordem de silêncio, áudio recuperado e PCM normal. Registar os offsets
-  enviados e a correspondência com timestamps absolutos da chamada.
-- Usar filas limitadas e workers por stream; a rede não pode bloquear o loop de captura.
-  Fila cheia aciona gravação/fallback e log, não crescimento ilimitado de memória.
-- Manter heartbeat; fecho envia `EndOfStream`, aguarda finais/`EndOfTranscript` com
-  timeout e depois liberta recursos. Em falha, reconciliar áudio sem confirmação.
-- Reinícios da ligação criam epochs com offsets próprios. Grandes períodos de silêncio
-  podem iniciar nova epoch mantendo a reserva, evitando acumular silêncio em memória.
-- Chunks duplicados ou fora de ordem são detetados por sequência. Não reconectar e
-  reenviar áudio sem reconciliar resultados anteriores.
+- Create a Go client and an internal Python WebSocket endpoint for per-user audio.
+  Metadata includes session, Discord ID, participation, stream/epoch and audio unit.
+- Negotiate format, receive `RecognitionStarted` and only then send audio to the provider.
+  Convert stereo to mono with summation in sufficient precision before the division, without
+  overflow. Validate 48 kHz in the technical rehearsal; use explicit resampling if necessary.
+- Preserve the order of silence, recovered audio and normal PCM. Record the offsets
+  sent and the correspondence with the call's absolute timestamps.
+- Use bounded queues and workers per stream; the network must not block the capture loop.
+  A full queue triggers recording/fallback and a log, not unlimited memory growth.
+- Keep a heartbeat; closing sends `EndOfStream`, waits for finals/`EndOfTranscript` with a
+  timeout and then releases resources. On failure, reconcile audio without confirmation.
+- Connection restarts create epochs with their own offsets. Large periods of silence
+  can start a new epoch while keeping the reservation, avoiding accumulating silence in memory.
+- Duplicate or out-of-order chunks are detected by sequence. Do not reconnect and
+  resend audio without reconciling previous results.
 
-## Persistência e fallback sem duplicação
+## Persistence and fallback without duplication
 
-O áudio precisa de uma identidade independente do modo de transcrição. Introduzir
-unidades duráveis por utilizador/participação, alinhadas com os clips/limites de transição.
-Uma ligação Realtime pode atravessar várias unidades; os timestamps de palavras permitem
-associar resultados à unidade correta sem duplicar palavras nos limites.
+The audio needs an identity independent of the transcription mode. Introduce durable
+units per user/participation, aligned with the clips/transition limits.
+A Realtime connection can span several units; word timestamps allow
+associating results with the correct unit without duplicating words at the limits.
 
-Migração proposta, a detalhar durante a implementação:
+Proposed migration, to be detailed during implementation:
 
-- Settings de streaming por guild.
-- Participações/streams com identidade, key por nome, epoch, offsets e estado.
-- Unidades de áudio com WAV, intervalo, dono de processamento, versão e estado.
-- Segmentos finais com identidade idempotente e origem/unidade associada às mensagens.
-- Estado terminal de descarte por créditos, motivo e limpeza pendente.
+- Streaming settings per guild.
+- Participations/streams with identity, key by name, epoch, offsets and state.
+- Audio units with WAV, interval, processing owner, version and state.
+- Final segments with idempotent identity and origin/unit associated with the messages.
+- Terminal state of discard for credits, reason and pending cleanup.
 
-Estados de trabalho: `recording`, `streaming`, `fallback_pending`, `completed` e
-`discarded_no_credits`. Estados e transições devem ser persistidos antes de side effects
-irreversíveis. Eventos atrasados usam geração/versão para não reabrir trabalho terminado.
+Work states: `recording`, `streaming`, `fallback_pending`, `completed` and
+`discarded_no_credits`. States and transitions must be persisted before irreversible
+side effects. Delayed events use generation/version so as not to reopen finished work.
 
-Política proposta:
+Proposed policy:
 
-1. Persistir cada final Realtime de forma idempotente; `AudioAdded` não significa que
-   texto foi guardado. Parciais só são usados pelo debug.
-2. Uma unidade só fica concluída após fecho do áudio e confirmação de todos os finais
-   esperados. Só então é elegível para limpeza normal e atualização de perfis.
-3. Em falha recuperável, reter o WAV e encaminhar a unidade incompleta para Batch.
-   Os resultados Batch substituem atomicamente as mensagens Realtime da mesma unidade;
-   não são acrescentados por cima. Recalcular os chunks afetados nessa transação.
-4. Antes de processar fallback, invalidar a geração Realtime dessa unidade. Resultados
-   tardios ou repetidos não voltam a inserir mensagens nem vencem o resultado Batch.
-5. Perfis/LLM só recebem unidades concluídas ou encerradas definitivamente. Isso evita
-   incorporar duas vezes uma unidade cujo texto foi substituído pelo fallback.
-6. `/recap` pode usar os finais já guardados, mas o resumo final da chamada aguarda
-   streams, flush e jobs admitidos. Timeout com áudio recuperável encaminha para Batch;
-   descarte por créditos é terminal e não bloqueia o resumo.
-7. Não reenviar unidades concluídas no restart, `/retry`, promoção ou alteração de modo.
+1. Persist each Realtime final idempotently; `AudioAdded` does not mean that
+   text was stored. Partials are only used by debug.
+2. A unit is only complete after the audio is closed and all expected finals are
+   confirmed. Only then is it eligible for normal cleanup and profile updates.
+3. On recoverable failure, retain the WAV and route the incomplete unit to Batch.
+   Batch results atomically replace the Realtime messages of the same unit;
+   they are not added on top. Recalculate the affected chunks in that transaction.
+4. Before processing fallback, invalidate the Realtime generation of that unit. Late
+   or repeated results do not insert messages again nor beat the Batch result.
+5. Profiles/LLM only receive units completed or definitively closed. This avoids
+   incorporating twice a unit whose text was replaced by fallback.
+6. `/recap` can use the finals already stored, but the final call summary waits for
+   streams, flush and admitted jobs. A timeout with recoverable audio routes to Batch;
+   discard for credits is terminal and does not block the summary.
+7. Do not resend completed units on restart, `/retry`, promotion or mode change.
 
-## Falhas e falta de créditos
+## Failures and lack of credits
 
-| Situação | Comportamento |
+| Situation | Behaviour |
 | --- | --- |
-| Vagas ocupadas | FIFO e gravação; apenas log. |
-| Recusa de concorrência do fornecedor | Tentar outra key com capacidade; caso contrário, gravação e log. Não declarar créditos esgotados. |
-| Falha de rede, timeout ou fila de áudio cheia | Fallback durável para Batch, retry com backoff limitado e apenas log. |
-| Key inválida ou configuração incompatível | Retirar key do pool utilizável e registar erro; não apagar áudio por esse motivo. |
-| Uma key sem créditos | Marcar indisponível para novas transcrições, tentar outra key sem exceder vagas e preservar a ordem/reserva do participante. |
-| Todas as contas sem créditos, confirmado pelo fornecedor | Aviso no Discord; descartar áudio pendente afetado e suspender captura de novo áudio para transcrição nessa chamada. |
+| Slots occupied | FIFO and recording; log only. |
+| Provider concurrency refusal | Try another key with capacity; otherwise, recording and log. Do not declare exhausted credits. |
+| Network failure, timeout or full audio queue | Durable fallback to Batch, retry with limited backoff and log only. |
+| Invalid key or incompatible configuration | Remove the key from the usable pool and log the error; do not delete audio for that reason. |
+| One key without credits | Mark it unavailable for new transcriptions, try another key without exceeding slots and preserve the participant's order/reservation. |
+| All accounts without credits, confirmed by the provider | Warning on Discord; discard the affected pending audio and suspend capture of new audio for transcription in that call. |
 
-Não inferir falta de créditos a partir de um percentual do orçamento configurado, de
-um erro genérico, de falta de keys, ou de indisponibilidade da consulta de uso. Mapear
-respostas concretas do fornecedor no ensaio técnico e cobri-las com testes.
+Do not infer lack of credits from a percentage of the configured budget, from
+a generic error, from lack of keys, or from unavailability of the usage query. Map
+concrete provider responses in the technical rehearsal and cover them with tests.
 
-No descarte por créditos:
+On discard for credits:
 
-- Preservar mensagens/texto já confirmados. Encerrar unidades parcialmente confirmadas
-  mantendo esse texto, sem aceitar finais tardios do restante áudio.
-- Marcar unidades e jobs pendentes afetados como descartados antes de limpar ficheiros;
-  invalidar callbacks e impedir workers/replay de continuar o trabalho cancelado.
-- Eliminar WAV, buffers, outbox e sidecars desses trabalhos. Tentar cancelar jobs remotos
-  se a API o permitir; a impossibilidade de cancelar remotamente não autoriza reinserção.
-- Limpeza é idempotente, confinada à pasta de gravações, e é repetida após restart se
-  falhar. Falha de unlink não transforma um job descartado em job para transcrever.
-- Emitir um aviso por episódio de esgotamento no canal de resumo da chamada. Guardar
-  o estado do aviso para evitar spam/repetição após reinício; falha de envio fica nos logs.
-- Mensagem sugerida: “Os créditos da Speechmatics esgotaram. A transcrição desta chamada
-  foi interrompida e o áudio pendente foi eliminado. O texto já transcrito foi preservado.”
-  Enviar depois da limpeza; se houver limpeza pendente, dizer que será eliminado.
-- Manter o bot na chamada e as outras funções disponíveis. Uma nova chamada ou comando
-  explícito `on` permite reavaliar as keys; não recuperar áudio já descartado.
+- Preserve messages/text already confirmed. Close partially confirmed units
+  keeping that text, without accepting late finals of the remaining audio.
+- Mark affected units and pending jobs as discarded before cleaning files;
+  invalidate callbacks and prevent workers/replay from continuing the cancelled work.
+- Delete WAV, buffers, outbox and sidecars of those jobs. Try to cancel remote jobs
+  if the API allows it; the impossibility of cancelling remotely does not authorize reinsertion.
+- Cleanup is idempotent, confined to the recordings folder, and is repeated after restart if
+  it fails. An unlink failure does not turn a discarded job into a job to transcribe.
+- Emit one warning per exhaustion episode in the call's summary channel. Store
+  the warning state to avoid spam/repetition after restart; a send failure stays in the logs.
+- Suggested message: "Speechmatics credits ran out. The transcription of this call
+  was interrupted and the pending audio was deleted. The text already transcribed was preserved."
+  Send after cleanup; if there is pending cleanup, say that it will be deleted.
+- Keep the bot in the call and the other functions available. A new call or explicit
+  `on` command allows re-evaluating the keys; do not recover already discarded audio.
 
-Esta política também se aplica a gravações Batch da chamada quando todas as contas
-Speechmatics estiverem sem créditos. Não introduzir fallback automático para Whisper.
+This policy also applies to Batch recordings of the call when all Speechmatics
+accounts are out of credits. Do not introduce automatic fallback to Whisper.
 
-## Logs, debug e apagamento de dados
+## Logs, debug and data deletion
 
-- Logs estruturados: sessão, utilizador, nome da key, vaga, posição, transição, motivo,
-  offset, unidades pendentes e latência. Não repetir um log de fila a cada pacote.
-- Debug imprime parciais e finais com sessão/utilizador e tipo de resultado, sem segredos.
-  Parciais que mudam não são contados como novas mensagens persistidas.
-- Integrar `/forget` na barreira de streams: pausar captura, retirar da fila, invalidar
-  gerações, fechar WS, cancelar jobs, limpar áudio e só depois confirmar apagamento.
-  Nenhum final tardio ou retry pode recriar dados do utilizador apagado.
-- Alargar a recuperação/limpeza existentes para unidades streaming e descartadas, sem
-  apagar gravações de outros utilizadores ou trabalho ainda recuperável.
-- Contabilizar separadamente uso Realtime e Batch. Vagas reservadas não são horas de
-  áudio transcrito; fallback efetivamente enviado pode consumir ambos os produtos.
+- Structured logs: session, user, key name, slot, position, transition, reason,
+  offset, pending units and latency. Do not repeat a queue log on every packet.
+- Debug prints partials and finals with session/user and result type, without secrets.
+  Partials that change are not counted as new persisted messages.
+- Integrate `/forget` into the stream barrier: pause capture, remove from the queue, invalidate
+  generations, close WS, cancel jobs, clean audio and only then confirm deletion.
+  No late final or retry can recreate data of the deleted user.
+- Extend the existing recovery/cleanup to streaming and discarded units, without
+  deleting recordings of other users or work still recoverable.
+- Account separately for Realtime and Batch usage. Reserved slots are not hours of
+  transcribed audio; fallback effectively sent can consume both products.
 
-## Fases de desenvolvimento
+## Development phases
 
-### 1. Validar protocolo e fechar contratos técnicos
+### 1. Validate protocol and settle technical contracts
 
-- Ensaio isolado Realtime com PCM, `enhanced`, `pt`, finais, parciais, heartbeat e flush.
-- Confirmar códigos de concorrência, autenticação, créditos e formato de timestamps.
-- Fixar contratos Go/API, identificadores, limites de fila e timeouts; criar simulador WS.
-- Manter Batch `melia-1/multi` separado. Não utilizar a eventual presença de Melia no
-  enum da referência WS como prova de suporte Realtime.
+- Isolated Realtime rehearsal with PCM, `enhanced`, `pt`, finals, partials, heartbeat and flush.
+- Confirm concurrency codes, authentication, credits and timestamp format.
+- Fix Go/API contracts, identifiers, queue limits and timeouts; create a WS simulator.
+- Keep Batch `melia-1/multi` separate. Do not use the eventual presence of Melia in the
+  WS reference enum as proof of Realtime support.
 
-### 2. Configuração, persistência e controlo
+### 2. Configuration, persistence and control
 
-- Adicionar settings/envs, migração, endpoint de settings e comando Discord.
-- Implementar modo efetivo, persistência por servidor, permissões e `status`.
-- Acrescentar rastreio de participação, FIFO e gestor de duas reservas por key distinta.
-- Verificar ordenação, saídas, reentradas, mute, snapshots e reinício sem API paga.
+- Add settings/envs, migration, settings endpoint and Discord command.
+- Implement effective mode, per-server persistence, permissions and `status`.
+- Add participation tracking, FIFO and a manager for two reservations per distinct key.
+- Verify ordering, exits, re-entries, mute, snapshots and restart without a paid API.
 
-### 3. Captura e transporte Realtime
+### 3. Capture and Realtime transport
 
-- Separar produção de PCM dos destinos sem alterar recuperação RTP existente.
-- Implementar cliente Go, endpoint interno, cliente Speechmatics e filas limitadas.
-- Manter WAV de segurança e limites explícitos nas transições Batch/streaming.
-- Implementar reserva independente de atividade, heartbeat, epochs e fecho com flush.
+- Separate PCM production from the destinations without changing the existing RTP recovery.
+- Implement the Go client, internal endpoint, Speechmatics client and bounded queues.
+- Keep a safety WAV and explicit limits at the Batch/streaming transitions.
+- Implement reservation independent of activity, heartbeat, epochs and closing with flush.
 
-### 4. Resultados, fallback e recuperação
+### 4. Results, fallback and recovery
 
-- Persistir finais e unidades; reutilizar normalização de mensagens/timestamps.
-- Implementar substituição atómica no fallback e impedir inserções de gerações antigas.
-- Integrar barreiras de resumo, perfis, `/forget`, restart, outbox e limpeza.
-- Garantir que ligar/desligar durante fala não perde áudio nem duplica transcrições.
+- Persist finals and units; reuse message/timestamp normalization.
+- Implement atomic replacement in fallback and prevent insertions from old generations.
+- Integrate summary barriers, profiles, `/forget`, restart, outbox and cleanup.
+- Ensure that turning on/off during speech does not lose audio nor duplicate transcriptions.
 
-### 5. Créditos, observabilidade e documentação
+### 5. Credits, observability and documentation
 
-- Implementar classificação de erros, tentativa entre keys e descarte terminal.
-- Integrar aviso único no Discord e impedir replay de gravações eliminadas.
-- Adicionar logs de transição, debug textual e reporte de uso Realtime separado.
-- Atualizar `.env.example`, compose, requirements e documentação operacional.
+- Implement error classification, attempt between keys and terminal discard.
+- Integrate a single warning on Discord and prevent replay of deleted recordings.
+- Add transition logs, textual debug and separate Realtime usage reporting.
+- Update `.env.example`, compose, requirements and operational documentation.
 
-### 6. Verificação final e ativação
+### 6. Final verification and activation
 
-- Executar testes relevantes Go/Python e integração em Postgres descartável.
-- Verificar numa chamada controlada modo gravação, modo streaming e fila com excesso
-  de participantes. Usar testes simulados para créditos e falhas destrutivas.
-- Fazer o primeiro ensaio real com uma key e debug ativado; depois testar várias keys.
-- Entregar com streaming desligado por defeito. Reverter o modo com `/streaming off`
-  ou alterar o valor inicial para instalações sem preferência persistida.
+- Run the relevant Go/Python tests and integration in a disposable Postgres.
+- Verify in a controlled call recording mode, streaming mode and a queue with excess
+  participants. Use simulated tests for credits and destructive failures.
+- Do the first real rehearsal with one key and debug enabled; then test several keys.
+- Deliver with streaming off by default. Revert the mode with `/streaming off`
+  or change the initial value for installations with no persisted preference.
 
-## Critérios de aceitação e testes
+## Acceptance criteria and tests
 
-- Streaming desligado preserva o percurso atual de gravação, outbox, resumos e perfis.
-- `.env` só define o modo inicial; comando autorizado persiste e altera a chamada atual.
-- Uma key distinta dá duas vagas; três participantes deixam o terceiro em gravação/FIFO.
-  Duas keys distintas permitem quatro titulares; keys duplicadas não aumentam capacidade.
-- Silêncio não liberta vaga. Saída promove o primeiro da fila, sem duplicar o Batch anterior.
-- Updates de mute, novos SSRC e reconexões não alteram prioridade nem aumentam reservas.
-- Reinício/snapshot usa desempate estável por ID; reentrada fica no fim da fila.
-- Atribuições concorrentes nunca ultrapassam duas reservas por key; fecho é idempotente.
-- PCM mantém ordem, identidade e timestamps através de perdas RTP, silêncio e epochs.
-- Rede lenta/fila cheia não bloqueia outros utilizadores nem deixa crescer buffers sem limite.
-- Finais repetidos/tardios não duplicam mensagens. Fallback substitui apenas a unidade
-  afetada e perfis não absorvem resultados de duas versões da mesma unidade.
-- Desligar durante fala, saída, mudança de canal e `/stop` concluem ou recuperam áudio;
-  o resumo só corre depois das barreiras necessárias.
-- Erro de concorrência/rede não causa eliminação por créditos.
-- Créditos esgotados numa key tentam outra; todas esgotadas causam aviso único, descarte
-  e limpeza. Restart e `/retry` nunca ressuscitam esse áudio; texto confirmado permanece.
-- Falha de limpeza ou envio do aviso é recuperável sem reiniciar transcrição descartada.
-- `/forget` elimina dados e impede recriação por eventos ou jobs tardios.
-- Não há legendas nem avisos de fila/promoção no Discord. Debug off não imprime transcrição;
-  debug on imprime resultados no terminal. Logs nunca incluem credenciais.
-- PT-PT é testado com áudio representativo, usando código Speechmatics `pt`.
+- Streaming off preserves the current recording, outbox, summaries and profiles path.
+- `.env` only defines the initial mode; an authorized command persists and changes the current call.
+- One distinct key gives two slots; three participants leave the third in recording/FIFO.
+  Two distinct keys allow four holders; duplicated keys do not increase capacity.
+- Silence does not free a slot. Exiting promotes the first in the queue, without duplicating the previous Batch.
+- Mute updates, new SSRCs and reconnections do not change priority nor increase reservations.
+- Restart/snapshot uses stable tie-break by ID; re-entry goes to the end of the queue.
+- Concurrent assignments never exceed two reservations per key; closing is idempotent.
+- PCM preserves order, identity and timestamps across RTP losses, silence and epochs.
+- Slow network/full queue does not block other users nor let buffers grow without limit.
+- Repeated/late finals do not duplicate messages. Fallback replaces only the
+  affected unit and profiles do not absorb results of two versions of the same unit.
+- Turning off during speech, exit, channel change and `/stop` complete or recover audio;
+  the summary only runs after the necessary barriers.
+- A concurrency/network error does not cause deletion for credits.
+- Exhausted credits on one key try another; all exhausted cause a single warning, discard
+  and cleanup. Restart and `/retry` never resurrect that audio; confirmed text remains.
+- A cleanup or warning send failure is recoverable without restarting a discarded transcription.
+- `/forget` deletes data and prevents recreation by late events or jobs.
+- There are no captions nor queue/promotion warnings on Discord. Debug off does not print transcription;
+  debug on prints results in the terminal. Logs never include credentials.
+- PT-PT is tested with representative audio, using the Speechmatics code `pt`.
 
-Comandos de verificação existentes, a executar durante a implementação:
+Existing verification commands, to be run during implementation:
 
 ```bash
 PYTHONPATH=src:src/transcription-api .venv/bin/pytest -q src/transcription-api/tests
@@ -323,63 +323,63 @@ cd discord_bot
 go test -race ./...
 ```
 
-Testes de integração usam `TEST_DATABASE_URL` descartável; Go requer Opus/opusfile.
-Testes automatizados devem usar fornecedores simulados, sem créditos ou Discord reais.
-Este plano não implica que esses testes ou ensaios tenham sido executados.
+Integration tests use a disposable `TEST_DATABASE_URL`; Go requires Opus/opusfile.
+Automated tests must use simulated providers, without real credits or Discord.
+This plan does not imply that those tests or rehearsals have been executed.
 
-## Referências verificadas
+## Verified references
 
-- [Limites Realtime: Free, concorrência e encerramento](https://docs.speechmatics.com/speech-to-text/realtime/limits).
-- [Quickstart: WebSocket, finais e parciais](https://docs.speechmatics.com/speech-to-text/realtime/quickstart).
-- [Áudio Realtime](https://docs.speechmatics.com/speech-to-text/realtime/input).
-- [Modelos: Enhanced/Standard Realtime; Melia Batch](https://docs.speechmatics.com/speech-to-text/models).
-- [Línguas: português usa código pt](https://docs.speechmatics.com/speech-to-text/languages).
-- [Referência WebSocket](https://docs.speechmatics.com/api-ref/realtime-transcription-websocket).
-- [Discord Voice State: não inclui timestamp de entrada](https://docs.discord.com/developers/resources/voice#voice-state-object-voice-state-structure).
+- [Realtime limits: Free, concurrency and closing](https://docs.speechmatics.com/speech-to-text/realtime/limits).
+- [Quickstart: WebSocket, finals and partials](https://docs.speechmatics.com/speech-to-text/realtime/quickstart).
+- [Realtime audio](https://docs.speechmatics.com/speech-to-text/realtime/input).
+- [Models: Enhanced/Standard Realtime; Melia Batch](https://docs.speechmatics.com/speech-to-text/models).
+- [Languages: Portuguese uses code pt](https://docs.speechmatics.com/speech-to-text/languages).
+- [WebSocket reference](https://docs.speechmatics.com/api-ref/realtime-transcription-websocket).
+- [Discord Voice State: does not include an entry timestamp](https://docs.discord.com/developers/resources/voice#voice-state-object-voice-state-structure).
 
-Plano preparado com a skill `grilling`, após entrevista e confirmação de que as escolhas
-restantes ficam ao critério do implementador. Sem alterações ao código nesta tarefa.
+Plan prepared with the `grilling` skill, after an interview and confirmation that the remaining
+choices are left to the implementer's discretion. No changes to the code in this task.
 
 
-## Entrega de implementação — 2026-10-03
+## Implementation delivery — 2026-10-03
 
-Implementado o percurso Go → WebSocket interno → Speechmatics Realtime, com comando
-`/streaming mode:on|off|status`, preferência persistida por guild e default desligado.
-Foram preservadas as alterações locais anteriores à implementação.
+Implemented the Go → internal WebSocket → Speechmatics Realtime path, with the command
+`/streaming mode:on|off|status`, a preference persisted per guild and disabled by default.
+The local changes prior to the implementation were preserved.
 
-- FIFO por participação, snapshot numérico, entradas observadas antes de operações de
-  rede, reservas independentes de atividade, duas vagas por segredo distinto e recusa
-  de outra chamada enquanto o pool está ocupado.
-- Downmix int32, cópia dos buffers Opus, fila limitada por epoch, sequência explícita,
-  heartbeat, negociação e flush com timeout. Transições fecham unidades sem reutilizar
-  retroativamente áudio Batch. Uma epoch corresponde a um WAV nesta implementação.
-- Migração `006_streaming.sql`, finais idempotentes associados ao WAV, invalidação de
-  gerações, substituição atómica pelo Batch, barreiras de resumo/perfis e recuperação
-  de headers interrompidos. `/retry` ignora outboxes de WAVs ainda abertos.
-- `/forget` pausa/fecha captura e invalida unidades, interrompe polling e tenta cancelar
-  jobs remotos antes da eliminação; callbacks tardios não podem recriar dados.
-- Créditos confirmados tentam outra key; o descarte de todas as keys é terminal e
-  precede limpeza. Avisos pendentes têm episódio persistido e nonce Discord. O nonce
-  só cobre alguns minutos no Discord; uma falha prolongada simultânea após envio e
-  antes da confirmação persistida pode exigir reconciliação manual do aviso.
-- Variáveis no exemplo de ambiente/Compose, uso Realtime separado, debug textual
-  opt-in e documentação operacional nas READMEs.
+- FIFO per participation, numeric snapshot, entries observed before network operations,
+  reservations independent of activity, two slots per distinct secret and refusal
+  of another call while the pool is busy.
+- int32 downmix, copy of the Opus buffers, queue limited per epoch, explicit sequence,
+  heartbeat, negotiation and flush with timeout. Transitions close units without retroactively
+  reusing Batch audio. One epoch corresponds to one WAV in this implementation.
+- Migration `006_streaming.sql`, idempotent finals associated with the WAV, invalidation of
+  generations, atomic replacement by Batch, summary/profile barriers and recovery
+  of interrupted headers. `/retry` ignores outboxes of WAVs still open.
+- `/forget` pauses/closes capture and invalidates units, interrupts polling and tries to cancel
+  remote jobs before deletion; late callbacks cannot recreate data.
+- Confirmed credits try another key; discarding all keys is terminal and
+  precedes cleanup. Pending warnings have a persisted episode and a Discord nonce. The nonce
+  only covers a few minutes on Discord; a prolonged failure that occurs simultaneously after sending and
+  before persisted confirmation may require manual reconciliation of the warning.
+- Variables in the environment/Compose example, separate Realtime usage, opt-in textual
+  debug and operational documentation in the READMEs.
 
-Verificação executada com fornecedores simulados e Postgres 17 descartável, isolado
-por schema em cada teste; nenhum crédito Speechmatics ou Discord real foi utilizado:
+Verification executed with simulated providers and a disposable Postgres 17, isolated
+per schema in each test; no real Speechmatics or Discord credits were used:
 
-- Go: `go test -race ./...` e `go vet ./...` passaram, incluindo fronteiras de modo
-  com Opus real, downmix, filas, FIFO, reparação WAV e outbox ativo.
-- Python: **138 passaram; 1 falhou** na suite completa. Os 15 casos de streaming
-  passaram. A falha preexistente é
+- Go: `go test -race ./...` and `go vet ./...` passed, including mode boundaries
+  with real Opus, downmix, queues, FIFO, WAV repair and active outbox.
+- Python: **138 passed; 1 failed** in the full suite. The 15 streaming cases
+  passed. The pre-existing failure is
   `test_review_python.py::test_final_context_budget_includes_all_prompt_and_memory`:
-  o prompt oracle excede o orçamento de 4000 caracteres. `llm.py` e esse teste não
-  foram alterados por esta implementação.
-- Ruff nos ficheiros Python alterados, `git diff --check` e
-  `docker compose config --quiet` passaram. A validação Compose usou placeholders
-  apenas para os valores Discord obrigatórios. O lint global também identificou
-  uma ordenação de import preexistente em `src/data/__init__.py`.
+  the oracle prompt exceeds the 4000-character budget. `llm.py` and that test were not
+  changed by this implementation.
+- Ruff on the changed Python files, `git diff --check` and
+  `docker compose config --quiet` passed. The Compose validation used placeholders
+  only for the mandatory Discord values. The global lint also identified
+  a pre-existing import ordering in `src/data/__init__.py`.
 
-Por executar: chamada controlada com áudio PT-PT e Speechmatics real, primeiro com
-uma key/debug ligado e depois várias keys. O software mantém streaming desligado
-por defeito; `/streaming mode:off` é o rollback operacional.
+To be run: a controlled call with PT-PT audio and real Speechmatics, first with
+one key/debug enabled and then several keys. The software keeps streaming off
+by default; `/streaming mode:off` is the operational rollback.

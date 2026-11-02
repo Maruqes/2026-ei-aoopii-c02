@@ -49,6 +49,8 @@ def configured_model(settings: Settings) -> str:
         return settings.ollama_model
     if settings.llm_provider == "groq":
         return settings.groq_model
+    if settings.llm_provider == "opencode-go":
+        return settings.opencode_model
     return settings.openai_model
 
 

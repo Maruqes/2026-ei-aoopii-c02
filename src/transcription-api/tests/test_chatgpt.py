@@ -540,13 +540,14 @@ def test_existing_providers_are_still_available(oauth):
         ("openai", "gpt-4o-mini"),
         ("groq", "llama-3.3-70b-versatile"),
         ("ollama", "qwen3.5:2b"),
+        ("opencode-go", "deepseek-v4.1-flash"),
     ]:
         selected = replace(settings, llm_provider=name)
         assert current_model(selected) == model
         assert main.build_llm_client(selected, model).model == model
 
 
-@pytest.mark.parametrize("provider", ["openai", "groq", "ollama"])
+@pytest.mark.parametrize("provider", ["openai", "groq", "ollama", "opencode-go"])
 def test_other_providers_still_require_catalog_membership(
     panel, oauth, monkeypatch, provider
 ):

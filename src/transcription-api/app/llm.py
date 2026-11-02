@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import uuid
 from dataclasses import asdict, dataclass
 from typing import Protocol
 from urllib import error, request
@@ -441,6 +442,7 @@ class OpenAICompatibleClient(ConversationClient):
         timeout_seconds: float = 90,
         context_chars: int = 24000,
         max_output_tokens: int = 2500,
+        default_headers: dict[str, str] | None = None,
     ):
         self.api_key = api_key
         self.base_url = base_url
@@ -450,6 +452,7 @@ class OpenAICompatibleClient(ConversationClient):
         self.timeout_seconds = timeout_seconds
         self.context_chars = context_chars
         self.max_output_tokens = max_output_tokens
+        self.default_headers = dict(default_headers or {})
         self._client = None
         self._client_lock = threading.Lock()
 
@@ -513,11 +516,78 @@ class OpenAICompatibleClient(ConversationClient):
                         base_url=self.base_url,
                         timeout=self.timeout_seconds,
                         max_retries=getattr(self, "max_retries", 1),
+                        default_headers=self.default_headers or None,
                     )
         return self._client
 
 
 GroqClient = OpenAICompatibleClient
+
+
+OPENCODE_SESSION = f"discord-anthropologist-{uuid.uuid4()}"
+OPENCODE_USER_AGENT = "discord-anthropologist/1.0"
+
+
+class OpenCodeGoClient(OpenAICompatibleClient):
+    """OpenCode Go: OpenAI-compatible chat, separate catalog URL, session header."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None,
+        base_url: str,
+        models_base_url: str,
+        model: str,
+        session_id: str = "",
+        **kwargs,
+    ):
+        headers = {
+            "x-opencode-session": session_id or OPENCODE_SESSION,
+            "User-Agent": OPENCODE_USER_AGENT,
+        }
+        super().__init__(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            api_key_env="OPENCODE_API_KEY",
+            provider_name="opencode-go",
+            default_headers=headers,
+            **kwargs,
+        )
+        self.models_base_url = models_base_url.rstrip("/")
+        self._models_client_instance = None
+        self._models_client_lock = threading.Lock()
+
+    def _models_client(self):
+        # The catalog lives under a different base URL, so it cannot reuse the
+        # chat client. Build it lazily and mirror _load_client's locking.
+        if self._models_client_instance is None:
+            with self._models_client_lock:
+                if self._models_client_instance is None:
+                    from openai import OpenAI
+
+                    self._models_client_instance = OpenAI(
+                        api_key=self.api_key,
+                        base_url=self.models_base_url,
+                        timeout=self.timeout_seconds,
+                        max_retries=getattr(self, "max_retries", 1),
+                        default_headers=self.default_headers or None,
+                    )
+        return self._models_client_instance
+
+    def list_models(self) -> list[str]:
+        if not self.api_key:
+            raise RuntimeError(
+                "OPENCODE_API_KEY is required when LLM_PROVIDER=opencode-go"
+            )
+        models = self._models_client().models.list()
+        return sorted(
+            {
+                str(model.id).strip()
+                for model in models.data
+                if getattr(model, "id", None) and str(model.id).strip()
+            }
+        )
 
 
 class OllamaClient(ConversationClient):

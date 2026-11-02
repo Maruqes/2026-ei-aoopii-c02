@@ -139,6 +139,11 @@ class Settings:
     groq_api_key: str | None = None
     groq_base_url: str = "https://api.groq.com/openai/v1"
     groq_model: str = "llama-3.3-70b-versatile"
+    opencode_api_key: str | None = None
+    opencode_base_url: str = "https://opencode.ai/inference/go/openai/v1"
+    opencode_models_base_url: str = "https://opencode.ai/inference/go/v1"
+    opencode_model: str = "deepseek-v4.1-flash"
+    opencode_session_id: str = ""
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3.5:2b"
     llm_model_selection_file: Path = Path(".tmp/llm_model_selection.json")
@@ -279,6 +284,17 @@ class Settings:
             groq_api_key=env_str("GROQ_API_KEY"),
             groq_base_url=env_str("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
             groq_model=env_str("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            opencode_api_key=env_str("OPENCODE_API_KEY"),
+            opencode_base_url=env_str(
+                "OPENCODE_BASE_URL",
+                "https://opencode.ai/inference/go/openai/v1",
+            ).rstrip("/"),
+            opencode_models_base_url=env_str(
+                "OPENCODE_MODELS_BASE_URL",
+                "https://opencode.ai/inference/go/v1",
+            ).rstrip("/"),
+            opencode_model=env_str("OPENCODE_MODEL", "deepseek-v4.1-flash"),
+            opencode_session_id=env_str("OPENCODE_SESSION_ID"),
             ollama_base_url=env_str("OLLAMA_BASE_URL", "http://localhost:11434"),
             ollama_model=env_str("OLLAMA_MODEL", "qwen3.5:2b"),
             llm_model_selection_file=Path(

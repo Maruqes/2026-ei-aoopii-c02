@@ -228,6 +228,22 @@ For Groq, set `OPENAI_BASE_URL=https://api.groq.com/openai/v1` and choose a Groq
 `llama-3.3-70b-versatile`. The legacy `LLM_PROVIDER=groq` and `GROQ_*` environment variables are
 still accepted for existing local setups.
 
+For OpenCode Go, an active Go plan is required (https://opencode.ai/console). The chat API is
+OpenAI-compatible, but its model catalog uses a separate URL, so this provider has its own branch:
+
+```text
+LLM_PROVIDER=opencode-go
+OPENCODE_API_KEY=your_api_key
+OPENCODE_BASE_URL=https://opencode.ai/inference/go/openai/v1
+OPENCODE_MODELS_BASE_URL=https://opencode.ai/inference/go/v1
+OPENCODE_MODEL=deepseek-v4.1-flash
+```
+
+Every request sends `x-opencode-session` (one generated id per API process, or `OPENCODE_SESSION_ID`
+when set) and a `discord-anthropologist/1.0` User-Agent. DeepSeek models require
+Regions → Global in the OpenCode Console. `/models` reads the catalog URL, so model selection works
+like the other providers. See [OPENCODE.md](../../OPENCODE.md) for setup and troubleshooting.
+
 Use Ollama for free local testing:
 
 ```powershell
@@ -393,7 +409,7 @@ credentials are needed. Go tests require the Opus and opusfile development libra
 
 ## Realtime
 
-Configuração na API (também exposta no Compose):
+Configuration in the API (also exposed in Compose):
 
 ```dotenv
 TRANSCRIPTION_PROVIDER=speechmatics
@@ -404,159 +420,159 @@ SPEECHMATICS_REALTIME_MODEL=enhanced
 SPEECHMATICS_REALTIME_LANGUAGE=pt
 ```
 
-As keys Batch existentes são reutilizadas apenas no Python. Cada segredo distinto tem
-no máximo duas reservas, assumindo uma conta por segredo conforme a decisão do projeto.
-O limite real do fornecedor é por conta; `quota_exceeded`/close `4005` implica fallback,
-**não** descarte. Só `timelimit_exceeded`/close `4006` ou HTTP `402` confirma falta de
-créditos. Percentagens do orçamento e consultas de uso não são saldo de créditos.
+Existing Batch keys are reused only in Python. Each distinct secret has at most two
+reservations, assuming one account per secret as decided in the project.
+The provider's real limit is per account; `quota_exceeded`/close `4005` implies fallback,
+**not** discard. Only `timelimit_exceeded`/close `4006` or HTTP `402` confirms a lack of
+credits. Budget percentages and usage queries are not a credit balance.
 
-O bot envia a presença ordenada a `POST /v1/sessions/{id}/streaming`. A API reserva slots
-atomicamente no seu único event loop. `GET/POST /v1/guilds/{guild}/streaming` lê/grava o
-modo por servidor; o ambiente define apenas o default. Use uma única réplica e um único
-worker Uvicorn. Uma segunda chamada continua em gravação sem criar outro pool.
+The bot sends the ordered presence to `POST /v1/sessions/{id}/streaming`. The API reserves
+slots atomically in its single event loop. `GET/POST /v1/guilds/{guild}/streaming` reads/writes
+the per-server mode; the environment only sets the default. Use a single replica and a single
+Uvicorn worker. A second call continues recording without creating another pool.
 
-`/v1/streaming/audio` é um WebSocket interno na mesma rede privada da API existente.
-A primeira mensagem JSON contém sessão, utilizador, filename WAV, timestamp absoluto
-e token da participação. A API espera `RecognitionStarted` antes de confirmar `ready`.
-Frames binários contêm sequência uint64 little endian e PCM S16LE mono a 48 kHz.
-O Go faz downmix em int32, copia o buffer Opus e enfileira até 100 chunks por epoch;
-fila cheia aborta esse transporte e mantém o WAV para Batch. Heartbeats, limites de
-mensagem e timeouts impedem crescimento ilimitado e operações de rede no loop de captura.
+`/v1/streaming/audio` is an internal WebSocket on the same private network as the existing API.
+The first JSON message contains the session, user, WAV filename, absolute timestamp
+and participation token. The API waits for `RecognitionStarted` before confirming `ready`.
+Binary frames contain a uint64 little-endian sequence and mono PCM S16LE at 48 kHz.
+Go downmixes into int32, copies the Opus buffer and queues up to 100 chunks per epoch;
+a full queue aborts that transport and keeps the WAV for Batch. Heartbeats, message
+limits and timeouts prevent unbounded growth and network operations in the capture loop.
 
-Cada WAV é uma unidade e epoch independentes; a reserva sobrevive ao fecho por silêncio,
-rotação e novo SSRC. As fronteiras de promoção e modo fecham o WAV anterior antes de
-criar o seguinte. A API guarda finais idempotentes com `recording_id` e geração.
-Parciais estão ativos para comunicar ao bot apenas os tempos de fala ainda por
-finalizar; o texto parcial só aparece no terminal se debug estiver ligado.
-`EndOfStream` inclui a sequência final;
-o commit exige `EndOfTranscript` e correspondência entre frames enviados e WAV fechado.
+Each WAV is an independent unit and epoch; the reservation survives closing due to silence,
+rotation and a new SSRC. Promotion and mode boundaries close the previous WAV before
+creating the next one. The API stores idempotent finals with `recording_id` and generation.
+Partials are active only to tell the bot about speech timings still pending
+finalisation; partial text only appears in the terminal when debug is enabled.
+`EndOfStream` includes the final sequence;
+the commit requires `EndOfTranscript` and a match between frames sent and the closed WAV.
 
-Uma falha deixa a unidade em `fallback_pending`. A admissão Batch invalida a geração
-Realtime; o commit Batch substitui as mensagens dessa unidade e recalcula os chunks na
-mesma transação. Resumos finais e perfis aguardam unidades e jobs pendentes. `/recap`
-pode consultar finais provisórios; `/forget` pausa captura, invalida unidades, cancela
-polling remoto e elimina WAVs/sidecars antes de confirmar. Delete remoto é tentado com
-`force=True`; mesmo que falhe, resultados atrasados não podem recriar dados.
+A failure leaves the unit in `fallback_pending`. Batch admission invalidates the Realtime
+generation; the Batch commit replaces that unit's messages and recalculates the chunks in the
+same transaction. Final summaries and profiles wait for pending units and jobs. `/recap`
+can read provisional finals; `/forget` pauses capture, invalidates units, cancels remote
+polling and removes WAVs/sidecars before confirming. Remote delete is attempted with
+`force=True`; even if it fails, delayed results cannot recreate data.
 
-O outbox de segurança é escrito antes de abrir Realtime. Ao reiniciar o bot, WAVs com
-header incompleto são reparados antes do replay. Ao reiniciar a API, unidades Realtime
-ficam em fallback; o worker recupera ficheiros estáveis há pelo menos 15 segundos.
-Unidades concluídas ou descartadas não são transcritas novamente por restart ou `/retry`.
+The safety outbox is written before opening Realtime. When the bot restarts, WAVs with an
+incomplete header are repaired before replay. When the API restarts, Realtime units
+stay in fallback; the worker recovers files stable for at least 15 seconds.
+Completed or discarded units are not transcribed again by a restart or `/retry`.
 
-Todas as keys confirmadas sem créditos provocam descarte terminal em Postgres **antes**
-da limpeza. Workers interrompem polling e tentam cancelar jobs remotos; a limpeza de
-ficheiros confinada à pasta de gravações é idempotente e repetida após falha/restart.
-Um worker do bot recupera avisos de créditos pendentes, usando nonce por episódio e
-confirmação persistida para evitar repetição. Discord só deduplica nonces por alguns
-minutos; uma falha simultânea prolongada do bot e da confirmação após envio pode exigir
-reconciliação manual desse aviso. `/streaming mode:on` ou uma nova chamada reavalia as
-keys sem recuperar áudio descartado.
+All keys confirmed to be without credits cause a terminal discard in Postgres **before**
+cleanup. Workers stop polling and try to cancel remote jobs; file cleanup confined
+to the recordings folder is idempotent and repeated after a failure/restart.
+A bot worker recovers pending credit notices, using a per-episode nonce and persisted
+confirmation to avoid repetition. Discord only deduplicates nonces for a few
+minutes; a prolonged simultaneous failure of the bot and of the confirmation after sending may require
+manual reconciliation of that notice. `/streaming mode:on` or a new call re-evaluates the
+keys without recovering discarded audio.
 
-`GET /v1/speechmatics/realtime-usage` reporta todo o histórico de horas locais de PCM
-enviadas por key. `GET /v1/transcription/keys` filtra essas unidades pelo período UTC
-e apresenta modelo e custo estimado, separados do reporte Batch. Reserva em silêncio não conta como áudio; um WAV
-recuperado por Batch pode consumir ambos os produtos. Logs normais não contêm texto
-transcrito nem credenciais. Os códigos seguem a
-[referência Realtime da Speechmatics](https://docs.speechmatics.com/api-ref/realtime-transcription-websocket).
+`GET /v1/speechmatics/realtime-usage` reports the full history of local PCM hours
+sent per key. `GET /v1/transcription/keys` filters those units by the UTC period
+and shows the model and estimated cost, separate from the Batch report. A reservation in silence does not count as audio; a WAV
+recovered by Batch can consume both products. Normal logs contain neither transcribed
+text nor credentials. The codes follow the
+[Speechmatics Realtime reference](https://docs.speechmatics.com/api-ref/realtime-transcription-websocket).
 
-Verificação sem fornecedor pago nem Discord real:
+Verification without a paid provider or real Discord:
 
 ```bash
-# Definir TEST_DATABASE_URL apenas para um Postgres descartável.
+# Set TEST_DATABASE_URL only for a disposable Postgres.
 TEST_DATABASE_URL=postgresql://... PYTHONPATH=src:src/transcription-api python -m pytest -q src/transcription-api/tests
 (cd discord_bot && go test -race ./...)
 ```
 
-Os testes usam um servidor WebSocket local e Postgres isolado por schema. O primeiro
-ensaio real deve usar uma chamada controlada, uma key e debug ligado; validar PT-PT,
-vagas e flush, depois várias keys. Desligar debug no fim. O ensaio real requer áudio e
-acesso à Speechmatics e não é substituído pelos testes simulados.
+The tests use a local WebSocket server and Postgres isolated per schema. The first
+real trial should use a controlled call, one key and debug enabled; validate PT-PT,
+gaps and flush, then several keys. Turn debug off at the end. The real trial requires audio and
+access to Speechmatics and is not replaced by the simulated tests.
 
-### Memória contínua e reações
+### Continuous memory and reactions
 
-`GROUP_MEMORY_ENABLED=true` inicia um worker que verifica janelas fechadas a cada
-15 segundos. Cada janela dura `GROUP_MEMORY_BULK_MINUTES` (1–60, default 5).
-O primeiro arranque considera os últimos `GROUP_MEMORY_CONTEXT_BULKS` (1–3, default 3)
-blocos; o ponto inicial, os blocos e a origem das observações ficam em Postgres.
-O worker agrupa por receção (`messages.observed_at`), preservando `tstamp` como data
-original da fala: uma recuperação Batch tardia não perde a observação. Janelas vazias
-não chamam o LLM. Resumos/lore sobrevivem a reinícios e entram no contexto de
-`/oracle` e “Olá macaco”; termos da pergunta também procuram blocos antigos.
+`GROUP_MEMORY_ENABLED=true` starts a worker that checks closed windows every
+15 seconds. Each window lasts `GROUP_MEMORY_BULK_MINUTES` (1–60, default 5).
+The first start considers the last `GROUP_MEMORY_CONTEXT_BULKS` (1–3, default 3)
+blocks; the starting point, the blocks and the origin of the observations are stored in Postgres.
+The worker groups by receipt (`messages.observed_at`), preserving `tstamp` as the
+original speech date: a late Batch recovery does not lose the observation. Empty windows
+do not call the LLM. Summaries/lore survive restarts and enter the context of
+`/oracle` and “Olá macaco”; question terms also search older blocks.
 
-Perfis usam apenas as mensagens de cada membro, com os locks existentes e uma
-observação identificada por bloco. Falhas de geração deixam as fontes por processar;
-falhas de perfil ficam pendentes. `/forget` invalida os blocos derivados dos servidores
-afetados para os reconstruir apenas com membros restantes, mesmo após substituição
-de transcrições. Blocos recentes alimentam piadas/callbacks; intervenções antigas,
-repetidas ou sem novidade são suprimidas. O mínimo entre intervenções geradas é
+Profiles use only each member's messages, with the existing locks and one
+observation identified per block. Generation failures leave the sources unprocessed;
+profile failures stay pending. `/forget` invalidates the blocks derived from the affected
+servers so they are rebuilt only with the remaining members, even after transcripts
+are replaced. Recent blocks feed jokes/callbacks; old, repeated
+or uninteresting interventions are suppressed. The minimum between generated interventions is
 `GROUP_MEMORY_REACTION_COOLDOWN_MINUTES` (default 10).
 
-`GET /v1/guilds/{guild}/memory` inspeciona os blocos. `GET /v1/memory/reactions`
-devolve as reações recentes pendentes; o bot verifica destino/permissões e disponibilidade,
-depois faz `POST /v1/memory/reactions/{id}/claim` e publica texto, opcionalmente com
-meme GIPHY (`GIPHY_API_KEY` no bot); também permite reações só com GIF, sem voz,
-com o mesmo cooldown. O bot envia a URL do ficheiro animado, evita os últimos 20 IDs
-por servidor e tenta uma segunda página se necessário, num máximo total de 5 segundos.
-Falhas GIPHY ficam nos logs e preservam o texto; se uma reação só com GIF falhar,
-não envia mensagem vazia. O destino precisa de **Embed Links** para mostrar o GIF.
-Faz `POST .../{id}/result` com `sent`/`failed`.
-A claim é atómica; não repete envios de resultado ambíguo nem claims após um crash.
-Uma reação expira um bloco depois do seu fim. Voz reutiliza o TTS existente, espera
-silêncio Realtime e música parada e é cancelada por nova fala. Sem monitorização
-completa, reações no chat continuam disponíveis. Não existe acesso à loja/favoritos privados de GIFs.
-`GROUP_MEMORY_REACTIONS_ENABLED=false` mantém a memória sem publicar reações.
+`GET /v1/guilds/{guild}/memory` inspects the blocks. `GET /v1/memory/reactions`
+returns the pending recent reactions; the bot checks destination/permissions and availability,
+then does `POST /v1/memory/reactions/{id}/claim` and publishes text, optionally with a
+GIPHY meme (`GIPHY_API_KEY` in the bot); it also allows GIF-only reactions, without voice,
+with the same cooldown. The bot sends the animated file URL, avoids the last 20 IDs
+per server and tries a second page if needed, within a maximum total of 5 seconds.
+GIPHY failures stay in the logs and preserve the text; if a GIF-only reaction fails,
+it does not send an empty message. The destination needs **Embed Links** to show the GIF.
+It does `POST .../{id}/result` with `sent`/`failed`.
+The claim is atomic; it does not repeat ambiguous result submissions or claims after a crash.
+A reaction expires one block after its end. Voice reuses the existing TTS, waits for
+Realtime silence and stopped music and is cancelled by new speech. Without full
+monitoring, chat reactions remain available. There is no access to the private GIF store/favourites.
+`GROUP_MEMORY_REACTIONS_ENABLED=false` keeps memory without publishing reactions.
 
-### Contrato Hey Bot (pedidos explícitos)
+### Hey Bot contract (explicit requests)
 
-`GET/POST /v1/guilds/{guild}/assistant` lê/altera `enabled`, `phrase` e `channel_id`
-na tabela de settings existente. A revisão monotónica invalida configurações antigas;
-a gravação devolve sucesso apenas depois do commit. A preferência streaming permanece
-independente; uma linha criada só para o assistente herda o default streaming do ambiente.
+`GET/POST /v1/guilds/{guild}/assistant` reads/changes `enabled`, `phrase` and `channel_id`
+in the existing settings table. The monotonic revision invalidates old configurations;
+the write returns success only after the commit. The streaming preference remains
+independent; a row created only for the assistant inherits the environment's streaming default.
 
-`POST /v1/assistant/question` recebe `{"question":"Explica polimorfismo?"}` e devolve
-`question`/`answer`. O bot envia também `session_id`, `discord_id`, `username` e
-`display_name`: a API guarda a pergunta e a resposta na tabela `messages` com origem
-`assistant`, consulta os finais de voz dos últimos cinco minutos dessa chamada
-(até 500 mensagens, em ordem temporal, incluindo unidades Realtime ainda abertas)
-e inicia a atualização do perfil/lore do autor em segundo plano. As respostas geradas ficam identificadas
-como contexto do bot e não são evidência biográfica. Atualizações falhadas continuam
-pendentes para `/syncprofiles` ou a sincronização periódica; a conversa já guardada
-fica disponível na memória persistida e em `/oracle`. Os perfis continuam a agregar
-observações do membro entre servidores, como nas atualizações de voz e texto.
-Sem identidade de sessão/autor, mantém uma resposta geral sem guardar memória.
-O bot também envia `history`, uma lista de até 24 mensagens com `role` (`user` ou
-`assistant`), `content` e `interrupted` opcional para voz do bot já publicada e cortada.
-Cada fala do autor aceita até 2000 caracteres; uma resposta no histórico aceita até
-12000. Histórico exige identidade completa de chamada/autor e preserva perguntas
-anteriores ainda sem resposta entregue. O prompt identifica o autor, prioriza os
-turnos recentes, preenche o restante orçamento com contexto da chamada e sinaliza
-cobertura parcial. `LLM_CONTEXT_CHARS` limita o prompt completo, sem cortar a pergunta
-atual nem usar uma chamada adicional para sumarização. O histórico ativo é transitório.
-Usa o cliente LLM selecionado, PT-PT, 2–4 frases por defeito e timeout de geração de
-30 segundos, sem tools.
-É um endpoint interno; as permissões Discord são verificadas no bot.
+`POST /v1/assistant/question` receives `{"question":"Explica polimorfismo?"}` and returns
+`question`/`answer`. The bot also sends `session_id`, `discord_id`, `username` and
+`display_name`: the API stores the question and the answer in the `messages` table with origin
+`assistant`, queries the voice finals from the last five minutes of that call
+(up to 500 messages, in temporal order, including Realtime units still open)
+and starts updating the author's profile/lore in the background. Generated answers are identified
+as bot context and are not biographical evidence. Failed updates stay
+pending for `/syncprofiles` or the periodic sync; the conversation already stored
+becomes available in persisted memory and in `/oracle`. Profiles keep aggregating
+the member's observations across servers, as in voice and text updates.
+Without session/author identity, it keeps a general answer without storing memory.
+The bot also sends `history`, a list of up to 24 messages with `role` (`user` or
+`assistant`), `content` and optional `interrupted` for bot voice already published and cut off.
+Each author turn accepts up to 2000 characters; a response in the history accepts up to
+12000. History requires full call/author identity and preserves earlier
+questions still without a delivered answer. The prompt identifies the author, prioritises
+recent turns, fills the remaining budget with call context and signals
+partial coverage. `LLM_CONTEXT_CHARS` limits the full prompt, without cutting the current
+question or using an extra call for summarisation. The active history is transient.
+It uses the selected LLM client, PT-PT, 2–4 sentences by default and a 30-second generation
+timeout, without tools.
+It is an internal endpoint; Discord permissions are checked in the bot.
 
-O WebSocket agora devolve `ready` com `recording_id`/`generation` e eventos `final`
-apenas depois de persistir cada segmento novo. Cada final inclui `session_id`,
-`discord_id`, `recording_id`, `generation`, `identity`, `text`, `start`, `end` e `words`
-com tempos relativos ao PCM daquela unidade. Pontuação é preservada nas palavras.
-Números e datas formatados como entidades também fazem parte de `words`.
-Eventos `speech` levam só `session_id`, `discord_id`, `recording_id`, `generation`,
-`start` e `end`: são emitidos apenas para parciais não vazios do fornecedor. Indicam
-fala ainda por finalizar, sem texto nem ativação; podem interromper a resposta e
-abrir um turno quando já existe uma conversa desse autor.
-Duplicados, parciais e recuperação Batch não geram eventos de ativação. Falha de
-persistência/entrega termina o stream com `fallback`; o bot descarta o turno incompleto,
-avisa uma vez e conserva a conversa até ao timeout. A recuperação Realtime permite
-repetir; Batch não entrega fala antiga à conversa.
+The WebSocket now returns `ready` with `recording_id`/`generation` and `final` events
+only after persisting each new segment. Each final includes `session_id`,
+`discord_id`, `recording_id`, `generation`, `identity`, `text`, `start`, `end` and `words`
+with timings relative to that unit's PCM. Punctuation is preserved in the words.
+Numbers and dates formatted as entities are also part of `words`.
+`speech` events carry only `session_id`, `discord_id`, `recording_id`, `generation`,
+`start` and `end`: they are emitted only for non-empty partials from the provider. They indicate
+speech still pending finalisation, without text or activation; they can interrupt the answer and
+open a turn when a conversation with that author already exists.
+Duplicates, partials and Batch recovery do not generate activation events. A
+persistence/delivery failure ends the stream with `fallback`; the bot discards the incomplete turn,
+warns once and keeps the conversation until the timeout. Realtime recovery allows
+repeating; Batch does not deliver old speech to the conversation.
 
-No silêncio/DTX, o Go envia zeros para o Realtime e escreve os mesmos frames no WAV.
-O relógio e as fronteiras RTP descontam esse padding para evitar silêncio duplicado.
-O fecho idle continua a libertar o transporte, preservando a reserva e a possibilidade
-de abrir novo stream na próxima fala. Esses frames enviados contam no uso Realtime.
-Os logs do assistente medem até à publicação, desde o tempo áudio da frase e desde a
-última fala PCM ou palavra final da pergunta; não registam perguntas ou respostas. Uma publicação
-Discord falhada não é repetida automaticamente.
+In silence/DTX, Go sends zeros to Realtime and writes the same frames to the WAV.
+The clock and RTP boundaries discount that padding to avoid duplicated silence.
+Idle close still releases the transport, preserving the reservation and the possibility
+of opening a new stream on the next speech. Those sent frames count towards Realtime usage.
+Assistant logs measure up to publication, from the sentence's audio time and from the
+last PCM speech or final word of the question; they do not record questions or answers. A failed
+Discord publication is not repeated automatically.
 
 
 ## Deepgram and Speechmatics

@@ -39,6 +39,7 @@ from .llm import (
     LLMClient,
     OllamaClient,
     OpenAICompatibleClient,
+    OpenCodeGoClient,
     normalize_response_language,
 )
 from .model_selection import (
@@ -1019,8 +1020,19 @@ def build_llm_client(
             api_key_env="GROQ_API_KEY",
             provider_name="groq",
         )
+    if settings.llm_provider == "opencode-go":
+        return OpenCodeGoClient(
+            api_key=settings.opencode_api_key,
+            base_url=settings.opencode_base_url,
+            models_base_url=settings.opencode_models_base_url,
+            model=model,
+            session_id=settings.opencode_session_id,
+            timeout_seconds=settings.llm_timeout_seconds,
+            context_chars=settings.llm_context_chars,
+            max_output_tokens=settings.llm_max_output_tokens,
+        )
     raise RuntimeError(
-        f"Unsupported LLM_PROVIDER: {settings.llm_provider}. Use 'openai', 'groq', 'ollama', or 'chatgpt'."
+        f"Unsupported LLM_PROVIDER: {settings.llm_provider}. Use 'openai', 'groq', 'ollama', 'opencode-go', or 'chatgpt'."
     )
 
 

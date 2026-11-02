@@ -1,134 +1,134 @@
-# Speechmatics: consumo e créditos
+# Speechmatics: usage and credits
 
-Investigação em 2026-10-03. Foram feitas apenas consultas GET à Speechmatics;
-não foi enviado áudio, criado nenhum job nem alterada a configuração. A chave
-fornecida não está incluída neste documento.
+Investigation on 2026-10-03. Only GET queries were made to Speechmatics;
+no audio was sent, no job was created and the configuration was not changed. The key
+provided is not included in this document.
 
-## Resultado
+## Result
 
-- A Usage API pública documentada reporta **Batch**, não Realtime nem saldo.
-- O portal mostra Realtime e Batch em Usage, e créditos em Billing.
-- Não foi encontrado um endpoint público documentado para consultar créditos.
-  Isto não prova que não exista uma API privada ou contratual.
-- Na investigação adicional foi encontrada a rota interna do portal
-  `GET https://portal.speechmatics.com/api/credits`. O cliente lê `data.credits`.
-  A rota devolveu HTTP 302 para `/login`, tanto sem autenticação como com a chave
-  de transcrição em `Authorization: Bearer`. Falta uma sessão autenticada do
-  portal para validar o saldo devolvido.
-- A Management API documentada gere projetos e chaves, com um management token;
-  não documenta operações de saldo ou billing.
-- Há uma diferença importante entre a documentação e o comportamento observado:
-  `until` explícito com a data de hoje devolveu jobs de hoje em EU1.
+- The documented public Usage API reports **Batch**, not Realtime or balance.
+- The portal shows Realtime and Batch under Usage, and credits under Billing.
+- No documented public endpoint was found for querying credits.
+  This does not prove that a private or contractual API does not exist.
+- In the additional investigation, the internal portal route
+  `GET https://portal.speechmatics.com/api/credits` was found. The client reads `data.credits`.
+  The route returned HTTP 302 to `/login`, both without authentication and with the
+  transcription key in `Authorization: Bearer`. An authenticated portal session is
+  missing to validate the returned balance.
+- The documented Management API manages projects and keys, with a management token;
+  it does not document balance or billing operations.
+- There is an important difference between the documentation and the observed behaviour:
+  an explicit `until` with today's date returned jobs from today in EU1.
 
-## Consultas reais com a chave fornecida
+## Real queries with the provided key
 
-| Endpoint/período | HTTP | Resultado Batch |
+| Endpoint/period | HTTP | Batch result |
 | --- | --- | --- |
-| EU1 `/v2/usage`, sem datas | 200 | 107 jobs; 37.328484 h; 2026-06-19 a 2026-10-02 |
+| EU1 `/v2/usage`, without dates | 200 | 107 jobs; 37.328484 h; 2026-06-19 to 2026-10-02 |
 | EU1 `since=2026-10-01&until=2026-10-02` | 200 | `summary=null`, `details=null` |
 | EU1 `since=2026-10-01&until=2026-10-03` | 200 | 4 jobs; 0.08828889 h |
-| EU1 `since=2026-10-03&until=2026-10-03` | 200 | Os mesmos 4 jobs; 0.08828889 h |
+| EU1 `since=2026-10-03&until=2026-10-03` | 200 | The same 4 jobs; 0.08828889 h |
 | EU1 `since=2026-10-02&until=2026-10-02` | 200 | `summary=null`, `details=null` |
-| EU1 `since=2026-10-02&until=2026-10-03` | 200 | Os mesmos 4 jobs; 0.08828889 h |
-| EU2 `/v2/usage`, sem datas | 401 | Sem acesso com esta chave |
-| US1 `/v2/usage`, sem datas | 200 | `summary=null`, `details=null`; início 1970-01-01 |
+| EU1 `since=2026-10-02&until=2026-10-03` | 200 | The same 4 jobs; 0.08828889 h |
+| EU2 `/v2/usage`, without dates | 401 | No access with this key |
+| US1 `/v2/usage`, without dates | 200 | `summary=null`, `details=null`; start 1970-01-01 |
 
-EU1 é `https://eu1.asr.api.speechmatics.com`. Os 107 jobs representam cerca de
-37h 19m 43s; os 4 de hoje, cerca de 5m 18s, todos Melia 1. O histórico em EU1
-inclui 106 jobs Melia 1 e 1 Enhanced. As respostas de usage não continham campos
-de preço, saldo ou créditos, nem headers de crédito/saldo/quota/usage.
+EU1 is `https://eu1.asr.api.speechmatics.com`. The 107 jobs represent about
+37h 19m 43s; today's 4, about 5m 18s, all Melia 1. The history in EU1
+includes 106 Melia 1 jobs and 1 Enhanced. The usage responses did not contain
+price, balance or credit fields, nor credit/balance/quota/usage headers.
 
-O resultado vazio em US1 demonstra que mudar de endpoint pode mudar o consumo
-visível; não deve ser apresentado como saldo livre da conta. O endpoint do portal
-redirecionou para login; o saldo autenticado não foi observado.
+The empty result in US1 demonstrates that changing endpoint can change the
+visible consumption; it must not be presented as the account's free balance. The portal
+endpoint redirected to login; the authenticated balance was not observed.
 
-A documentação diz que o dia atual é excluído. Os testes acima demonstram que
-EU1 aceita e retorna dados desse dia quando `until` é explícito. Não foi medida
-a latência de atualização e não se pode garantir este comportamento noutras
-regiões ou contas.
+The documentation says that the current day is excluded. The tests above demonstrate that
+EU1 accepts and returns data from that day when `until` is explicit. The update latency
+was not measured and this behaviour cannot be guaranteed in other
+regions or accounts.
 
-## Causa da apresentação fraca no projeto
+## Cause of the weak presentation in the project
 
-1. `app/speechmatics_usage.py:fetch_speechmatics_usage` força `until=ontem`.
-   `app/main.py:get_speechmatics_key_usages` acrescenta apenas WAVs Batch locais
-   concluídos hoje. O `/keys` recebe e mostra apenas esse consumo Batch.
-2. Existe `/v1/speechmatics/realtime-usage`, mas o `/keys` não o utiliza.
-3. `app/realtime.py:bridge` só persiste `realtime_seconds` ao terminar/falhar uma
-   unidade, através de `DataRepository.finish_realtime_unit`. Uma unidade ativa
-   não atualiza o contador persistido; um crash pode perder esse intervalo.
-4. `DataRepository.local_realtime_hours` agrega todo o histórico, sem filtro por
-   período; o Batch usa o mês UTC atual por omissão. Os valores não são comparáveis
-   sem alinhar as datas.
-5. O contador de frames aumenta antes de `upstream.send` terminar. Para estimar
-   consumo, é preferível contar envios concluídos, reconhecendo que enviar áudio
-   não prova faturação pelo fornecedor.
+1. `app/speechmatics_usage.py:fetch_speechmatics_usage` forces `until=yesterday`.
+   `app/main.py:get_speechmatics_key_usages` adds only local Batch WAVs
+   completed today. `/keys` receives and shows only that Batch consumption.
+2. There is `/v1/speechmatics/realtime-usage`, but `/keys` does not use it.
+3. `app/realtime.py:bridge` only persists `realtime_seconds` when finishing/failing a
+   unit, through `DataRepository.finish_realtime_unit`. An active unit
+   does not update the persisted counter; a crash can lose that interval.
+4. `DataRepository.local_realtime_hours` aggregates the whole history, with no filter by
+   period; Batch uses the current UTC month by default. The values are not comparable
+   without aligning the dates.
+5. The frame counter increases before `upstream.send` finishes. To estimate
+   consumption, it is preferable to count completed sends, recognizing that sending audio
+   does not prove billing by the provider.
 
-## Alteração mínima proposta
+## Proposed minimal change
 
-- Mostrar Batch e Realtime separadamente no `/keys`, com segundos e período.
-- Para Batch, permitir consulta explícita até hoje e identificar os dados de hoje
-  como provisórios. Não somar WAVs locais de hoje ao mesmo total: isso duplicaria
-  jobs já reportados. Se for necessário complementar atrasos, usar uma estimativa
-  separada, sem a apresentar como total reconciliado.
-- Para Realtime, guardar periodicamente o total cumulativo de áudio enviado,
-  por unidade/key, e fazer um último flush no fecho. Reutilizar `realtime_seconds`,
-  sem tabela nova. A atualização e o fecho devem preservar o maior valor observado
-  para evitar que um checkpoint atrasado faça o contador recuar.
-- Filtrar Realtime pelo período apresentado, distinguindo consumo local de
-  reporte oficial. Uma gravação que vai de Realtime para fallback Batch pode
-  consumir os dois produtos; não eliminar uma das parcelas como duplicado.
-- Mostrar créditos como **indisponíveis pela API pública consultada**, com link
-  para Billing. Não converter um orçamento de horas em saldo de créditos.
-- Se for preciso uma estimativa monetária, usar saldo inicial confirmado no
-  portal e tarifas/descontos da conta. A fórmula é saldo inicial menos consumo
-  desde a data dessa leitura, com tarifa própria por produto/modelo. Uso de outras
-  aplicações, grants, expiracões e alterações de preço impedem um saldo exato só
-  com os contadores locais.
-- Várias chaves do mesmo workspace podem partilhar o saldo; não somar saldos ou
-  atribuir um grant independente a cada chave.
+- Show Batch and Realtime separately in `/keys`, with seconds and period.
+- For Batch, allow an explicit query up to today and identify today's data
+  as provisional. Do not add local WAVs from today to the same total: that would duplicate
+  jobs already reported. If delays need to be supplemented, use a separate
+  estimate, without presenting it as a reconciled total.
+- For Realtime, periodically store the cumulative total of audio sent,
+  per unit/key, and do a final flush on closing. Reuse `realtime_seconds`,
+  without a new table. The update and the closing must preserve the highest observed value
+  to prevent a delayed checkpoint from making the counter go backwards.
+- Filter Realtime by the displayed period, distinguishing local consumption from
+  official reporting. A recording that goes from Realtime to Batch fallback can
+  consume both products; do not eliminate one of the portions as a duplicate.
+- Show credits as **unavailable through the public API consulted**, with a link
+  to Billing. Do not convert an hours budget into a credit balance.
+- If a monetary estimate is needed, use the initial balance confirmed in the
+  portal and the account's rates/discounts. The formula is initial balance minus consumption
+  since the date of that reading, with a separate rate per product/model. Use by other
+  applications, grants, expirations and price changes prevent an exact balance from
+  local counters alone.
+- Several keys of the same workspace may share the balance; do not add balances or
+  assign an independent grant to each key.
 
-## Fontes oficiais
+## Official sources
 
-- [Usage: API apenas Batch; portal Realtime e Batch](https://docs.speechmatics.com/administration/usage)
-- [Usage reporting: datas UTC e omissão de `until`](https://docs.speechmatics.com/speech-to-text/batch/usage)
-- [Referência GET /usage](https://docs.speechmatics.com/api-ref/batch/get-usage-statistics)
-- [Billing: créditos, PAYG e necessidade de papel Admin](https://docs.speechmatics.com/administration/billing)
-- [Management API: projetos e API keys](https://docs.speechmatics.com/api-ref/management/management-api)
-- [Management tokens: permissões disponíveis](https://docs.speechmatics.com/administration/management-tokens)
-- [Projects: chaves por projeto e billing partilhado](https://docs.speechmatics.com/administration/projects)
-- [Autenticação e endpoints regionais](https://docs.speechmatics.com/get-started/authentication)
+- [Usage: API only Batch; portal Realtime and Batch](https://docs.speechmatics.com/administration/usage)
+- [Usage reporting: UTC dates and omission of `until`](https://docs.speechmatics.com/speech-to-text/batch/usage)
+- [GET /usage reference](https://docs.speechmatics.com/api-ref/batch/get-usage-statistics)
+- [Billing: credits, PAYG and the need for the Admin role](https://docs.speechmatics.com/administration/billing)
+- [Management API: projects and API keys](https://docs.speechmatics.com/api-ref/management/management-api)
+- [Management tokens: available permissions](https://docs.speechmatics.com/administration/management-tokens)
+- [Projects: keys per project and shared billing](https://docs.speechmatics.com/administration/projects)
+- [Authentication and regional endpoints](https://docs.speechmatics.com/get-started/authentication)
 
-A Billing documentada usa 1 crédito = 1 USD. O grant documentado para contas
-anteriores a 2026-08-01 é de 25 USD, e para novos registos de 100 USD. Estes valores
-não permitem inferir o saldo desta conta; não foi consultado o seu Billing.
+The documented Billing uses 1 credit = 1 USD. The documented grant for accounts
+prior to 2026-08-01 is 25 USD, and for new registrations 100 USD. These values
+do not allow inferring the balance of this account; its Billing was not consulted.
 
-## API interna do portal: descoberta adicional
+## Internal portal API: additional discovery
 
-Os assets públicos do portal confirmam uma via para consultar créditos:
+The portal's public assets confirm a way to query credits:
 
-- [Manifest de rotas observado](https://portal.speechmatics.com/assets/manifest-3686e8af.js)
-  declara `routes/_authenticated.api.credits`, com path `api/credits` e loader
-  no servidor. A página Billing tem path `/settings/workspace/billing`.
-- [Hook useCredits observado](https://portal.speechmatics.com/assets/useCredits-B4mjfwb_.js)
-  chama `/api/credits` com o fetcher do React Router e lê `data.credits`.
-  O valor inicial vem de `metronomeCredits` no loader da rota autenticada.
-  Isto identifica o nome dos campos usados pelo cliente, não a unidade/tipo
-  exatos da resposta, que ainda não foi obtida autenticada.
-- O hook atualiza o saldo ao recuperar foco/visibilidade e, após um evento de
-  refresh, aos 5, 30, 60 e 120 segundos. Não é um contador instantâneo de streaming.
-- Os módulos públicos do Billing mostram `credits available`, pagamentos e
-  subscriptions. Os loaders do servidor não estão presentes nesses módulos,
-  pelo que não foi possível identificar a chamada upstream de billing.
-- Teste GET `/api/credits` com `Accept: application/json`, sem credencial: 302
-  para `/login`, corpo vazio.
-- O mesmo GET com a chave fornecida em `Authorization: Bearer`: exatamente
-  o mesmo 302. Nesta rota, a chave API de transcrição não substitui o login.
-- O navegador disponível também mostrou a página de login. Foi aberta para
-  autenticação pelo utilizador; não se obteve nem exportou nenhuma sessão.
+- [Observed route manifest](https://portal.speechmatics.com/assets/manifest-3686e8af.js)
+  declares `routes/_authenticated.api.credits`, with path `api/credits` and a loader
+  on the server. The Billing page has path `/settings/workspace/billing`.
+- [Observed useCredits hook](https://portal.speechmatics.com/assets/useCredits-B4mjfwb_.js)
+  calls `/api/credits` with the React Router fetcher and reads `data.credits`.
+  The initial value comes from `metronomeCredits` in the authenticated route's loader.
+  This identifies the name of the fields used by the client, not the exact
+  unit/type of the response, which has not yet been obtained authenticated.
+- The hook refreshes the balance on regaining focus/visibility and, after a refresh
+  event, at 5, 30, 60 and 120 seconds. It is not an instantaneous streaming counter.
+- The Billing public modules show `credits available`, payments and
+  subscriptions. The server loaders are not present in these modules,
+  so it was not possible to identify the upstream billing call.
+- GET `/api/credits` test with `Accept: application/json`, without credentials: 302
+  to `/login`, empty body.
+- The same GET with the provided key in `Authorization: Bearer`: exactly
+  the same 302. On this route, the transcription API key does not replace the login.
+- The available browser also showed the login page. It was opened for
+  authentication by the user; no session was obtained or exported.
 
-Próximo passo concreto: depois do login, abrir `/api/credits` no mesmo navegador
-e verificar a resposta visível, o saldo, a unidade e o workspace. Se a sessão
-autorizar essa consulta, há uma via interna para ler o saldo. A integração num
-serviço precisaria de autenticação de sessão suportada e renovação; a descoberta
-não demonstra uma API estável com API key ou management token. Não guardar
-cookies de sessão no Git nem pedir credenciais/cookies pelo chat.
+Concrete next step: after logging in, open `/api/credits` in the same browser
+and check the visible response, the balance, the unit and the workspace. If the session
+authorizes that query, there is an internal way to read the balance. The integration into a
+service would need supported session authentication and renewal; the discovery
+does not demonstrate a stable API with an API key or management token. Do not store session
+cookies in Git nor ask for credentials/cookies through the chat.

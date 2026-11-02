@@ -3,9 +3,9 @@
 - 31415 Gonçalo Marques
 - 31394 Ricardo Fernandes
 
-## Mapa do projeto
+## Project map
 
-Consultar o [contexto do projeto](docs/CONTEXTO.md) e o [índice de funcionalidades](docs/features/README.md) para encontrar cada feature pelo nome, ID e ficheiros onde está implementada.
+See the [project context](docs/CONTEXT.md) and the [feature index](docs/features/README.md) to find each feature by name, ID and the files where it is implemented.
 
 ## Run
 
@@ -18,6 +18,10 @@ To use a ChatGPT account for commands, summaries and profiles, set
 Run `make codex` to open the official ChatGPT login in your browser. Discord
 `/models` lists, tests and selects models available to that account; `/effort`
 changes reasoning effort. Speech-to-text keeps its own provider.
+
+Alternatively, set `LLM_PROVIDER=opencode-go` and `OPENCODE_API_KEY` to use an OpenCode Go plan.
+`/models` reads its catalog and the other AI paths work unchanged; no ChatGPT login is needed.
+See [OpenCode Go setup](OPENCODE.md).
 
 The bot records voice in short per-member slices, stores text/voice observations in
 Postgres, builds funny but grounded recaps, and maintains living member profiles.
@@ -55,183 +59,183 @@ account usage. See configuration, recovery details and test commands in the
 - `docker-compose.yml`: local Postgres, transcription API and Discord bot.
 - `BrunoAPI/`: local API request examples.
 
-## Triggers por palavras na call
+## Word triggers in the call
 
-Em `discord_bot/main.go`, registar os triggers no arranque:
+In `discord_bot/main.go`, register the triggers on startup:
 
 ```go
 triggerSaidKeyworkd(sayPijama, "pijama")
 triggerSaidKeyworkd(funcDarAudio, "bot", "audio")
-// Também aceita uma lista: triggerSaidKeyworkd(funcDarAudio, []string{"bot", "audio"}...)
+// Also accepts a list: triggerSaidKeyworkd(funcDarAudio, []string{"bot", "audio"}...)
 ```
 
-A função recebe `SaidKeywordContext` e devolve `error`; o contexto inclui a sessão
-Discord, servidor, canal de texto, autor e texto reconhecido. Todas as palavras têm
-de aparecer na mesma gravação do mesmo autor, em qualquer ordem. Ignora maiúsculas
-e pontuação, compara palavras inteiras e executa cada trigger uma vez por gravação.
-Um erro da função permite nova tentativa na próxima consulta.
+The function receives `SaidKeywordContext` and returns `error`; the context includes the
+Discord session, server, text channel, author and recognised text. All words must
+appear in the same recording by the same author, in any order. It ignores case
+and punctuation, compares whole words and runs each trigger once per recording.
+A function error allows another attempt on the next poll.
 
-O exemplo “pijama” já está registado: envia `pijama` para o canal de sistema do
-servidor, ou o primeiro canal de texto onde o bot possa escrever. As transcrições
-são consultadas a cada segundo: Realtime reage ao texto confirmado; Batch reage
-quando a transcrição da gravação fica disponível. Não precisa de LLM nem de
-dependências adicionais. Os registos e a deduplicação ficam em memória.
+The "pijama" example is already registered: it sends `pijama` to the server's system
+channel, or the first text channel where the bot can write. Transcriptions
+are polled every second: Realtime reacts to confirmed text; Batch reacts
+when the recording transcription becomes available. It needs no LLM or extra
+dependencies. Registrations and deduplication are kept in memory.
 
-## Transcrição Realtime (opcional)
+## Real-time transcription (optional)
 
-Com `TRANSCRIPTION_PROVIDER=speechmatics` e keys configuradas, `/streaming mode:on`
-ativa Realtime na chamada atual e guarda a preferência do servidor em Postgres.
-`/streaming mode:off` volta a gravações Batch; `mode:status` mostra modo, vagas e fila.
-O comando exige **Gerir Servidor** e responde de forma efémera. O valor inicial
-`TRANSCRIPTION_STREAMING_ENABLED=false` aplica-se apenas a servidores sem preferência.
+With `TRANSCRIPTION_PROVIDER=speechmatics` and configured keys, `/streaming mode:on`
+enables Realtime in the current call and saves the server preference in Postgres.
+`/streaming mode:off` returns to Batch recordings; `mode:status` shows mode, slots and queue.
+The command requires **Manage Server** and replies ephemerally. The initial value
+`TRANSCRIPTION_STREAMING_ENABLED=false` applies only to servers without a preference.
 
-Cada segredo de key distinto dá duas reservas; utilizadores humanos são admitidos por
-ordem de entrada e mantêm a reserva em silêncio. O excedente usa Batch até à promoção.
-Realtime usa `enhanced/pt`, independentemente dos defaults Batch `melia-1/multi`.
-O WAV temporário permanece até à confirmação durável; falhas recuperáveis usam Batch,
-substituindo apenas o texto provisório daquele WAV. Créditos esgotados em todas as keys
-suspendem a transcrição da chamada, eliminam áudio pendente e preservam texto confirmado.
+Each distinct key secret grants two reservations; human users are admitted
+first-come-first-served and keep the reservation while silent. The surplus uses Batch until promotion.
+Realtime uses `enhanced/pt`, regardless of the Batch defaults `melia-1/multi`.
+The temporary WAV remains until durable confirmation; recoverable failures use Batch,
+replacing only that WAV's provisional text. Credits exhausted across all keys
+suspend call transcription, delete pending audio and preserve confirmed text.
 
-Executar **um único processo da API** para este pool de reservas. Streaming vem desligado
-por defeito; não é necessário mudar o comportamento de autojoin. Para detalhes de operação,
-recuperação, debug e testes, consultar [a documentação da API](src/transcription-api/README.md#realtime).
+Run **a single API process** for this reservation pool. Streaming is off
+by default; there is no need to change autojoin behaviour. For operating details,
+recovery, debug and tests, see [the API documentation](src/transcription-api/README.md#realtime).
 
-## Assistente por voz: perguntas e respostas no chat
+## Voice assistant: questions and answers in the chat
 
-Com Realtime ativo (`/streaming mode:on`), o assistente fica disponível por defeito
-para humanos com reserva na chamada. Diz «Olá macaco» para ouvir «Diz» e receber
-a confirmação no chat. Faz a pergunta e continua a conversar sem repetir a ativação;
-também aceita «Olá macaco, explica polimorfismo…». «Adeus macaco» ou «obrigado,
-adeus macaco» termina com uma despedida curta. O assistente responde em PT-PT,
-com 2–4 frases por defeito e mais detalhe a pedido, usando os últimos cinco minutos
-da chamada atual e até 12 trocas recentes do diálogo. Cada conversa fica guardada e atualiza o perfil e
-a lore de quem falou em segundo plano, sem esperar pelo fim da chamada. As respostas
-do bot são contexto identificado, nunca factos sobre a pessoa. Não executa comandos.
+With Realtime active (`/streaming mode:on`), the assistant is available by default
+to humans with a reservation in the call. Say "Olá macaco" to hear "Diz" and receive
+the confirmation in the chat. Ask the question and keep the conversation going without repeating activation;
+it also accepts "Olá macaco, explica polimorfismo…". "Adeus macaco" or "obrigado,
+adeus macaco" ends with a short goodbye. The assistant replies in PT-PT,
+with 2–4 sentences by default and more detail on request, using the last five minutes
+of the current call and up to 12 recent dialogue turns. Each conversation is saved and updates the profile and
+lore of the speaker in the background, without waiting for the call to end. The bot's
+replies are identified context, never facts about the person. It does not run commands.
 
-- `/assistant status`: estado, frase, destino e participantes com/sem Realtime.
-- `/assistant phrase value:"Olá macaco"`: frase com 2–5 palavras, até 50 caracteres.
-- `/assistant channel value:#bot`: destino das confirmações e respostas.
-- `/assistant enable` e `/assistant disable`: ligar/desligar por servidor.
+- `/assistant status`: state, phrase, destination and participants with/without Realtime.
+- `/assistant phrase value:"Olá macaco"`: phrase with 2–5 words, up to 50 characters.
+- `/assistant channel value:#bot`: destination for confirmations and replies.
+- `/assistant enable` and `/assistant disable`: turn on/off per server.
 
-A frase é procurada no início, meio ou fim do enunciado, ignorando maiúsculas,
-acentos e pontuação. Aceita um pequeno erro de reconhecimento, até duas palavras
-intercaladas e palavras juntas/separadas: «olha macaco», «olá meu macaco» e
-«olamacaco» também ativam. A pergunta antes e depois da ativação é preservada,
-mesmo dividida entre finais; uma pausa superior ao tempo de silêncio configurado
-separa enunciados.
-`/assistant phrase value:"outra frase"` altera a frase usada pelo servidor.
+The phrase is searched at the start, middle or end of the utterance, ignoring case,
+accents and punctuation. It accepts a small recognition error, up to two
+interleaved words and joined/separated words: "olha macaco", "olá meu macaco" and
+"olamacaco" also activate. The question before and after activation is preserved,
+even when split across finals; a pause longer than the configured silence time
+separates utterances.
+`/assistant phrase value:"outra frase"` changes the phrase used by the server.
 
-A memória também acompanha a conversa sem a frase de ativação: a cada bloco fechado
-de `GROUP_MEMORY_BULK_MINUTES` (5 por defeito), guarda temas, decisões e lore, e atualiza
-os perfis dos participantes. `GROUP_MEMORY_CONTEXT_BULKS=3` dá às reações os últimos
-3 blocos (aceita 1–3); o histórico guardado continua pesquisável em `/oracle`.
-O bot pode comentar ou fazer uma piada por texto e, numa pausa da chamada, por voz.
-Espera pelo assistente, pela música e pela fala; uma nova fala cancela a voz espontânea.
-Sem cobertura Realtime completa, publica no chat, sem voz. Não obriga a fazer uma piada
-por bloco e respeita `GROUP_MEMORY_REACTION_COOLDOWN_MINUTES=10`.
+Memory also follows the conversation without the activation phrase: on each closed bulk
+of `GROUP_MEMORY_BULK_MINUTES` (5 by default), it stores topics, decisions and lore, and updates
+participants' profiles. `GROUP_MEMORY_CONTEXT_BULKS=3` gives reactions the last
+3 bulks (accepts 1–3); the stored history remains searchable in `/oracle`.
+The bot can comment or make a joke in text and, during a call pause, in voice.
+It waits for the assistant, music and speech; new speech cancels the spontaneous voice.
+Without full Realtime coverage, it posts in the chat, without voice. It is not required to make a joke
+per bulk and respects `GROUP_MEMORY_REACTION_COOLDOWN_MINUTES=10`.
 
-GIFs usam ações, cenas e analogias visuais ligadas à conversa, apenas quando a piada
-surge naturalmente. Pode publicar texto com GIF ou apenas GIF, sem voz nesse último caso.
-A pesquisa GIPHY com `GIPHY_API_KEY` usa termos curtos em inglês, escolhe entre os
-melhores resultados novos e evita os últimos 20 IDs por servidor enquanto o bot está
-ligado. Se a primeira página estiver esgotada, tenta uma segunda dentro do mesmo
-limite de 5 segundos. Publica o ficheiro `.gif` animado, com preferência por uma versão
-compacta, em vez da página GIPHY; o canal precisa da permissão **Embed Links** para
-mostrar a animação. Falhas da pesquisa preservam o texto; uma reação só com GIF que
-falhe fica marcada como `failed`, sem enviar mensagens vazias. Os logs distinguem
-ausência de pesquisa/chave, erros GIPHY e resultados esgotados. A integração não acede
-aos favoritos ou ao seletor privado de GIFs do Discord; sem chave, continua com
-texto/voz. `ASSISTANT_VOICE_ENABLED=false`
-desliga voz. `GROUP_MEMORY_REACTIONS_ENABLED=false` desliga as intervenções mantendo
-memória e perfis; `/assistant disable` silencia as reações desse servidor.
+GIFs use actions, scenes and visual analogies linked to the conversation, only when the joke
+arises naturally. It can post text with a GIF or just a GIF, without voice in the latter case.
+The GIPHY search with `GIPHY_API_KEY` uses short English terms, chooses among the
+best new results and avoids the last 20 IDs per server while the bot is
+running. If the first page is exhausted, it tries a second within the same
+5-second limit. It posts the animated `.gif` file, preferring a compact version,
+instead of the GIPHY page; the channel needs the **Embed Links** permission to
+show the animation. Search failures preserve the text; a GIF-only reaction that
+fails is marked `failed`, without sending empty messages. Logs distinguish
+missing search/key, GIPHY errors and exhausted results. The integration does not access
+Discord favourites or the private GIF picker; without a key, it continues with
+text/voice. `ASSISTANT_VOICE_ENABLED=false`
+turns off voice. `GROUP_MEMORY_REACTIONS_ENABLED=false` turns off interventions while keeping
+memory and profiles; `/assistant disable` silences that server's reactions.
 
-Alterações exigem **Gerir Servidor**, são persistidas e cancelam pedidos pendentes.
-O destino inicial é o canal de resumo da chamada; sem acesso a um destino válido,
-o assistente não inicia pedidos. Só o autor da ativação fornece a pergunta. Há uma
-conversa de cada vez; outras ativações recebem um aviso de ocupado, sem fila.
-Toda a fala do autor durante a conversa é dirigida ao bot; as outras vozes servem
-como contexto. Nova fala reconhecida do autor interrompe geração ou voz, preserva
-uma pergunta ainda sem resposta entregue e inicia o próximo turno. Se a resposta
-já estava no chat, o histórico identifica a voz interrompida. «Cancela» como enunciado
-isolado encerra a conversa; sair da chamada também cancela imediatamente.
+Changes require **Manage Server**, are persisted and cancel pending requests.
+The initial destination is the call's summary channel; without access to a valid destination,
+the assistant does not start requests. Only the activating author supplies the question. There is one
+conversation at a time; other activations receive a busy notice, without a queue.
+All of the author's speech during the conversation is addressed to the bot; other voices serve
+as context. New recognised speech from the author interrupts generation or voice, preserves
+a question still without a delivered answer and starts the next turn. If the answer
+was already in the chat, the history identifies the interrupted voice. "Cancela" as an isolated
+utterance ends the conversation; leaving the call also cancels immediately.
 
-A pergunta junta os segmentos do mesmo autor e termina após um período contínuo
-sem som desse autor. Define `ASSISTANT_SILENCE_SECONDS=5` no `.env` para esperar
-5 segundos (default; aceita 0,5–20 segundos, com ponto nos valores decimais).
-Voltar a falar reinicia o contador; outras vozes e finais atrasados não o reiniciam.
-O contador usa o áudio recebido e os tempos de fala reconhecida, para incluir fala
-baixa. Depois do silêncio, ainda aguarda os finais correspondentes ao áudio.
-Só texto final
-entra no pedido à IA; números, datas e pontuação são preservados.
-`ASSISTANT_INACTIVITY_SECONDS=30` dá 30 segundos disponíveis para responder e encerra
-silenciosamente a conversa se não houver fala. Geração e voz suspendem esse relógio;
-o fim de uma resposta ou aviso recuperável abre uma janela nova.
-`ASSISTANT_CAPTURE_SECONDS=60` limita cada turno a 60 segundos; ambos os valores
-aceitam 5–300 segundos. O limite de 2000 caracteres também se mantém: não se envia
-uma pergunta cortada. O LLM conserva o prazo independente de 30 segundos.
-Finais em falta, falhas de streaming ou do LLM produzem um aviso curto e mantêm a
-conversa para repetir sem ativação. Batch continua a servir as gravações, mas nunca
-ativa nem alimenta turnos do assistente.
-Tempos sobrepostos nos finais não cancelam a captura; palavras já recebidas e
-marcadores vazios não repetem a pergunta. Tempos inválidos continuam a ser rejeitados.
-Os limites encerram apenas o turno: a mesma pessoa pode continuar a conversa.
-Uma mudança normal de gravação/SSRC mantém a pergunta e aguarda os finais da gravação
-anterior, ordenados pelos tempos de áudio. Silêncio ou finais vazios após a ativação
-não antecipam o prazo para começar a pergunta. O Speechmatics usa finais com
-`max_delay=2` e modo flexível, preservando a formatação de números e datas.
-A voz é sintetizada por segmentos; a confirmação e a resposta no chat são publicadas
-quando o primeiro áudio está pronto para tocar. Se a síntese falhar, mantém a
-resposta por texto. Uma pergunta já incluída na ativação dispensa o «Diz» por voz.
-A confirmação só ocorre na abertura; o histórico ativo fica em memória e é limpo após encerramento
-ou reinício. O prompt completo respeita `LLM_CONTEXT_CHARS`: prioriza o diálogo
-recente e identifica cobertura parcial quando falta espaço, sem resumir cada turno
-através de outra chamada ao LLM.
+The question joins segments by the same author and ends after a continuous period
+without sound from that author. Set `ASSISTANT_SILENCE_SECONDS=5` in `.env` to wait
+5 seconds (default; accepts 0.5–20 seconds, with a period in decimal values).
+Speaking again restarts the counter; other voices and delayed finals do not restart it.
+The counter uses received audio and recognised speech times, to include quiet
+speech. After silence, it still waits for finals corresponding to the audio.
+Only final text
+enters the AI request; numbers, dates and punctuation are preserved.
+`ASSISTANT_INACTIVITY_SECONDS=30` gives 30 available seconds to answer and closes
+the conversation silently if there is no speech. Generation and voice suspend that clock;
+the end of a reply or a recoverable warning opens a new window.
+`ASSISTANT_CAPTURE_SECONDS=60` limits each turn to 60 seconds; both values
+accept 5–300 seconds. The 2000-character limit also remains: a truncated
+question is never sent. The LLM keeps the independent 30-second deadline.
+Missing finals, streaming failures or LLM failures produce a short warning and keep the
+conversation so you can repeat without activation. Batch still serves recordings, but never
+activates or feeds assistant turns.
+Overlapping times in finals do not cancel capture; already received words and
+empty markers do not repeat the question. Invalid times continue to be rejected.
+Limits close only the turn: the same person can continue the conversation.
+A normal recording/SSRC change keeps the question and waits for the previous recording's
+finals, ordered by audio times. Silence or empty finals after activation
+do not bring forward the deadline to start the question. Speechmatics uses finals with
+`max_delay=2` and flexible mode, preserving number and date formatting.
+Voice is synthesised in segments; the confirmation and the chat reply are posted
+when the first audio is ready to play. If synthesis fails, it keeps the
+reply in text. A question already included in the activation skips the spoken "Diz".
+The confirmation only happens at the opening; the active history is kept in memory and cleared after closing
+or restart. The full prompt respects `LLM_CONTEXT_CHARS`: it prioritises the recent
+dialogue and identifies partial coverage when space is missing, without summarising each turn
+through another LLM call.
 
-O limite de reservas Realtime existente mantém-se. `/assistant status` e avisos de
-cobertura identificam quem está sem reserva Realtime. Os avisos aguardam a primeira
-sincronização e 15 segundos de estado estável, com no máximo um aviso por minuto.
-Não se garante
-cobertura para todos sem confirmar a capacidade da conta. Silêncio enviado para
-fechar enunciados também consome minutos Realtime; consulta `/keys` e os logs
-`assistant activation`, `assistant turn closed`, `assistant delivery` e
-`assistant response` para medir abertura, fecho, primeira entrega e fim; `/keys`
-mostra consumo. `voice_ready=true` identifica entrega no início da voz.
+The existing Realtime reservation limit remains. `/assistant status` and coverage
+warnings identify who lacks a Realtime reservation. Warnings wait for the first
+synchronisation and 15 seconds of stable state, with at most one warning per minute.
+Coverage is not guaranteed
+for everyone without confirming account capacity. Silence sent to
+close utterances also consumes Realtime minutes; check `/keys` and the
+`assistant activation`, `assistant turn closed`, `assistant delivery` and
+`assistant response` logs to measure opening, closing, first delivery and end; `/keys`
+shows usage. `voice_ready=true` identifies delivery at the start of the voice.
 
-A deteção de fala usa inicialmente energia PCM (`ASSISTANT_SPEECH_RMS=500`); deve ser validada com microfones,
-ruído e música reais. O ensaio Discord, capacidade e metas de latência ainda estão
-pendentes.
+Speech detection initially uses PCM energy (`ASSISTANT_SPEECH_RMS=500`); it should be validated with real microphones,
+noise and music. The Discord trial, capacity and latency targets are still
+pending.
 
-O assistente também lê a resposta na chamada com uma voz local em português de
-Portugal com [Piper](https://github.com/OHF-Voice/piper1-gpl) e a voz neural Tugão,
-incluídos no Docker. A fala usa fonemas 30% mais longos, sem alterar o tom, e pausas
-de 400 ms entre frases. Não precisa de outra key nem de rede durante a síntese.
-A música cede a saída durante a fala e retoma no mesmo
-ponto; uma pausa manual mantém-se. A resposta completa fica no chat mesmo que
-a síntese falhe. Para respostas longas, fala até 2000 caracteres e indica o chat
-para o restante. Desligar o assistente, mudar a configuração ou sair da chamada
-cancela a fala em curso.
+The assistant also reads the reply into the call with a local European Portuguese
+voice using [Piper](https://github.com/OHF-Voice/piper1-gpl) and the Tugão neural voice,
+included in Docker. Speech uses phonemes 30% longer, without changing pitch, and pauses
+of 400 ms between sentences. It needs no other key or network during synthesis.
+Music yields output during speech and resumes at the same
+point; a manual pause is kept. The full reply stays in the chat even if
+synthesis fails. For long replies, it speaks up to 2000 characters and points to the chat
+for the rest. Disabling the assistant, changing configuration or leaving the call
+cancels ongoing speech.
 
-Os emojis da resposta dão expressão à frase imediatamente anterior (ou à primeira
-frase, quando aparecem no início): 😊/😄/🎉 tornam a voz mais alegre, 😂/🤣/😆
-acrescentam um riso curto, 😢/😔/💔 suavizam e abrandam a voz, e 😭 acrescenta uma
-ligeira tremulação. 😮/😱/🤯 indicam surpresa, 😡/😠 irritação, ❤️/🥰/🙏 carinho,
-😉/😜/😏 brincadeira, 🤔 reflexão e 😴 cansaço. Os símbolos e variantes de cor de
-pele não são lidos; emojis repetidos não repetem o riso. O texto no chat mantém-se.
-São aproximações por tom, ritmo, volume e vocalizações sintetizadas: Tugão não é um
-modelo de interpretação emocional nem produz choro ou gargalhadas naturais.
-O modelo carrega uma única vez por resposta; após 12 mudanças de expressão, o
-restante texto é lido com a voz normal.
+Emojis in the reply give expression to the immediately preceding sentence (or the first
+sentence, when they appear at the start): 😊/😄/🎉 make the voice happier, 😂/🤣/😆
+add a short laugh, 😢/😔/💔 soften and slow the voice, and 😭 adds a
+slight tremble. 😮/😱/🤯 indicate surprise, 😡/😠 irritation, ❤️/🥰/🙏 affection,
+😉/😜/😏 playfulness, 🤔 thought and 😴 tiredness. Symbols and skin colour
+variants are not read; repeated emojis do not repeat the laugh. The chat text stays.
+These are approximations through tone, rhythm, volume and synthesised vocalisations: Tugão is not an
+emotional acting model and does not produce natural crying or laughter.
+The model loads once per reply; after 12 expression changes, the
+remaining text is read with the normal voice.
 
-`ASSISTANT_VOICE_ENABLED=true` é o default. Usa `false` para resposta apenas no chat.
-Depois de atualizar, reconstrói API e bot com
+`ASSISTANT_VOICE_ENABLED=true` is the default. Use `false` for chat-only replies.
+After updating, rebuild the API and bot with
 `docker compose up -d --build api discord-bot`.
-Para execução fora do Docker, instala `piper-tts==1.8.0` e descarrega o
-[modelo Tugão](https://huggingface.co/rhasspy/piper-voices/tree/v1.0.0/pt/pt_PT/tug%C3%A3o/medium)
-e a configuração `.onnx.json` para o mesmo diretório. Coloca `piper` no `PATH` e
-define `ASSISTANT_VOICE_MODEL` com o caminho do `.onnx` (22 050 Hz, mono).
-O [plano da conversa contínua](plan/voice-conversation.md) mantém o ensaio Discord,
-as medições de primeira voz/consumo e a avaliação com duas pessoas, ruído e música
-pendentes.
+To run outside Docker, install `piper-tts==1.8.0` and download the
+[Tugão model](https://huggingface.co/rhasspy/piper-voices/tree/v1.0.0/pt/pt_PT/tug%C3%A3o/medium)
+and the `.onnx.json` configuration into the same directory. Put `piper` in `PATH` and
+set `ASSISTANT_VOICE_MODEL` to the `.onnx` path (22 050 Hz, mono).
+The [continuous conversation plan](plan/voice-conversation.md) keeps the Discord trial,
+first voice/usage measurements and the evaluation with two people, noise and music
+pending.
 
 
 ## Deepgram and Speechmatics

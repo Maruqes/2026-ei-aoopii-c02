@@ -1,73 +1,73 @@
-# Plano: Deepgram e Speechmatics com preferência e fallback
+# Plan: Deepgram and Speechmatics with preference and fallback
 
-Data: 2026-10-03. Estado: implementação disponível; validação com simuladores locais e PostgreSQL.
-Ensaio de qualidade PT-PT e credenciais reais permanecem por realizar.
+Date: 2026-10-03. Status: implementation available; validation with local simulators and PostgreSQL.
+PT-PT quality rehearsal and real credentials remain to be done.
 
-## Resultado pretendido
+## Intended outcome
 
-Adicionar Deepgram ao bot com várias API keys, transcrição em streaming e de ficheiros
-WAV. Permitir escolher a ordem dos fornecedores, inicialmente
-`deepgram,speechmatics`, e fazer fallback nos dois sentidos. `/keys` apresenta
-informação de ambos, mesmo quando um deles é apenas o fornecedor de reserva.
+Add Deepgram to the bot with several API keys, streaming and WAV file
+transcription. Allow choosing the order of the providers, initially
+`deepgram,speechmatics`, and fall back in both directions. `/keys` presents
+information from both, even when one of them is only the fallback provider.
 
-A implementação é viável com a arquitetura existente: o Go já captura áudio por
-participante, guarda WAV de segurança e envia PCM para a API Python; a API já tem
-reservas, filas duráveis, gerações e substituição de resultados de streaming por Batch.
-O trabalho principal é generalizar as decisões hoje específicas de Speechmatics e
-adicionar dois adaptadores Deepgram. A precisão em PT-PT terá de ser medida com áudio
-real; a integração, por si só, não demonstra melhoria de reconhecimento.
+The implementation is feasible with the existing architecture: Go already captures audio per
+participant, stores a safety WAV and sends PCM to the Python API; the API already has
+reservations, durable queues, generations and replacement of streaming results by Batch.
+The main work is to generalise the decisions that are today specific to Speechmatics and
+add two Deepgram adapters. PT-PT accuracy will have to be measured with real
+audio; the integration, by itself, does not demonstrate an improvement in recognition.
 
-## 1. Limites confirmados do Deepgram
+## 1. Confirmed Deepgram limits
 
-Consulta à documentação oficial em 2026-10-03:
+Query to the official documentation on 2026-10-03:
 
-| Plano / região | Nova-3 streaming | Nova-3 gravações em simultâneo |
+| Plan / region | Nova-3 streaming | Nova-3 simultaneous recordings |
 | --- | ---: | ---: |
-| Pay As You Go, incluindo endpoint europeu | Até 150 | Até 50 |
-| Growth, América do Norte | Até 225 | Até 50 |
-| Growth, Europa | Até 150 | Até 50 |
+| Pay As You Go, including the European endpoint | Up to 150 | Up to 50 |
+| Growth, North America | Up to 225 | Up to 50 |
+| Growth, Europe | Up to 150 | Up to 50 |
 
-Os limites são **por projeto, não por API key**. Duas keys do mesmo projeto
-partilham a capacidade; criar keys adicionais não aumenta o número de streams.
-Projetos secundários de contas self-service têm restrição a um stream. A documentação
-também proíbe distribuir tráfego por contas/projetos para contornar limites.
-Estes valores são limites documentados, não uma verificação das quotas de uma conta
-concreta. [Fonte: API Rate Limits](https://developers.deepgram.com/reference/api-rate-limits).
+The limits are **per project, not per API key**. Two keys of the same project
+share the capacity; creating additional keys does not increase the number of streams.
+Secondary projects of self-service accounts are restricted to one stream. The documentation
+also prohibits distributing traffic across accounts/projects to circumvent limits.
+These values are documented limits, not a verification of the quotas of a concrete
+account. [Source: API Rate Limits](https://developers.deepgram.com/reference/api-rate-limits).
 
-Decisão de implementação: controlar capacidade por grupo de quota/projeto, com
-contadores separados para streaming e gravações. Não copiar a regra Speechmatics
-de duas vagas por key para Deepgram. Keys repetidas são deduplicadas. Um `429` bloqueia
-temporariamente novas admissões no grupo afetado; rodar para outra key desse grupo
-não resolve falta de capacidade.
+Implementation decision: control capacity per quota/project group, with separate
+counters for streaming and recordings. Do not copy the Speechmatics rule
+of two slots per key to Deepgram. Repeated keys are deduplicated. A `429` temporarily
+blocks new admissions in the affected group; rotating to another key of that group
+does not solve the lack of capacity.
 
-O bot já identifica quem fala através do Discord. Não ativar diarização remota:
-não é necessária para este percurso e tem limites próprios.
+The bot already identifies who is speaking through Discord. Do not enable remote diarization:
+it is not necessary for this path and has its own limits.
 
-## 2. Base existente e alterações necessárias
+## 2. Existing base and necessary changes
 
-| Área | Estado observado | Alteração prevista |
+| Area | Observed state | Planned change |
 | --- | --- | --- |
-| `discord_bot/audio_convert.go` | Opus → PCM 48 kHz estéreo; WAV por utilizador; recuperação RTP | Reutilizar captura e definir rotação imediata de WAV quando muda a atribuição |
-| `discord_bot/streaming.go` | PCM mono, WebSocket interno, reservas e eventos do assistente | Acrescentar fornecedor às atribuições e gerir transições sem reenviar áudio antigo ao assistente |
-| `app/realtime.py` | Pool com duas vagas por key; protocolo Speechmatics dentro do bridge | Admissão por grupo e adaptação dos protocolos por fornecedor |
-| `app/streaming_routes.py` | Streaming exige `transcription_provider == speechmatics` | Avaliar a ordem efetiva e capacidades de todos os fornecedores elegíveis |
-| `app/transcriber.py` e `app/main.py` | Whisper/Speechmatics; recuperação de job Speechmatics com sidecar | Router de gravações com fallback e adaptador Deepgram |
-| `app/speechmatics_errors.py` | Estado de keys e erros específico de Speechmatics | Separar erro normalizado de parsing de cada fornecedor |
-| `src/data/repository.py` | Gerações, finais idempotentes, troca Batch/Realtime, consumo Realtime | Persistir preferência, origem dos resultados e tentativas por fornecedor |
-| `discord_bot/main.go` e `transcription_client.go` | `/keys` consulta exclusivamente Speechmatics | Endpoint agregado e apresentação por fornecedor/projeto/key |
-| `discord_bot/speechmatics_usage_alerts.go` | Alertas dependem do fornecedor selecionado | Continuar a acompanhar Speechmatics quando é fallback, sem duplicar uso partilhado |
+| `discord_bot/audio_convert.go` | Opus → stereo 48 kHz PCM; WAV per user; RTP recovery | Reuse capture and define immediate WAV rotation when the assignment changes |
+| `discord_bot/streaming.go` | Mono PCM, internal WebSocket, reservations and assistant events | Add provider to the assignments and manage transitions without resending old audio to the assistant |
+| `app/realtime.py` | Pool with two slots per key; Speechmatics protocol inside the bridge | Admission by group and adaptation of the protocols per provider |
+| `app/streaming_routes.py` | Streaming requires `transcription_provider == speechmatics` | Evaluate the effective order and the capabilities of all eligible providers |
+| `app/transcriber.py` and `app/main.py` | Whisper/Speechmatics; Speechmatics job recovery with sidecar | Recording router with fallback and Deepgram adapter |
+| `app/speechmatics_errors.py` | Key state and errors specific to Speechmatics | Separate the normalized parsing error of each provider |
+| `src/data/repository.py` | Generations, idempotent finals, Batch/Realtime swap, Realtime consumption | Persist preference, result origin and attempts per provider |
+| `discord_bot/main.go` and `transcription_client.go` | `/keys` queries Speechmatics exclusively | Aggregated endpoint and presentation per provider/project/key |
+| `discord_bot/speechmatics_usage_alerts.go` | Alerts depend on the selected provider | Continue to monitor Speechmatics when it is fallback, without duplicating shared usage |
 
-As referências `app/...` correspondem a `src/transcription-api/app/...`.
-Há alterações locais em `.env.example`, README, Compose e ficheiros do assistente;
-reler o estado antes da implementação e integrar sem substituir esse trabalho.
+The `app/...` references correspond to `src/transcription-api/app/...`.
+There are local changes in `.env.example`, README, Compose and assistant files;
+re-read the state before implementation and integrate without replacing that work.
 
-## 3. Configuração e seleção da ordem
+## 3. Configuration and order selection
 
 ```dotenv
-# Novas instalações: ordem comum a streaming e gravações.
+# New installations: order common to streaming and recordings.
 TRANSCRIPTION_PROVIDER_ORDER=deepgram,speechmatics
 
-# Manter compatibilidade com deployments antigos que só definem esta variável.
+# Keep compatibility with old deployments that only define this variable.
 TRANSCRIPTION_PROVIDER=speechmatics
 TRANSCRIPTION_STREAMING_ENABLED=false
 
@@ -82,52 +82,52 @@ DEEPGRAM_LANGUAGE=pt-PT
 DEEPGRAM_KEYTERMS=
 DEEPGRAM_ENDPOINTING_MS=500
 
-# Opcional para consultar gestão/uso/saldo e identificar o grupo de quota.
+# Optional for querying management/usage/balance and identifying the quota group.
 DEEPGRAM_PROJECT_ID=
-# Override opcional para uma key com associação diferente.
+# Optional override for a key with a different association.
 DEEPGRAM_PROJECT_ID_02=
 
-# Limites locais de admissão para o grupo principal; ajustar à quota real.
+# Local admission limits for the main group; adjust to the real quota.
 DEEPGRAM_STREAMING_LIMIT=150
 DEEPGRAM_BATCH_LIMIT=50
-# Overrides por projeto/grupo, usando o mesmo sufixo da associação.
+# Overrides per project/group, using the same suffix as the association.
 DEEPGRAM_STREAMING_LIMIT_02=1
 DEEPGRAM_BATCH_LIMIT_02=1
 ```
 
-Regras:
+Rules:
 
-1. Preferência persistida por guild ganha ao ambiente. Na sua ausência, usar
-   `TRANSCRIPTION_PROVIDER_ORDER`; se não estiver definida, usar apenas o
-   `TRANSCRIPTION_PROVIDER` antigo. Não ativar fornecedores novos silenciosamente
-   num deployment antigo. O exemplo novo recomenda Deepgram primeiro.
-2. Aceitar as ordens `deepgram,speechmatics`, `speechmatics,deepgram` e seleção
-   individual de um dos dois. Normalizar espaços/capitalização e rejeitar duplicados
-   ou fornecedores desconhecidos. Whisper continua disponível pelo modo antigo;
-   fallback automático para Whisper fica fora deste plano.
-3. Fornecedores sem keys ficam visíveis como não configurados e são ignorados pelo
-   router. Uma ordem sem nenhum fornecedor configurado devolve erro antes de a guardar.
-4. Enumerar `DEEPGRAM_API_KEY` e `DEEPGRAM_API_KEY_*` com ordenação determinística,
-   como já acontece com Speechmatics. Guardar segredos exclusivamente na API Python.
-5. Keys sem associação explícita partilham um único grupo Deepgram, incluindo quando
-   não há `PROJECT_ID`. API key basta para transcrever; ID do projeto é opcional para
-   gestão. `/keys` mostra associação não verificada quando aplicável.
-6. Associação explícita e metadata de gestão devem ser reconciliadas quando as
-   permissões permitem. Se várias keys apontam para o mesmo projeto, juntar os seus
-   contadores e usar o menor limite configurado em caso de conflito. Nunca somar
-   limites por key nem assumir capacidade extra de projetos secundários. Identidades
-   desconhecidas não geram capacidade adicional: até confirmar a associação real,
-   aplicar também um teto conservador agregado ao conjunto Deepgram. Overrides de
-   limite são tetos locais, não uma declaração de quota concedida pelo fornecedor.
-7. Para Speechmatics, preservar a regra operacional atual de duas reservas por key
-   distinta e a premissa anterior de contas distintas, claramente identificada como
-   configuração local. Recusas reais do fornecedor prevalecem sobre essa premissa.
-8. Endpoints REST/WS devem ter região consistente. Não somar capacidade ao trocar
-   endpoint. Não usar gestão de keys nem criação de projetos automática.
+1. Preference persisted per guild wins over the environment. In its absence, use
+   `TRANSCRIPTION_PROVIDER_ORDER`; if that is not defined, use only the
+   old `TRANSCRIPTION_PROVIDER`. Do not enable new providers silently
+   in an old deployment. The new example recommends Deepgram first.
+2. Accept the orders `deepgram,speechmatics`, `speechmatics,deepgram` and individual
+   selection of one of the two. Normalize spaces/capitalisation and reject duplicates
+   or unknown providers. Whisper remains available through the old mode;
+   automatic fallback to Whisper is outside this plan.
+3. Providers without keys are visible as not configured and are ignored by the
+   router. An order without any configured provider returns an error before it is saved.
+4. Enumerate `DEEPGRAM_API_KEY` and `DEEPGRAM_API_KEY_*` with deterministic ordering,
+   as already happens with Speechmatics. Store secrets exclusively in the Python API.
+5. Keys without an explicit association share a single Deepgram group, including when
+   there is no `PROJECT_ID`. An API key is enough to transcribe; the project ID is optional for
+   management. `/keys` shows an unverified association when applicable.
+6. Explicit association and management metadata must be reconciled when
+   permissions allow it. If several keys point to the same project, combine their
+   counters and use the lowest configured limit in case of conflict. Never add
+   limits per key nor assume extra capacity from secondary projects. Unknown
+   identities do not generate additional capacity: until the real association is confirmed,
+   also apply a conservative aggregate ceiling to the Deepgram set. Limit overrides
+   are local ceilings, not a declaration of quota granted by the provider.
+7. For Speechmatics, preserve the current operational rule of two reservations per distinct
+   key and the earlier premise of distinct accounts, clearly identified as
+   local configuration. Real provider refusals prevail over that premise.
+8. REST/WS endpoints must have a consistent region. Do not add capacity by switching
+   endpoint. Do not use key management nor automatic project creation.
 
-## 4. Comandos e endpoints
+## 4. Commands and endpoints
 
-Adicionar `/stt` com subcomandos:
+Add `/stt` with subcommands:
 
 ```text
 /stt status
@@ -135,348 +135,348 @@ Adicionar `/stt` com subcomandos:
 /stt order providers:speechmatics,deepgram
 ```
 
-`providers` usa escolhas Discord, incluindo cada fornecedor sozinho. A alteração
-exige a mesma permissão de gestão do servidor usada por `/streaming`, é persistida
-antes da confirmação e funciona sem reinício. `status` informa ordem efetiva,
-origem da preferência, configuração, fornecedores em uso e modo streaming.
-Resposta de configuração efémera; nomes e descrições em PT/EN segundo o padrão atual.
+`providers` uses Discord choices, including each provider alone. The change
+requires the same server management permission used by `/streaming`, is persisted
+before confirmation and works without restart. `status` reports the effective order,
+the source of the preference, the configuration, the providers in use and the streaming mode.
+Ephemeral configuration response; names and descriptions in PT/EN according to the current standard.
 
-Novos endpoints internos:
+New internal endpoints:
 
-- `GET /v1/guilds/{guild_id}/transcription`: ordem efetiva e origem.
-- `POST /v1/guilds/{guild_id}/transcription`: validação/persistência da ordem.
-- `GET /v1/transcription/keys?guild_id=...`: estado agregado por fornecedor.
+- `GET /v1/guilds/{guild_id}/transcription`: effective order and source.
+- `POST /v1/guilds/{guild_id}/transcription`: validation/persistence of the order.
+- `GET /v1/transcription/keys?guild_id=...`: aggregated state per provider.
 
-Reutilizar os endpoints de streaming, incluindo `/v1/streaming/audio`.
-Preservar `/v1/speechmatics/keys` e o cliente antigo durante a transição, mas retirar
-o bloqueio que esconde Speechmatics quando outro fornecedor é o primeiro.
+Reuse the streaming endpoints, including `/v1/streaming/audio`.
+Preserve `/v1/speechmatics/keys` and the old client during the transition, but remove
+the block that hides Speechmatics when another provider is first.
 
-A nova ordem aplica-se às próximas admissões e aos próximos limites de WAV.
-Não interromper uma ligação saudável no meio de uma frase para mudar preferência.
-Quando uma mudança manual exige migrar um stream, fechar/flush a unidade atual e
-abrir a próxima com a nova ordem. Uma recuperação já em execução conserva a decisão
-e identificação da tentativa, evitando reinterpretar um job remoto como outro fornecedor.
+The new order applies to the next admissions and the next WAV limits.
+Do not interrupt a healthy connection in the middle of a sentence to change the preference.
+When a manual change requires migrating a stream, close/flush the current unit and
+open the next one with the new order. A recovery already running keeps the decision
+and the attempt identification, avoiding reinterpreting a remote job as another provider.
 
-## 5. Arquitetura mínima
+## 5. Minimal architecture
 
 ```mermaid
 flowchart LR
-    D[Discord por participante] --> C[PCM e WAV de segurança]
-    C --> R[Router: ordem, keys e capacidade]
+    D[Discord per participant] --> C[PCM and safety WAV]
+    C --> R[Router: order, keys and capacity]
     R --> DS[Deepgram streaming]
     R --> SS[Speechmatics streaming]
-    C --> Q[Fila durável de WAV]
-    Q --> B[Router de gravações]
+    C --> Q[Durable WAV queue]
+    Q --> B[Recording router]
     B --> DB[Deepgram REST]
     B --> SB[Speechmatics Batch]
-    DS --> N[Resultados normalizados]
+    DS --> N[Normalized results]
     SS --> N
     DB --> N
     SB --> N
-    N --> P[Postgres e consumidores existentes]
+    N --> P[Postgres and existing consumers]
 ```
 
-Usar `httpx` e `websockets`, já instalados. Não é necessário acrescentar o SDK
-Deepgram, serviço de filas ou coordenador externo. Introduzir um router pequeno para
-os dois fornecedores e um contrato Realtime para abrir/enviar/fechar/normalizar.
-Manter `TranscriptionResult`/`TranscriptionSegment` como resultado de gravações.
+Use `httpx` and `websockets`, already installed. There is no need to add the Deepgram
+SDK, a queue service or an external coordinator. Introduce a small router for
+the two providers and a Realtime contract to open/send/close/normalize.
+Keep `TranscriptionResult`/`TranscriptionSegment` as the result of recordings.
 
-A autoridade sobre keys e capacidade continua na API, num único processo. Contadores
-de REST partilhados entre workers e reservas WS devem usar sincronização segura entre
-threads/event loop; não fazer I/O de rede sob o lock. Reservas contam mesmo antes de
-abrir a ligação e são libertadas uma única vez, incluindo cancelamento e falha de handshake.
-Vários processos/réplicas exigiriam coordenação partilhada e ficam fora do âmbito.
+Authority over keys and capacity remains in the API, in a single process. REST counters
+shared between workers and WS reservations must use safe synchronisation between
+threads/event loop; do not perform network I/O under the lock. Reservations count even before
+opening the connection and are released only once, including cancellation and handshake failure.
+Multiple processes/replicas would require shared coordination and are outside the scope.
 
-## 6. Adaptadores Deepgram
+## 6. Deepgram adapters
 
 ### Streaming
 
-Usar Nova-3 com `language=pt-PT`, áudio `linear16`, 48 kHz e um canal; autenticação
-por `Authorization: Token ...`. O Go já faz a conversão estéreo → mono antes do
-WebSocket interno. Pedir parciais e pontuação. Normalizar `Results`: `is_final`
-determina persistência; `speech_final` indica fim de fala, não substitui essa regra.
-Mapear palavras e tempos para o evento `final` já consumido pelo assistente.
-[Protocolo oficial](https://developers.deepgram.com/reference/speech-to-text/listen-streaming).
+Use Nova-3 with `language=pt-PT`, `linear16` audio, 48 kHz and one channel; authentication
+by `Authorization: Token ...`. Go already performs the stereo → mono conversion before the
+internal WebSocket. Request partials and punctuation. Normalize `Results`: `is_final`
+determines persistence; `speech_final` indicates end of speech, it does not replace that rule.
+Map words and times to the `final` event already consumed by the assistant.
+[Official protocol](https://developers.deepgram.com/reference/speech-to-text/listen-streaming).
 
-Não esperar `RecognitionStarted` do Deepgram: o adaptador confirma o handshake WS
-antes de devolver `ready`. Preservar sequências internas, limites de buffers, silêncio
-DTX, offsets e validação de tempos em relação às amostras enviadas.
+Do not expect `RecognitionStarted` from Deepgram: the adapter confirms the WS handshake
+before returning `ready`. Preserve internal sequences, buffer limits, DTX silence,
+offsets and validation of times relative to the samples sent.
 
-Durante espera sem envio de áudio, emitir `KeepAlive` textual com intervalo de cinco
-segundos. Não confundir heartbeat com amostras de áudio nem retirar silêncio do
-percurso existente sem atualizar o mapa temporal.
+During a wait without sending audio, emit a textual `KeepAlive` at an interval of five
+seconds. Do not confuse heartbeat with audio samples nor remove silence from the
+existing path without updating the time map.
 [KeepAlive](https://developers.deepgram.com/docs/audio-keep-alive).
 
-No fecho normal da unidade, `CloseStream` solicita processamento do áudio restante;
-consumir os finais e metadata de fecho antes de confirmar conclusão, com timeout
-limitado. Se o fecho for incompleto, recuperar pelo WAV. `Finalize` é uma operação
-de flush e não é uma confirmação genérica de sucesso de todo o stream.
+On the normal closing of the unit, `CloseStream` requests processing of the remaining audio;
+consume the finals and closing metadata before confirming completion, with a limited
+timeout. If the closing is incomplete, recover through the WAV. `Finalize` is an operation
+of flush and is not a generic confirmation of success of the whole stream.
 [CloseStream](https://developers.deepgram.com/docs/close-stream),
 [Finalize](https://developers.deepgram.com/docs/finalize).
 
-### Gravações WAV
+### WAV recordings
 
-Enviar o ficheiro local a `POST /v1/listen` com Nova-3, `pt-PT`, pontuação e
-`utterances=true`. Converter os intervalos devolvidos para segmentos e usar palavras
-como alternativa de segmentação quando necessário. Validar resultados vazios,
-tempos e duração; silêncio legítimo pode produzir resultado vazio com sucesso.
-[API de gravações](https://developers.deepgram.com/reference/speech-to-text/listen-pre-recorded).
+Send the local file to `POST /v1/listen` with Nova-3, `pt-PT`, punctuation and
+`utterances=true`. Convert the returned intervals into segments and use words
+as a segmentation alternative when necessary. Validate empty results,
+times and duration; legitimate silence can produce an empty result with success.
+[Recordings API](https://developers.deepgram.com/reference/speech-to-text/listen-pre-recorded).
 
-Derivar um WAV mono temporário a partir do WAV de segurança estéreo, preservando
-número de frames e duração; enviar o seu conteúdo com `Content-Type: audio/wav`.
-Manter o original para recuperação e limpar o derivado após a tentativa.
-Não configurar diarização/multichannel por participante. Não carregar a gravação
-inteira em memória; enviar em chunks com timeout e limites já existentes.
+Derive a temporary mono WAV from the stereo safety WAV, preserving
+the number of frames and the duration; send its content with `Content-Type: audio/wav`.
+Keep the original for recovery and clean the derivative after the attempt.
+Do not configure diarization/multichannel per participant. Do not load the whole
+recording into memory; send it in chunks with the existing timeouts and limits.
 
-Começar com REST síncrono nos workers existentes. Persistir o `request_id` e o
-resultado recebido antes da escrita final na DB, através de sidecar escrito
-atomicamente e sem segredos. Após reinício, reutilizar esse resultado quando presente.
-Se a resposta se perder depois do envio, pode ser necessário repetir a transcrição,
-com custo repetido: idempotência local não garante faturação exatamente uma vez.
-Não tratar `request_id` como um job Speechmatics consultável.
-Estender a limpeza normal, recuperação e `/forget` aos novos WAV derivados e sidecars;
-estes contêm áudio/texto e devem ter o mesmo ciclo de vida da unidade original.
+Start with synchronous REST in the existing workers. Persist the `request_id` and
+the result received before the final write to the DB, through a sidecar written
+atomically and without secrets. After restart, reuse that result when present.
+If the response is lost after sending, it may be necessary to repeat the transcription,
+with repeated cost: local idempotency does not guarantee billing exactly once.
+Do not treat `request_id` as a queryable Speechmatics job.
+Extend the normal cleanup, recovery and `/forget` to the new derived WAVs and sidecars;
+these contain audio/text and must have the same lifecycle as the original unit.
 
-`DEEPGRAM_KEYTERMS` deve aplicar-se aos dois modos, codificado como parâmetros
-`keyterm` repetidos. Para Nova-3 usar `keyterm`, não o parâmetro legado `keywords`.
+`DEEPGRAM_KEYTERMS` must apply to both modes, encoded as repeated `keyterm`
+parameters. For Nova-3 use `keyterm`, not the legacy `keywords` parameter.
 [Keyterm Prompting](https://developers.deepgram.com/docs/keyterm).
 
-## 7. Preferência, fallback e recuperação
+## 7. Preference, fallback and recovery
 
-### Seleção
+### Selection
 
-Percorrer fornecedores pela ordem efetiva. Dentro de cada um, escolher uma key
-saudável, respeitando o limite do grupo, com menor ocupação e desempate determinístico.
-Não depender de sucesso da consulta de saldo para admitir transcrição.
+Traverse providers by the effective order. Within each one, choose a healthy
+key, respecting the group limit, with lowest occupancy and deterministic tie-break.
+Do not depend on the success of the balance query to admit transcription.
 
-Para a ordem `deepgram,speechmatics`, tentar keys elegíveis Deepgram e depois
-Speechmatics; com a ordem inversa, fazer o inverso. Tentativas são limitadas por
-unidade/episódio: guardar os candidatos já tentados e nunca circular infinitamente
-entre os mesmos fornecedores.
+For the order `deepgram,speechmatics`, try eligible Deepgram keys and then
+Speechmatics; with the reverse order, do the opposite. Attempts are limited per
+unit/episode: store the candidates already tried and never circulate infinitely
+between the same providers.
 
-Fallback resolve falhas de serviço, credenciais, créditos ou capacidade. Uma resposta
-com palavras incorretas pode ser tecnicamente bem-sucedida; não há deteção automática
-fiável disso nesta versão. A preferência deve ser escolhida pelo ensaio de qualidade,
-sem enviar todas as falas simultaneamente aos dois fornecedores.
+Fallback resolves service, credential, credit or capacity failures. A response
+with incorrect words can be technically successful; there is no reliable automatic
+detection of that in this version. The preference must be chosen by the quality rehearsal,
+without sending all speech simultaneously to both providers.
 
-### Erros e âmbito
+### Errors and scope
 
-| Situação | Ação |
+| Situation | Action |
 | --- | --- |
-| Key inválida/sem permissão de transcrever | Desativar essa key para o modo afetado; tentar outra e depois outro fornecedor |
-| Gestão/uso/saldo sem permissão | Mostrar informação indisponível; não desativar a transcrição |
-| `402`/falta de créditos confirmada | Marcar o grupo de faturação afetado; tentar outro grupo legitimamente configurado ou fornecedor |
-| `429`/capacidade | Cooldown do grupo/produto; tentar outro fornecedor; não rodar keys do mesmo grupo para contornar o limite |
-| Timeout, rede, `5xx`, fecho anormal | Retry limitado e cooldown; outro fornecedor; conservar WAV |
-| Ficheiro PCM/WAV inválido ou contrato interno inválido | Falhar a unidade e diagnosticar; não tentar a mesma entrada inválida indiscriminadamente |
-| Sem vagas em nenhum streaming | Continuar WAV/Batch; fila FIFO para futura promoção |
+| Invalid key/without permission to transcribe | Disable that key for the affected mode; try another and then another provider |
+| Management/usage/balance without permission | Show information unavailable; do not disable transcription |
+| `402`/confirmed lack of credits | Mark the affected billing group; try another legitimately configured group or provider |
+| `429`/capacity | Cooldown of the group/product; try another provider; do not rotate keys of the same group to circumvent the limit |
+| Timeout, network, `5xx`, abnormal closing | Limited retry and cooldown; another provider; preserve the WAV |
+| Invalid PCM/WAV file or invalid internal contract | Fail the unit and diagnose; do not try the same invalid input indiscriminately |
+| No slots in any streaming | Continue WAV/Batch; FIFO queue for future promotion |
 
-Deepgram documenta erros de autenticação/permissões, `402` por créditos e `429` por
-limites. Interpretar códigos estruturados e o produto/operação, sem classificar
-genericamente qualquer `401`/`403` de gestão como key inválida para STT.
+Deepgram documents authentication/permission errors, `402` for credits and `429` for
+limits. Interpret structured codes and the product/operation, without generically classifying
+any management `401`/`403` as an invalid key for STT.
 [Errors](https://developers.deepgram.com/docs/errors).
 
-Estado mínimo: key, grupo e fornecedor podem estar saudáveis, sem configuração,
-inválidos, sem créditos ou em cooldown. Não confundir orçamento local, indisponibilidade
-temporária e saldo. Cooldown recupera automaticamente com tentativa controlada;
-esgotamento/invalidade requer alteração de credenciais ou revalidação explícita.
+Minimum state: key, group and provider can be healthy, not configured,
+invalid, without credits or in cooldown. Do not confuse local budget, temporary unavailability
+and balance. Cooldown recovers automatically with a controlled attempt;
+exhaustion/invalidity requires changing credentials or explicit revalidation.
 
-### Falha de streaming durante fala
+### Streaming failure during speech
 
-1. Falha de abertura: tentar o próximo candidato antes de emitir `ready`, dentro do
-   orçamento de handshake do cliente Go (atualmente 15 s). Ajustar cliente/API juntos
-   se o orçamento for insuficiente; nunca manter o Go à espera indefinidamente.
-2. Falha após enviar áudio: fechar o dono da unidade, invalidar a sua geração e
-   conservar o WAV. O áudio dessa unidade segue recuperação por gravação.
-3. O Go roda imediatamente o WAV num limite explícito, sincroniza a atribuição e
-   abre uma nova unidade com outro fornecedor disponível. Se nenhum stream estiver
-   disponível, grava até poder promover. Não esperar até ao fim da chamada para reagir.
-4. O router Batch recebe o motivo e fornecedor falhado para evitar tentar logo o
-   candidato em cooldown. Segue a ordem entre candidatos elegíveis; a recuperação
-   não altera retroativamente a preferência persistida.
-5. Resultados de recuperação substituem os finais anteriores da mesma unidade numa
-   transação, usando o mecanismo existente. Eventos tardios da geração antiga são
-   ignorados. A recuperação não é publicada ao canal de eventos do assistente.
-6. Finais já entregues ao assistente não são executados novamente depois da troca.
-   Invalidar contexto em curso quando perde a unidade, preservar proteção por
-   identidade/geração e verificar o comportamento do assistente na transição.
+1. Opening failure: try the next candidate before emitting `ready`, within the
+   Go client's handshake budget (currently 15 s). Adjust client/API together
+   if the budget is insufficient; never keep Go waiting indefinitely.
+2. Failure after sending audio: close the unit's owner, invalidate its generation and
+   preserve the WAV. The audio of that unit follows recovery by recording.
+3. Go immediately rotates the WAV at an explicit limit, synchronizes the assignment and
+   opens a new unit with another available provider. If no stream is
+   available, it records until it can promote. Do not wait until the end of the call to react.
+4. The Batch router receives the reason and the failed provider to avoid immediately trying the
+   candidate in cooldown. It follows the order among eligible candidates; the recovery
+   does not retroactively change the persisted preference.
+5. Recovery results replace the previous finals of the same unit in one
+   transaction, using the existing mechanism. Late events of the old generation are
+   ignored. The recovery is not published to the assistant's event channel.
+6. Finals already delivered to the assistant are not executed again after the swap.
+   Invalidate ongoing context when it loses the unit, preserve protection by
+   identity/generation and verify the assistant's behaviour in the transition.
 
-Quando o fornecedor preferido recupera, usá-lo nas novas admissões. Streams saudáveis
-no fallback conservam o seu titular até a próxima rotação normal; não migrar a meio
-de fala nem retirar vaga de outro participante. Preservar FIFO, saída de participantes,
-mudanças de canal e a regra atual de uma chamada ativa.
+When the preferred provider recovers, use it for the new admissions. Healthy streams
+in fallback keep their holder until the next normal rotation; do not migrate in the middle
+of speech nor remove another participant's slot. Preserve FIFO, participant exits,
+channel changes and the current rule of one active call.
 
-### Falha de todos os fornecedores
+### Failure of all providers
 
-Só aplicar o descarte atual por créditos quando **todos os fornecedores remotos
-configurados e permitidos pela ordem** tiverem confirmado falta de créditos e não
-existir tentativa remota pendente capaz de concluir. Uma key inválida ou timeout não
-constitui confirmação de créditos esgotados.
+Only apply the current discard for credits when **all remote providers configured and
+allowed by the order** have confirmed a lack of credits and there is no pending remote
+attempt capable of completing. An invalid key or timeout does
+not constitute confirmation of exhausted credits.
 
-Se falta de créditos num fornecedor coexistir com falha temporária no outro, conservar
-áudio para retry durável. Se não existir qualquer credencial utilizável por configuração
-ou autenticação, suspender nova captura para transcrição e explicar a situação, sem
-atribuir a créditos nem apagar automaticamente o pendente por esse motivo.
+If a lack of credits in one provider coexists with a temporary failure in the other, preserve
+audio for durable retry. If there is no usable credential by configuration
+or authentication, suspend new capture for transcription and explain the situation, without
+attributing it to credits nor automatically deleting the pending one for that reason.
 
-Generalizar o aviso atual de créditos para os fornecedores afetados; manter a limpeza
-pendente recuperável, a preservação de texto concluído e as regras de `/forget`.
-Não emitir avisos automáticos no Discord por cada mudança de fornecedor: estado de
-fallback aparece nos comandos e logs. O aviso terminal segue a política já existente.
+Generalise the current credits warning to the affected providers; keep the pending
+cleanup recoverable, the preservation of completed text and the `/forget` rules.
+Do not emit automatic warnings on Discord for each provider change: the fallback state
+appears in the commands and logs. The terminal warning follows the existing policy.
 
-## 8. Persistência e contabilidade
+## 8. Persistence and accounting
 
-Adicionar migração aditiva, previsivelmente `009_transcription_providers.sql`
-(confirmar numeração na implementação; o projeto tem migrações até `008`).
+Add an additive migration, predictably `009_transcription_providers.sql`
+(confirm the numbering in the implementation; the project has migrations up to `008`).
 
-- `guild_transcription_settings.provider_order`: array anulável; `NULL` usa ambiente.
-- Metadados de unidade: fornecedor escolhido, modelo e grupo; origem do resultado
-  final e motivo de recuperação. Reutilizar identidade WAV e `generation`.
-- `voice_transcription_attempts`: tentativa por unidade, geração, produto
-  (`streaming`/`batch`), fornecedor, key por nome, grupo, modelo, estado, duração
-  enviada, timestamps, erro normalizado e identificador remoto quando disponível.
+- `guild_transcription_settings.provider_order`: nullable array; `NULL` uses the environment.
+- Unit metadata: chosen provider, model and group; origin of the final
+  result and recovery reason. Reuse WAV identity and `generation`.
+- `voice_transcription_attempts`: attempt per unit, generation, product
+  (`streaming`/`batch`), provider, key by name, group, model, state, duration
+  sent, timestamps, normalized error and remote identifier when available.
 
-Esta tabela permite atribuir consumo a ambos os fornecedores quando a mesma unidade
-passa por streaming e recuperação. Usar checkpoints monotónicos; não somar sucessivos
-checkpoints da mesma tentativa. Não guardar segredos nem transcrições nesta tabela.
+This table allows attributing consumption to both providers when the same unit
+goes through streaming and recovery. Use monotonic checkpoints; do not add successive
+checkpoints of the same attempt. Do not store secrets or transcriptions in this table.
 
-Preservar recuperação de `provider_job_id`/sidecars Speechmatics com o fornecedor
-e key originais, mesmo depois de mudar a ordem. Antes de submeter a outro fornecedor,
-consultar o job existente; se a recuperação remota falhar e houver fallback, persistir
-a nova geração/dono e rejeitar resultados tardios. Não misturar IDs dos dois sistemas.
+Preserve recovery of Speechmatics `provider_job_id`/sidecars with the original provider
+and key, even after changing the order. Before submitting to another provider,
+query the existing job; if the remote recovery fails and there is fallback, persist
+the new generation/owner and reject late results. Do not mix IDs of the two systems.
 
-Manter leitura dos sidecars antigos. Inferir origem histórica apenas com evidência
-(por exemplo, `realtime_key_name` Speechmatics ou sidecar/job conhecido); deixar dados
-ambíguos como desconhecidos. Não atribuir gravações Whisper antigas a Speechmatics.
-Separar contabilidade histórica já existente dos novos registos para evitar dupla soma.
+Keep reading the old sidecars. Infer historical origin only with evidence
+(for example, Speechmatics `realtime_key_name` or a known sidecar/job); leave ambiguous
+data as unknown. Do not attribute old Whisper recordings to Speechmatics.
+Separate the existing historical accounting from the new records to avoid double counting.
 
-## 9. `/keys`, `/streaming status` e `/health`
+## 9. `/keys`, `/streaming status` and `/health`
 
-`/keys` apresenta primeiro a ordem efetiva e depois ambos os fornecedores:
+`/keys` presents first the effective order and then both providers:
 
-- Configurado, preferência, modelos e disponibilidade de streaming/gravações.
-- Por key: nome de configuração, estado, ocupação local e último erro normalizado.
-- Por grupo/projeto: ocupação partilhada, limite local, quota documentada ou
-  associação não verificada; não repetir o saldo como se pertencesse a cada key.
-- Consumo local do bot separado por streaming/gravações, consumo reportado pelo
-  fornecedor, período UTC e atualização da consulta.
-- Saldo reportado Deepgram quando acessível; custos estimados com tarifa, data e
-  fonte. Valores desconhecidos são `null`/indisponível, nunca zero.
-- Speechmatics mantém a distinção atual entre consumo Batch remoto, Realtime local,
-  custo estimado e saldo não disponível. Dados de keys partilhadas não são somados.
+- Configured, preference, models and streaming/recording availability.
+- Per key: configuration name, state, local occupancy and last normalized error.
+- Per group/project: shared occupancy, local limit, documented quota or
+  unverified association; do not repeat the balance as if it belonged to each key.
+- Local bot consumption separated by streaming/recordings, consumption reported by
+  the provider, UTC period and query update.
+- Deepgram reported balance when accessible; estimated costs with rate, date and
+  source. Unknown values are `null`/unavailable, never zero.
+- Speechmatics keeps the current distinction between remote Batch consumption, local Realtime,
+  estimated cost and unavailable balance. Data from shared keys are not added.
 
-Deepgram tem APIs de consulta de [saldo por projeto](https://developers.deepgram.com/reference/manage/billing/list)
-e [uso por projeto](https://developers.deepgram.com/reference/manage/usage/get).
-Consultar uma vez por projeto com credencial autorizada; cache curta e timeout por
-fornecedor. Se faltar permissão/ID, mostrar contabilidade local e a limitação. Usar
-filtros por key apenas quando o endpoint utilizado os suportar; não atribuir consumo
-global do projeto a cada key. Uma falha de consulta Deepgram não esconde Speechmatics.
+Deepgram has query APIs for [balance per project](https://developers.deepgram.com/reference/manage/billing/list)
+and [usage per project](https://developers.deepgram.com/reference/manage/usage/get).
+Query once per project with an authorized credential; short cache and timeout per
+provider. If permission/ID is missing, show local accounting and the limitation. Use
+filters per key only when the endpoint used supports them; do not attribute the global
+project consumption to each key. A Deepgram query failure does not hide Speechmatics.
 
-Exemplo meramente ilustrativo, sem valores reais:
+Example merely illustrative, without real values:
 
 ```text
-Ordem: 1. Deepgram → 2. Speechmatics
+Order: 1. Deepgram → 2. Speechmatics
 
 Deepgram · nova-3 · pt-PT
-Projeto principal: 4/150 reservas locais de streaming · saldo $180,00 reportado
-01: disponível · 3 streams · uso local 2h 10m
-02: disponível · 1 stream · uso local 0h 45m · partilha quota/saldo com 01
+Main project: 4/150 local streaming reservations · reported balance $180.00
+01: available · 3 streams · local usage 2h 10m
+02: available · 1 stream · local usage 0h 45m · shares quota/balance with 01
 
 Speechmatics · streaming enhanced / Batch melia-1
-01: disponível · 0/2 reservas locais · custo estimado $0,30
-02: sem créditos confirmados · 0/2 reservas locais
-Saldo Speechmatics: indisponível
+01: available · 0/2 local reservations · estimated cost $0.30
+02: no confirmed credits · 0/2 local reservations
+Speechmatics balance: unavailable
 ```
 
-Os contadores são do bot; não fingir conhecer ocupação de outros clientes do mesmo
-projeto. O saldo não garante que uma conta não possa continuar em regime de pagamento.
-O estado de crédito usado no router vem da resposta de inferência, não apenas do saldo.
+The counters are the bot's; do not pretend to know the occupancy of other clients of the same
+project. The balance does not guarantee that an account cannot continue on a payment basis.
+The credit state used in the router comes from the inference response, not only from the balance.
 
-Respostas com muitas keys devem ser divididas respeitando os limites Discord e usar
-defer da interação enquanto consulta a API. Não exibir segredos, headers, tokens de
-reserva ou mensagens cruas do fornecedor. `/streaming status` discrimina reservas
-por fornecedor e fila; `/health` mostra ordem e fornecedores efetivamente utilizados.
+Responses with many keys must be split respecting Discord limits and use
+interaction defer while querying the API. Do not display secrets, headers, reservation
+tokens or raw provider messages. `/streaming status` discriminates reservations
+per provider and queue; `/health` shows the order and the providers effectively used.
 
-## 10. Fases de implementação
+## 10. Implementation phases
 
-1. **Configuração e estado comum:** parser de ordem/keys, grupos, erros, seleção e
-   migração aditiva. Preservar modo antigo e recuperação de jobs existentes.
-2. **Deepgram WAV:** adaptador REST, normalização, resultado durável, router Batch e
-   fallback nos dois sentidos. Reutilizar workers e substituição transacional.
-3. **Deepgram streaming:** adaptador WS, pool por grupo, finalização, normalização
-   de eventos/tempos e passagem imediata para novo WAV/fornecedor após falha.
-4. **Comandos e observabilidade:** `/stt`, `/keys` agregado, status/health, alertas
-   e avisos de créditos generalizados; atualização de cliente Go e PT/EN.
-5. **Configuração operacional:** `.env.example`, Compose e READMEs. Ensaiar ambos os
-   modos e falhas controladas antes de recomendar Deepgram em produção.
+1. **Configuration and common state:** order/key parser, groups, errors, selection and
+   additive migration. Preserve the old mode and recovery of existing jobs.
+2. **Deepgram WAV:** REST adapter, normalization, durable result, Batch router and
+   fallback in both directions. Reuse workers and transactional replacement.
+3. **Deepgram streaming:** WS adapter, pool per group, finalization, normalization
+   of events/times and immediate switch to a new WAV/provider after failure.
+4. **Commands and observability:** `/stt`, aggregated `/keys`, status/health, alerts
+   and generalized credits warnings; update of the Go client and PT/EN.
+5. **Operational configuration:** `.env.example`, Compose and READMEs. Rehearse both
+   modes and controlled failures before recommending Deepgram in production.
 
-Não instalar dependências novas por defeito. Não alterar captura, resumos, perfis,
-TTS ou lógica musical além dos pontos necessários ao novo router/eventos.
+Do not install new dependencies by default. Do not change capture, summaries, profiles,
+TTS or music logic beyond the points necessary for the new router/events.
 
-## 11. Validação e critérios de aceitação
+## 11. Validation and acceptance criteria
 
-Testes focados, aproveitando as suites existentes:
+Focused tests, taking advantage of the existing suites:
 
-| Cenário | Evidência exigida |
+| Scenario | Evidence required |
 | --- | --- |
-| Várias keys Deepgram, mesmo projeto | Ocupação agregada; capacidade não é multiplicada; duplicados não contam |
-| Limite esgotado e `429` externo | Cooldown no grupo correto; fallback Speechmatics; WAV preservado |
-| Deepgram → Speechmatics e ordem inversa | Streaming e gravações funcionam em ambos os sentidos, com tentativas limitadas |
-| Uma key inválida e outra válida | Troca de key; sem suspensão global incorreta |
-| Gestão devolve `401`/`403` | `/keys` mostra indisponibilidade de gestão; STT continua |
-| Falha a meio de fala | Recuperação do WAV e novo stream; nenhum intervalo perdido na transição |
-| Parciais/finais/fecho repetidos | Só finais persistem; idempotência; tempos e palavras coerentes |
-| Fallback após finais parciais da unidade | Substituição transacional, sem mensagens ou ações do assistente duplicadas |
-| Crédito acaba só num fornecedor | O outro continua; nenhum descarte global |
-| Crédito acaba em todos / falha temporária mista | Descarte só no primeiro caso confirmado; retry durável no segundo |
-| Reinício durante REST/streaming | Recupera WAV, sidecar e jobs Speechmatics sem trocar identidade remota |
-| Ordem alterada/reinício do bot | Preferência por guild persiste; aplica-se nos limites definidos |
-| `/forget`, saída, mudança de canal | Cancelamento/limpeza corretos; reservas libertadas uma vez |
-| Muitas keys / fornecedor de gestão offline | Resposta Discord completa, parcial por fornecedor e sem segredos |
-| Streaming on/off, fila/promoção | Mesmas garantias de captura, FIFO e gravações da versão atual |
+| Several Deepgram keys, same project | Aggregated occupancy; capacity is not multiplied; duplicates do not count |
+| Limit exhausted and external `429` | Cooldown in the correct group; Speechmatics fallback; WAV preserved |
+| Deepgram → Speechmatics and reverse order | Streaming and recordings work in both directions, with limited attempts |
+| One invalid key and another valid one | Key switch; no incorrect global suspension |
+| Management returns `401`/`403` | `/keys` shows management unavailability; STT continues |
+| Failure in the middle of speech | WAV recovery and new stream; no interval lost in the transition |
+| Repeated partials/finals/closing | Only finals persist; idempotency; coherent times and words |
+| Fallback after partial finals of the unit | Transactional replacement, without duplicated messages or assistant actions |
+| Credit runs out in only one provider | The other continues; no global discard |
+| Credit runs out in all / mixed temporary failure | Discard only in the first confirmed case; durable retry in the second |
+| Restart during REST/streaming | Recovers WAV, sidecar and Speechmatics jobs without changing the remote identity |
+| Order changed/bot restart | Per-guild preference persists; applies at the defined limits |
+| `/forget`, exit, channel change | Correct cancellation/cleanup; reservations released once |
+| Many keys / management provider offline | Complete Discord response, partial per provider and without secrets |
+| Streaming on/off, queue/promotion | Same capture, FIFO and recording guarantees as the current version |
 
-Executar testes Python pertinentes e Go, incluindo concorrência no código alterado,
-lint, `git diff --check` e validação Compose com placeholders. Registar falhas
-preexistentes separadamente; não ampliar o âmbito para as corrigir neste trabalho.
+Run the pertinent Python and Go tests, including concurrency in the changed code,
+lint, `git diff --check` and Compose validation with placeholders. Record pre-existing
+failures separately; do not expand the scope to fix them in this work.
 
-Ensaio real: áudio PT-PT capturado pelo próprio bot, com nomes/alcunhas, termos de
-jogos, pausas e ruído, enviado aos dois fornecedores. Comparar texto com referência
-humana, omissões e tempo até finais. Testar primeiro um participante e depois vários;
-simular falhas localmente em vez de esgotar créditos reais ou saturar quotas.
+Real rehearsal: PT-PT audio captured by the bot itself, with names/nicknames, game
+terms, pauses and noise, sent to both providers. Compare text with a human
+reference, omissions and time to finals. Test first one participant and then several;
+simulate failures locally instead of exhausting real credits or saturating quotas.
 
-Concluído quando ambos os modos funcionam com várias keys, a ordem é editável e
-persistida, fallback é demonstrado nos dois sentidos, `/keys` distingue os dois
-fornecedores e nenhum teste de falha perde áudio recuperável ou duplica transcrições.
+Complete when both modes work with several keys, the order is editable and
+persisted, fallback is demonstrated in both directions, `/keys` distinguishes the two
+providers and no failure test loses recoverable audio or duplicates transcriptions.
 
 ## 12. Rollback
 
-Com os dois fornecedores implementados, selecionar apenas Speechmatics em `/stt`
-ou na ordem do ambiente. `/streaming mode:off` continua a permitir WAV/Batch.
-Manter migração aditiva e leitura dos formatos antigos; jobs já admitidos conservam
-o seu fornecedor e recuperação. Um downgrade do binário só é seguro depois de
-concluir as unidades Deepgram e de limpar/resetar preferências incompatíveis;
-não prometer rollback de código com jobs Deepgram pendentes.
+With both providers implemented, select only Speechmatics in `/stt`
+or in the environment order. `/streaming mode:off` still allows WAV/Batch.
+Keep the additive migration and reading of the old formats; jobs already admitted keep
+their provider and recovery. A downgrade of the binary is only safe after
+completing the Deepgram units and cleaning/resetting incompatible preferences;
+do not promise code rollback with pending Deepgram jobs.
 
-Nenhum endpoint real de transcrição, saldo ou keys foi chamado durante a elaboração
-deste plano; foram apenas consultados o repositório e documentação pública.
+No real transcription, balance or keys endpoint was called during the preparation
+of this plan; only the repository and public documentation were consulted.
 
-## Validação da implementação — 2026-10-03
+## Implementation validation — 2026-10-03
 
-- Suite Python completa com PostgreSQL descartável: **183 passaram, 1 falhou**.
-  A falha preexistente é `test_final_context_budget_includes_all_prompt_and_memory`
-  (`tests/test_review_python.py:52`, orçamento do prompt em `app/llm.py:99`);
-  estes ficheiros não foram alterados neste trabalho.
-- Os 20 testes Deepgram cobrem quotas partilhadas/deduplicação, reconciliação de
-  projetos, fallback em ambas as ordens nos dois modos, resultados duráveis,
-  recuperação de jobs Speechmatics com contabilidade monotónica, créditos mistos,
-  KeepAlive, fecho incompleto, cancelamento, preferências, estado agregado e
-  substituição de finais sem replay para o assistente. A suite existente continua
-  a validar FIFO, saída, DTX, limpeza e concorrência.
-- `go test -race ./...` e `go vet ./...`: passaram, incluindo comandos, paginação
-  de keys e atualização imediata da atribuição após falha.
-- Ruff nos ficheiros Python alterados: passou. O lint global encontra apenas o
-  import preexistente não formatado em `src/data/__init__.py` (`I001`), não alterado.
-- `git diff --check` e Compose com placeholders: passaram.
-- Nenhuma transcrição real paga foi executada. Comparação de qualidade PT-PT,
-  permissões/saldo reais e ativação em produção precisam de credenciais e áudio real.
-  `.env` existente não foi alterado: usar `/stt order` após configurar a key e
-  reconstruir os serviços; a ordem do exemplo aplica-se a instalações novas.
+- Full Python suite with disposable PostgreSQL: **183 passed, 1 failed**.
+  The pre-existing failure is `test_final_context_budget_includes_all_prompt_and_memory`
+  (`tests/test_review_python.py:52`, prompt budget in `app/llm.py:99`);
+  these files were not changed in this work.
+- The 20 Deepgram tests cover shared quotas/deduplication, reconciliation of
+  projects, fallback in both orders in both modes, durable results,
+  recovery of Speechmatics jobs with monotonic accounting, mixed credits,
+  KeepAlive, incomplete closing, cancellation, preferences, aggregated state and
+  replacement of finals without replay to the assistant. The existing suite continues
+  to validate FIFO, exit, DTX, cleanup and concurrency.
+- `go test -race ./...` and `go vet ./...`: passed, including commands, key pagination
+  and immediate update of the assignment after failure.
+- Ruff on the changed Python files: passed. The global lint finds only the
+  pre-existing unformatted import in `src/data/__init__.py` (`I001`), not changed.
+- `git diff --check` and Compose with placeholders: passed.
+- No real paid transcription was executed. PT-PT quality comparison,
+  real permissions/balance and activation in production need credentials and real audio.
+  The existing `.env` was not changed: use `/stt order` after configuring the key and
+  rebuilding the services; the example order applies to new installations.

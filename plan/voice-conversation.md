@@ -1,230 +1,230 @@
-# Plano: conversa contínua com «Olá macaco»
+# Plan: continuous conversation with "Olá macaco"
 
-Data: 2026-10-06. Estado: implementação concluída e verificada localmente; ensaio Discord real pendente. Decisões confirmadas pelo utilizador após três rondas de Grilling e confirmação final.
+Date: 2026-10-06. Status: implementation complete and verified locally; real Discord rehearsal pending. Decisions confirmed by the user after three rounds of Grilling and final confirmation.
 
-## Objetivo confirmado
+## Confirmed objective
 
-«Olá macaco» abre uma conversa natural. O utilizador pode continuar a falar sem
-repetir a ativação a cada resposta. O bot recebe contexto dos últimos minutos da
-chamada e mantém o fio da conversa. «Adeus macaco» termina a conversa; um período
-de inatividade também a termina: 30 segundos disponíveis para o autor responder,
-sem contar o tempo de geração e reprodução da resposta do bot.
+"Olá macaco" opens a natural conversation. The user can keep speaking without
+repeating the activation on every reply. The bot receives context from the last minutes of the
+call and keeps the thread of the conversation. "Adeus macaco" ends the conversation; a period
+of inactivity also ends it: 30 seconds available for the author to reply,
+not counting the time spent generating and playing the bot's response.
 
-## Factos do código atual
+## Facts about the current code
 
-- `discord_bot/assistant.go` mantém um pedido por chamada e executa `reset()` depois
-  de responder. Enquanto responde, descarta novas palavras do autor para o pedido.
-- A captura já associa falas a utilizadores, espera silêncio e finais confirmados,
-  preserva perguntas entre gravações e cancela operações através de contextos Go.
-- A confirmação e a resposta já podem ser publicadas no início da reprodução de
-  voz; a síntese já produz áudio por segmentos e conserva a alternativa por texto.
-- `/v1/assistant/question` insere perguntas e respostas na persistência existente.
-  O contexto atual usa `get_guild_oracle_context`, que reúne mensagens, perfis,
-  resumos e bulks de todo o servidor. Não garante a janela da chamada atual.
-- `get_session_messages(session_id)` já isola a chamada, identifica autores e ordena
-  mensagens; atualmente lê a chamada inteira. Realtime persiste cada final antes
-  de o enviar ao bot, pelo que não é necessário esperar pelo fecho de um bulk.
-- `format_transcript` já formata nomes, tempos e autoria. Os bulks continuam úteis
-  como memória de fundo; são agregados por servidor e processados após o fecho.
+- `discord_bot/assistant.go` keeps one request per call and runs `reset()` after
+  replying. While it replies, it discards new words from the author for the request.
+- Capture already associates utterances with users, waits for silence and confirmed finals,
+  preserves questions between recordings and cancels operations through Go contexts.
+- The confirmation and the response can already be published at the start of voice
+  playback; synthesis already produces audio per segment and keeps the text alternative.
+- `/v1/assistant/question` inserts questions and answers into the existing persistence.
+  The current context uses `get_guild_oracle_context`, which gathers messages, profiles,
+  summaries and bulks from the whole server. It does not guarantee the window of the current call.
+- `get_session_messages(session_id)` already isolates the call, identifies authors and orders
+  messages; currently it reads the entire call. Realtime persists each final before
+  sending it to the bot, so there is no need to wait for a bulk to close.
+- `format_transcript` already formats names, timestamps and authorship. Bulks remain useful
+  as background memory; they are aggregated per server and processed after closing.
 
-## Primeira ronda: decisões confirmadas
+## First round: confirmed decisions
 
-O utilizador confirmou estas escolhas através das opções selecionáveis.
+The user confirmed these choices through the selectable options.
 
-| Decisão | Escolha confirmada | Consequência |
+| Decision | Confirmed choice | Consequence |
 | --- | --- | --- |
-| Quem conversa | A pessoa que ativou; outras vozes são contexto | As outras pessoas não fornecem turnos à conversa ativa |
-| Janela recente | Últimos 5 minutos da chamada atual | Atualizar o contexto a cada turno, além do histórico do diálogo |
-| Fim de um turno | 5 segundos de silêncio do autor, aguardando finais | Preservar margem para pausas a meio da frase |
-| Inatividade | 30 segundos para o utilizador responder; suspender durante geração e voz do bot | Começar uma nova janela quando a resposta termina |
+| Who converses | The person who activated; other voices are context | Other people do not provide turns to the active conversation |
+| Recent window | Last 5 minutes of the current call | Refresh the context on every turn, in addition to the dialogue history |
+| End of a turn | 5 seconds of silence from the author, waiting for finals | Preserve margin for pauses in the middle of a sentence |
+| Inactivity | 30 seconds for the user to reply; suspend during bot generation and voice | Start a new window when the response ends |
 
-## Segunda ronda: decisões confirmadas
+## Second round: confirmed decisions
 
-| Decisão | Escolha confirmada |
+| Decision | Confirmed choice |
 | --- | --- |
-| Interrupção | Nova fala do autor interrompe geração ou voz; ouvir o novo turno e responder após 5 segundos de pausa |
-| Fala lateral | Toda a fala do autor durante a conversa é dirigida ao bot; o autor termina a conversa antes de falar de lado |
-| Outra ativação | Manter o autor atual; avisar a outra pessoa que o bot está ocupado |
-| Despedida | Aceitar despedida isolada e «obrigado, adeus macaco»; não terminar por uma citação numa pergunta |
+| Interruption | New speech from the author interrupts generation or voice; listen to the new turn and reply after 5 seconds of pause |
+| Side talk | All speech from the author during the conversation is directed at the bot; the author ends the conversation before talking on the side |
+| Another activation | Keep the current author; tell the other person that the bot is busy |
+| Farewell | Accept an isolated farewell and "obrigado, adeus macaco"; do not end on a quotation inside a question |
 
-## Terceira ronda: decisões confirmadas
+## Third round: confirmed decisions
 
-| Decisão | Escolha confirmada |
+| Decision | Confirmed choice |
 | --- | --- |
-| Extensão | 2–4 frases por defeito; desenvolver quando o autor pedir |
-| Chat | Mostrar a fala reconhecida do autor e a resposta; publicar a resposta no início da voz |
-| Fim explícito | Responder à despedida com uma despedida curta |
-| Fim por inatividade | Encerrar silenciosamente após 30 segundos disponíveis para responder |
-| Falhas | Aviso curto, manter a conversa até ao timeout e permitir repetir sem nova ativação |
-| Duração de um turno | Até 60 segundos de fala/captura; se exceder, pedir para encurtar sem responder a um corte arbitrário |
+| Length | 2–4 sentences by default; expand when the author asks |
+| Chat | Show the author's recognised speech and the response; publish the response at the start of the voice |
+| Explicit end | Reply to the farewell with a short farewell |
+| End by inactivity | Close silently after 30 seconds available to reply |
+| Failures | Short warning, keep the conversation until the timeout and allow retrying without a new activation |
+| Duration of a turn | Up to 60 seconds of speech/capture; if exceeded, ask to shorten instead of replying to an arbitrary cut |
 
-«Olá macaco» sozinho recebe a confirmação uma vez e abre a janela de 30 segundos
-para começar. Uma pergunta incluída na ativação inicia logo o primeiro turno.
-A janela de 30 segundos substitui o prazo inicial de 10 segundos da versão anterior.
-Conservar o limite validado de 2000 caracteres por fala: exceder duração ou texto
-produz um aviso para encurtar, sem enviar apenas parte da pergunta ao LLM.
-Fala do autor reinicia a inatividade; cinco segundos de silêncio fecham cada turno.
-Outras pessoas, ruído e silêncio artificial não reiniciam os relógios do autor.
+"Olá macaco" on its own receives the confirmation once and opens the 30-second window
+to begin. A question included in the activation starts the first turn right away.
+The 30-second window replaces the previous version's initial 10-second deadline.
+Keep the validated limit of 2000 characters per utterance: exceeding duration or text
+produces a warning to shorten, without sending only part of the question to the LLM.
+Speech from the author restarts inactivity; five seconds of silence close each turn.
+Other people, noise and artificial silence do not restart the author's clocks.
 
-## Solução mínima com Ponytail
+## Minimal solution with Ponytail
 
-1. **Distinguir conversa de turno no controlador existente.** A conversa mantém
-   o autor, tempos e histórico limitado. O pedido atual continua a delimitar
-   uma fala e uma resposta. Concluir um turno limpa apenas o pedido; terminar a
-   conversa limpa também o histórico transitório e volta à procura de ativação.
-   Manter uma conversa ativa por chamada, sem gestor novo,
-   filas de conversas ou sessões concorrentes por utilizador.
-2. **Dois relógios separados.** Uma pausa curta fecha o turno para obter uma
-   resposta. A pausa longa encerra a conversa. Ruído, silêncio artificial,
-   transcrições atrasadas e a voz do bot não podem prolongar a conversa como se
-   fossem nova fala do utilizador. Aplicar o limite de 60 segundos de captura por turno e
-   conservar o prazo existente de 30 segundos para o LLM separadamente da
-   inatividade. Suspender a inatividade durante geração/voz; dar uma nova janela
-   de 30 segundos quando termina a resposta ou um aviso recuperável.
-3. **Contexto recente e histórico de diálogo separados.** Acrescentar uma query
-   pequena com `session_id`, janela temporal e limite de resultados; reaproveitar
-   a formatação existente. Atualizar a janela em cada turno. Não esperar pelos
-   resumos dos bulks, nem usar memória de outras chamadas como substituto.
-   Levar ao LLM os últimos turnos da conversa ativa, com autor e papel claramente
-   identificados, sem os destilar como evidência: «e nesse caso?» deve conservar
-   a referência à resposta anterior. Aplicar o orçamento existente de `LLM_CONTEXT_CHARS` ao prompt completo.
-   Guardar no máximo 12 trocas recentes (24 mensagens), sem cortar a fala atual;
-   priorizar o diálogo mais recente e preencher o espaço restante com contexto
-   recente da chamada. Se a janela ultrapassar o orçamento, usar a parte mais
-   recente e identificar cobertura parcial, sem alegar acesso a toda a conversa.
-   Não introduzir uma chamada adicional ao LLM para resumir cada turno.
-4. **Reutilizar API e persistência.** Alargar o contrato atual de pergunta para
-   transportar o histórico limitado; validar campos e limites na API. Identidade
-   e contexto recente continuam associados à chamada existente. Persistir cada
-   pergunta/resposta pelo caminho atual. Histórico ativo fica em memória e não
-   é reativado após reinício. Sem migração enquanto não existir uma necessidade
-   confirmada de recuperar conversas abertas.
-5. **Encerramento e interrupções explícitos.** Reconhecer a despedida do autor
-   após normalizar acentos, caixa e pontuação; aceitar «adeus macaco» isolado e
-   variantes de cortesia como «obrigado, adeus macaco». Uma pergunta que cite a
-   expressão não termina a conversa. Só o autor pode terminá-la por fala.
-   Encerrar também quando o autor sai, o bot muda de canal ou o assistente é
-   desligado. Invalidar operações pendentes e usar os cancelamentos existentes.
-   Uma rotação normal de gravação mantém conversa e turno. Enquanto gera ou fala,
-   continuar a consumir fala nova do autor: interromper a resposta, conservar a
-   nova fala e aguardar cinco segundos de silêncio antes de responder novamente.
-   Ignorar outras vozes para interrupção; não tratar picos de ruído como fala.
-   Respostas geradas que nunca foram publicadas não entram como respostas do bot
-   no histórico. Se o texto já foi publicado e a voz foi cortada, marcar a
-   reprodução como interrompida. Preservar a pergunta anterior ainda sem resposta
-   entregue, para compreender acrescentos como «e usa Python».
-6. **Entrega conversacional e falhas.** Confirmar a abertura uma vez; evitar
-   repetir «Diz» entre turnos. Respostas naturais em PT-PT, com 2–4 frases por
-   defeito e desenvolvimento a pedido. Mostrar fala reconhecida e resposta no
-   chat; preservar o início de voz alinhado com a resposta escrita. A despedida
-   explícita recebe uma resposta curta e fixa, sem gerar um novo turno LLM.
-   Timeout termina silenciosamente. Falha de reconhecimento/LLM gera um aviso
-   curto e volta à escuta na mesma conversa; não responder a texto incompleto.
-   Se Realtime cair, manter a conversa até ao timeout e aceitar fala nova após
-   recuperação da cobertura; Batch não pode reativar ou alimentar turnos antigos.
-   Falha de voz conserva a resposta por texto. Não repetir automaticamente uma
-   publicação Discord cujo resultado seja ambíguo, nem produzir avisos em loop.
-   As reações espontâneas aguardam toda a conversa ativa, incluindo as pausas.
+1. **Distinguish conversation from turn in the existing controller.** The conversation keeps
+   the author, timestamps and limited history. The current request continues to delimit
+   one utterance and one response. Completing a turn clears only the request; ending the
+   conversation also clears the transient history and returns to looking for activation.
+   Keep one active conversation per call, with no new manager,
+   conversation queues or concurrent sessions per user.
+2. **Two separate clocks.** A short pause closes the turn to obtain a
+   response. The long pause ends the conversation. Noise, artificial silence,
+   delayed transcripts and the bot's voice cannot extend the conversation as if
+   they were new speech from the user. Apply the 60-second capture limit per turn and
+   keep the existing 30-second deadline for the LLM separately from
+   inactivity. Suspend inactivity during generation/voice; give a new window
+   of 30 seconds when the response or a recoverable warning ends.
+3. **Recent context and dialogue history kept separate.** Add a small
+   query with `session_id`, time window and result limit; reuse
+   the existing formatting. Refresh the window on every turn. Do not wait for
+   bulk summaries, nor use memory from other calls as a substitute.
+   Take to the LLM the last turns of the active conversation, with author and role clearly
+   identified, without distilling them as evidence: "and in that case?" must keep
+   the reference to the previous response. Apply the existing `LLM_CONTEXT_CHARS` budget to the full prompt.
+   Store at most 12 recent exchanges (24 messages), without cutting the current utterance;
+   prioritise the most recent dialogue and fill the remaining space with recent
+   context from the call. If the window exceeds the budget, use the most
+   recent part and identify partial coverage, without claiming access to the whole conversation.
+   Do not introduce an additional LLM call to summarise each turn.
+4. **Reuse API and persistence.** Extend the current question contract to
+   carry the limited history; validate fields and limits in the API. Identity
+   and recent context remain associated with the existing call. Persist each
+   question/answer through the current path. Active history stays in memory and is not
+   reactivated after a restart. No migration while there is no confirmed
+   need to recover open conversations.
+5. **Explicit closing and interruptions.** Recognise the author's farewell
+   after normalising accents, case and punctuation; accept an isolated "adeus macaco" and
+   courtesy variants such as "obrigado, adeus macaco". A question that quotes the
+   expression does not end the conversation. Only the author can end it by speech.
+   Also end when the author leaves, the bot changes channel or the assistant is
+   turned off. Invalidate pending operations and use the existing cancellations.
+   A normal recording rotation keeps the conversation and the turn. While generating or speaking,
+   keep consuming new speech from the author: interrupt the response, keep the
+   new speech and wait five seconds of silence before replying again.
+   Ignore other voices for interruption; do not treat noise spikes as speech.
+   Generated responses that were never published do not enter as bot responses
+   in the history. If the text was already published and the voice was cut, mark the
+   playback as interrupted. Preserve the previous question still without a delivered
+   answer, to understand additions such as "and it uses Python".
+6. **Conversational delivery and failures.** Confirm the opening once; avoid
+   repeating "Diz" between turns. Natural responses in PT-PT, with 2–4 sentences by
+   default and development on request. Show recognised speech and response in the
+   chat; keep the start of voice aligned with the written response. The explicit
+   farewell receives a short, fixed response, without generating a new LLM turn.
+   Timeout ends silently. Recognition/LLM failure produces a short warning
+   and returns to listening in the same conversation; do not reply to incomplete text.
+   If Realtime goes down, keep the conversation until the timeout and accept new speech after
+   coverage recovers; Batch cannot reactivate or feed old turns.
+   Voice failure keeps the response as text. Do not automatically repeat a
+   Discord publication whose result is ambiguous, nor produce warnings in a loop.
+   Spontaneous reactions wait for the entire active conversation, including the pauses.
 
-Reutilizar STT, LLM, Piper, transporte Discord e memória existentes. Sem fornecedor
-novo, SDK novo, vector DB, segundo processo de conversação, sumarização por turno
-ou classificação adicional de intenção sem uma necessidade confirmada. Só mudar
-a arquitetura se medições mostrarem que os componentes atuais impedem a experiência.
+Reuse the existing STT, LLM, Piper, Discord transport and memory. No new
+provider, new SDK, vector DB, second conversation process, per-turn summarisation
+or additional intent classification without a confirmed need. Only change
+the architecture if measurements show that the current components prevent the experience.
 
-## Fluxo aprovado nas rondas
+## Flow approved across the rounds
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Aguardar
-    Aguardar --> Conversa: Olá macaco do autor
-    state Conversa {
-        [*] --> Ouvir
-        Ouvir --> Gerar: 5 segundos de silêncio e finais completos
-        Gerar --> Falar: texto e primeiro áudio prontos
-        Gerar --> Ouvir: nova fala do autor ou falha recuperável
-        Falar --> Ouvir: fim da resposta ou interrupção do autor
+    [*] --> Wait
+    Wait --> Conversation: Olá macaco from the author
+    state Conversation {
+        [*] --> Listen
+        Listen --> Generate: 5 seconds of silence and complete finals
+        Generate --> Speak: text and first audio ready
+        Generate --> Listen: new speech from the author or recoverable failure
+        Speak --> Listen: end of response or author interruption
     }
-    Conversa --> Aguardar: despedida, 30 segundos de inatividade ou saída
+    Conversation --> Wait: farewell, 30 seconds of inactivity or leaving
 ```
 
-Sem voz disponível, a entrega por texto regressa diretamente à escuta.
-Uma nova ativação de outra pessoa mantém a conversa atual e recebe um aviso de
-ocupado com a limitação de frequência já existente. Toda a fala do autor conta
-como dirigida ao bot, incluindo interjeições claras; não acrescentar um classificador
-para conversas laterais. A pessoa termina a conversa antes de falar de lado.
+Without voice available, text delivery returns directly to listening.
+A new activation by another person keeps the current conversation and receives a busy
+warning with the existing rate limit. All speech from the author counts
+as directed at the bot, including clear interjections; do not add a classifier
+for side conversations. The person ends the conversation before talking on the side.
 
-## Sequência de implementação
+## Implementation sequence
 
-1. Implementar contexto recente e histórico de diálogo, com isolamento por chamada
-   e orçamento do prompt verificáveis.
-2. Implementar continuidade entre turnos, despedida e relógio de inatividade no
-   controlador; manter as correções de captura e entrega anteriores.
-3. Aplicar interrupções, falhas recuperáveis, respostas curtas e mensagens no chat.
-4. Executar testes relevantes e validar numa chamada real com duas pessoas,
-   pausas, ruído e música. Medir ativação, fecho do turno, primeira voz e fim.
+1. Implement recent context and dialogue history, with per-call isolation
+   and verifiable prompt budget.
+2. Implement continuity between turns, farewell and the inactivity clock in the
+   controller; keep the earlier capture and delivery fixes.
+3. Apply interruptions, recoverable failures, short responses and chat messages.
+4. Run the relevant tests and validate in a real call with two people,
+   pauses, noise and music. Measure activation, turn closing, first voice and end.
 
-## Critérios de aceitação
+## Acceptance criteria
 
-- Uma ativação permite pelo menos três trocas seguidas sem repetir a frase.
-- Perguntas como «porquê?» e «dá outro exemplo» mantêm a referência ao diálogo.
-- O bot usa fala recente da chamada, incluindo finais de um bulk aberto; nomes,
-  tempos e autoria são preservados e outra chamada não entra nesse contexto.
-- Cinco segundos de silêncio fecham o turno; 30 segundos de inatividade terminam
-  a conversa. Geração e voz suspendem a inatividade. Uma fala de até 60 segundos
-  pode terminar normalmente; ultrapassar o limite não produz uma resposta parcial.
-- «Adeus macaco» e «obrigado, adeus macaco» terminam com despedida curta; uma
-  pergunta sobre a expressão não termina a conversa. Timeout termina em silêncio.
-- Uma rotação de gravação não termina a conversa nem perde segmentos atrasados.
-- Eventos duplicados/antigos e respostas após encerramento não geram novas falas.
-- Falha da voz mantém a resposta por texto; cancelamento não publica texto antigo.
-- O autor interrompe geração e reprodução; a fala nova e a pergunta anterior
-  pertinente são preservadas. Outra pessoa não interrompe nem toma a conversa.
-- Uma falha recuperável permite repetir sem nova ativação. Desligar o assistente
-  ou sair da chamada cancela imediatamente a conversa e publicações pendentes.
-- Histórico e contexto são limitados, sem crescimento proporcional à duração
-  total da chamada. Reiniciar regressa à espera de uma nova ativação.
+- One activation allows at least three consecutive exchanges without repeating the phrase.
+- Questions such as "why?" and "give another example" keep the reference to the dialogue.
+- The bot uses recent speech from the call, including finals from an open bulk; names,
+  timestamps and authorship are preserved and another call does not enter that context.
+- Five seconds of silence close the turn; 30 seconds of inactivity end
+  the conversation. Generation and voice suspend inactivity. Speech of up to 60 seconds
+  can end normally; exceeding the limit does not produce a partial response.
+- "Adeus macaco" and "obrigado, adeus macaco" end with a short farewell; a
+  question about the expression does not end the conversation. Timeout ends in silence.
+- A recording rotation does not end the conversation nor lose delayed segments.
+- Duplicate/old events and responses after closing do not generate new speech.
+- Voice failure keeps the response as text; cancellation does not publish old text.
+- The author interrupts generation and playback; the new speech and the relevant
+  previous question are preserved. Another person does not interrupt or take over the conversation.
+- A recoverable failure allows retrying without a new activation. Turning off the assistant
+  or leaving the call immediately cancels the conversation and pending publications.
+- History and context are bounded, without growth proportional to the total
+  duration of the call. Restarting returns to waiting for a new activation.
 
-## Limites e verificação operacional
+## Limits and operational verification
 
-Não criar novas tabelas, fornecedores ou configurações por servidor. Reutilizar
-`ASSISTANT_SILENCE_SECONDS=5`; acrescentar apenas controlos de duração no ambiente
-para inatividade (30 segundos) e captura (60 segundos), com validação de valores.
-O estado transitório recomeça à espera após reinício; as trocas já persistidas
-continuam disponíveis à memória existente. A cobertura Realtime continua a depender
-das reservas atuais. Contexto de fala ainda não transcrita não estará disponível.
+Do not create new tables, providers or per-server settings. Reuse
+`ASSISTANT_SILENCE_SECONDS=5`; add only duration controls in the environment
+for inactivity (30 seconds) and capture (60 seconds), with value validation.
+Transient state restarts in the waiting state after a restart; exchanges already persisted
+remain available to the existing memory. Realtime coverage continues to depend
+on the current reservations. Speech context not yet transcribed will not be available.
 
-Cancelar a operação local deve impedir entrega obsoleta, mesmo se o cliente LLM
-não permitir interromper o trabalho remoto já iniciado. Não prometer que o
-cancelamento poupa todos os tokens de uma geração em curso. Medir latência da
-primeira voz e consumo numa chamada de teste; não prometer uma resposta total em
-cinco segundos, pois esse intervalo é apenas a pausa para fechar o turno.
+Cancelling the local operation must prevent obsolete delivery, even if the LLM client
+does not allow interrupting remote work already started. Do not promise that
+cancellation saves all tokens of an ongoing generation. Measure first-voice latency
+and consumption in a test call; do not promise a full response in
+five seconds, since that interval is only the pause to close the turn.
 
-O ensaio Discord continua necessário: os testes locais não medem eco de microfones,
-ruído real, cobertura Realtime dos participantes ou latência dos fornecedores.
+The Discord rehearsal is still necessary: local tests do not measure microphone echo,
+real noise, Realtime coverage of the participants or provider latency.
 
 
-## Implementação e verificação — 2026-10-06
+## Implementation and verification — 2026-10-06
 
-- Implementados contexto dos últimos cinco minutos por chamada (máximo 500 finais),
-  histórico ativo de 24 mensagens, validação da API e orçamento do prompt completo.
-  O diálogo conserva autoria, papéis, perguntas sem resposta entregue e voz interrompida;
-  a redução de contexto usa os dados recentes e marca cobertura parcial, sem outro LLM.
-- Implementados continuidade, despedida fixa, pausa de cinco segundos, inatividade de
-  30 segundos disponíveis e captura até 60 segundos/2000 caracteres. Geração e voz
-  suspendem a inatividade. Ruído e finais vazios não iniciam turnos nem renovam a janela.
-- Implementadas interrupções por fala reconhecida do autor, recuperação sem ativação,
-  espera pelos finais de gravações anteriores e cancelamento imediato ao desligar,
-  sair ou mudar de canal. A publicação Discord recebe o contexto cancelável da operação;
-  resultados ambíguos não são repetidos. Reações espontâneas aguardam a conversa inteira.
-- Acrescentados `ASSISTANT_INACTIVITY_SECONDS` e `ASSISTANT_CAPTURE_SECONDS` ao ambiente
-  e Docker Compose, com intervalos válidos de 5–300 segundos. Sem novas dependências,
-  migrações ou tabelas. Documentação atualizada em `README.md` e na documentação da API.
-- Verificação local: 213 testes da API/Python com PostgreSQL descartável, nove testes
-  de síntese, `go test -race ./...`, lint dos ficheiros alterados e validação do Compose.
-  O lint global conserva uma falha preexistente de ordenação de imports em
-  `src/data/__init__.py`; esse ficheiro não foi alterado.
-- Pendente: chamada real com duas pessoas, pausas, ruído e música. Os logs
+- Implemented context from the last five minutes per call (maximum 500 finals),
+  active history of 24 messages, API validation and full prompt budget.
+  The dialogue preserves authorship, roles, questions without a delivered answer and interrupted voice;
+  context reduction uses the recent data and marks partial coverage, without another LLM.
+- Implemented continuity, fixed farewell, five-second pause, inactivity of
+  30 seconds available and capture of up to 60 seconds/2000 characters. Generation and voice
+  suspend inactivity. Noise and empty finals do not start turns nor renew the window.
+- Implemented interruptions by recognised speech from the author, recovery without activation,
+  waiting for finals from previous recordings and immediate cancellation when turning off,
+  leaving or changing channel. The Discord publication receives the operation's cancellable context;
+  ambiguous results are not repeated. Spontaneous reactions wait for the whole conversation.
+- Added `ASSISTANT_INACTIVITY_SECONDS` and `ASSISTANT_CAPTURE_SECONDS` to the environment
+  and Docker Compose, with valid ranges of 5–300 seconds. No new dependencies,
+  migrations or tables. Documentation updated in `README.md` and in the API documentation.
+- Local verification: 213 API/Python tests with a disposable PostgreSQL, nine synthesis
+  tests, `go test -race ./...`, lint of the changed files and Compose validation.
+  The global lint keeps a pre-existing import ordering failure in
+  `src/data/__init__.py`; that file was not changed.
+- Pending: real call with two people, pauses, noise and music. The logs
   `assistant activation`, `assistant turn closed`, `assistant delivery` (`voice_ready`)
-  e `assistant response` permitem medir abertura, fecho do turno, entrega no início
-  da voz e fim. Medir também consumo em `/keys`; os testes locais não medem latência
-  dos fornecedores, eco ou precisão do reconhecimento.
+  and `assistant response` allow measuring opening, turn closing, delivery at the start
+  of voice and end. Also measure consumption in `/keys`; local tests do not measure provider
+  latency, echo or recognition accuracy.
