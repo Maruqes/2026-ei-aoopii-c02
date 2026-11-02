@@ -102,6 +102,7 @@ func (p *MusicPlayer) speak(ctx context.Context, text string, ready func() error
 		return nil
 	}
 	// Python streams 22.05 kHz mono PCM; ffmpeg converts it to Discord's 48 kHz stereo.
+	speakStarted := time.Now()
 	streamCtx, stop := context.WithCancelCause(ctx)
 	defer stop(nil)
 	provider, voice, model := speechProvider(), speechVoice(), speechVoiceModel()
@@ -147,6 +148,7 @@ func (p *MusicPlayer) speak(ctx context.Context, text string, ready func() error
 		return cmd.Wait()
 	}
 	// First decoded frame: the audible start, after Edge, the retry hedge and ffmpeg.
+	// First decoded frame: the audible start, after Edge, the retry hedge and ffmpeg.
 	log.Printf("speech first audio provider=%s latency_ms=%d", provider, time.Since(synthStarted).Milliseconds())
 	encoder, err := opus.NewEncoder(sampleRate, channels, opus.AppVoIP)
 	if err != nil {
@@ -161,6 +163,7 @@ func (p *MusicPlayer) speak(ctx context.Context, text string, ready func() error
 			return err
 		}
 	}
+	log.Printf("speech ready provider=%s total_ms=%d output_and_publish_ms=%d", provider, time.Since(speakStarted).Milliseconds(), time.Since(synthStarted).Milliseconds())
 	if err = p.voiceStatus(true); err != nil {
 		return err
 	}
