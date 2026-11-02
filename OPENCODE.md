@@ -87,7 +87,7 @@ settings are `mimo-v2.6-flash` or `glm-5.3-flash`. Avoid `muse-spark-*` and
 ## Verify
 
 ```bash
-curl -s localhost:8000/v1/health
+curl -s localhost:8000/health
 curl -s localhost:8000/v1/models
 ```
 

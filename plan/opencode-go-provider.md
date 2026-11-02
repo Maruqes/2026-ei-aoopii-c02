@@ -202,7 +202,7 @@ Run: `python -m pytest src/transcription-api/tests -q` and `ruff check src`.
 
 ## Manual verification
 
-1. `curl -s localhost:8000/v1/health` shows `llm_provider: opencode-go` and the chosen model.
+1. `curl -s localhost:8000/health` shows `llm_provider: opencode-go` and the chosen model.
 2. `curl -s localhost:8000/v1/models` returns the ~28 OpenCode Go ids.
 3. In Discord: `/models` lists them; selecting one sends the `Ola!` test prompt and persists it.
 4. One real group-memory bulk, one `/digest`, one `/prompt` and one profile update, checking the API
