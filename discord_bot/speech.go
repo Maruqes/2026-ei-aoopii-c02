@@ -148,8 +148,8 @@ func (p *MusicPlayer) speak(ctx context.Context, text string, ready func() error
 		return cmd.Wait()
 	}
 	// First decoded frame: the audible start, after Edge, the retry hedge and ffmpeg.
-	// First decoded frame: the audible start, after Edge, the retry hedge and ffmpeg.
 	log.Printf("speech first audio provider=%s latency_ms=%d", provider, time.Since(synthStarted).Milliseconds())
+	firstFrame := time.Now()
 	encoder, err := opus.NewEncoder(sampleRate, channels, opus.AppVoIP)
 	if err != nil {
 		return err
@@ -163,7 +163,7 @@ func (p *MusicPlayer) speak(ctx context.Context, text string, ready func() error
 			return err
 		}
 	}
-	log.Printf("speech ready provider=%s total_ms=%d output_and_publish_ms=%d", provider, time.Since(speakStarted).Milliseconds(), time.Since(synthStarted).Milliseconds())
+	log.Printf("speech ready provider=%s total_ms=%d output_and_publish_ms=%d", provider, time.Since(speakStarted).Milliseconds(), time.Since(firstFrame).Milliseconds())
 	if err = p.voiceStatus(true); err != nil {
 		return err
 	}
