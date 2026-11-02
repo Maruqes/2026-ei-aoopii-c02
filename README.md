@@ -205,15 +205,15 @@ Speech detection initially uses PCM energy (`ASSISTANT_SPEECH_RMS=500`); it shou
 noise and music. The Discord trial, capacity and latency targets are still
 pending.
 
-The assistant also reads the reply into the call with a local European Portuguese
-voice using [Piper](https://github.com/OHF-Voice/piper1-gpl) and the Tugão neural voice,
-included in Docker. Speech uses phonemes 30% longer, without changing pitch, and pauses
-of 400 ms between sentences. It needs no other key or network during synthesis.
-Music yields output during speech and resumes at the same
-point; a manual pause is kept. The full reply stays in the chat even if
-synthesis fails. For long replies, it speaks up to 2000 characters and points to the chat
-for the rest. Disabling the assistant, changing configuration or leaving the call
-cancels ongoing speech.
+The assistant also reads the reply into the call with a natural European Portuguese
+neural voice from Microsoft Edge TTS, included in Docker through `edge-tts`
+(default `pt-PT-RaquelNeural`; `pt-PT-DuarteNeural` is the male alternative).
+Edge applies rate, pitch and volume changes natively, keeping the voice natural.
+The first sentences start streaming while the rest is still being synthesized.
+Music yields output during speech and resumes at the same point; a manual pause is
+kept. The full reply stays in the chat even if synthesis fails. For long replies, it
+speaks up to 2000 characters and points to the chat for the rest. Disabling the
+assistant, changing configuration or leaving the call cancels ongoing speech.
 
 Emojis in the reply give expression to the immediately preceding sentence (or the first
 sentence, when they appear at the start): 😊/😄/🎉 make the voice happier, 😂/🤣/😆
@@ -221,21 +221,26 @@ add a short laugh, 😢/😔/💔 soften and slow the voice, and 😭 adds a
 slight tremble. 😮/😱/🤯 indicate surprise, 😡/😠 irritation, ❤️/🥰/🙏 affection,
 😉/😜/😏 playfulness, 🤔 thought and 😴 tiredness. Symbols and skin colour
 variants are not read; repeated emojis do not repeat the laugh. The chat text stays.
-These are approximations through tone, rhythm, volume and synthesised vocalisations: Tugão is not an
-emotional acting model and does not produce natural crying or laughter.
-The model loads once per reply; after 12 expression changes, the
-remaining text is read with the normal voice.
+After 12 expression changes, the remaining text is read with the normal voice.
+
+Edge TTS needs internet access at synthesis time and no API key. If it is
+unreachable or returns no audio, the same reply falls back to the local Piper
+Tugão voice, now at a natural pace without pitch-shift artifacts. To keep the voice
+fully local, set `ASSISTANT_TTS_PROVIDER=piper`. `ASSISTANT_VOICE` chooses the Edge
+voice and `ASSISTANT_VOICE_MODEL` points to the Piper fallback model.
 
 `ASSISTANT_VOICE_ENABLED=true` is the default. Use `false` for chat-only replies.
 After updating, rebuild the API and bot with
 `docker compose up -d --build api discord-bot`.
-To run outside Docker, install `piper-tts==1.8.0` and download the
+To run outside Docker, install `edge-tts==7.3.1`; for the local fallback, also install
+`piper-tts==1.8.0` and download the
 [Tugão model](https://huggingface.co/rhasspy/piper-voices/tree/v1.0.0/pt/pt_PT/tug%C3%A3o/medium)
 and the `.onnx.json` configuration into the same directory. Put `piper` in `PATH` and
 set `ASSISTANT_VOICE_MODEL` to the `.onnx` path (22 050 Hz, mono).
 The [continuous conversation plan](plan/voice-conversation.md) keeps the Discord trial,
 first voice/usage measurements and the evaluation with two people, noise and music
-pending.
+pending. The [voice quality plan](plan/voice-quality.md) records this choice and the
+fallback behaviour.
 
 
 ## Deepgram and Speechmatics

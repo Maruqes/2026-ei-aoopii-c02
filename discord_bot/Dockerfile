@@ -26,7 +26,7 @@ COPY --from=youtube-js /usr/local/bin/node /usr/local/bin/node
 COPY discord_bot/music-requirements.txt /tmp/music-requirements.txt
 RUN python3 -m venv /opt/youtube \
     && /opt/youtube/bin/pip install --no-cache-dir -r /tmp/music-requirements.txt \
-    && /opt/youtube/bin/pip install --no-cache-dir piper-tts==1.8.0 \
+    && /opt/youtube/bin/pip install --no-cache-dir piper-tts==1.8.0 edge-tts==7.3.1 \
     && rm /tmp/music-requirements.txt
 
 ADD https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/pt/pt_PT/tug%C3%A3o/medium/pt_PT-tug%C3%A3o-medium.onnx /opt/piper/pt_PT-tugao-medium.onnx

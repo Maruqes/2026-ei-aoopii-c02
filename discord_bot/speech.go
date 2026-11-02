@@ -2,12 +2,15 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	_ "embed"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
+	"regexp"
 	"strings"
 
 	"gopkg.in/hraban/opus.v2"
@@ -15,6 +18,31 @@ import (
 
 //go:embed speech_synthesis.py
 var speechSynthesis string
+
+const defaultSpeechVoice = "pt-PT-RaquelNeural"
+
+var (
+	speechLink       = regexp.MustCompile(`\[([^\]]+)\]\([^)]+\)`)
+	speechURL        = regexp.MustCompile(`https?://\S+`)
+	speechHTML       = regexp.MustCompile(`<[^>]+>`)
+	speechLinePrefix = regexp.MustCompile(`(?m)^\s*(?:#{1,6}\s+|[-*+]\s+|>\s*)`)
+	speechEmphasis   = strings.NewReplacer("**", "", "__", "", "~~", "", "`", "")
+)
+
+// speechProvider selects the neural Edge voice by default, with local Piper as fallback.
+func speechProvider() string {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("ASSISTANT_TTS_PROVIDER")), "piper") {
+		return "piper"
+	}
+	return "edge"
+}
+
+func speechVoice() string {
+	if voice := strings.TrimSpace(os.Getenv("ASSISTANT_VOICE")); voice != "" {
+		return voice
+	}
+	return defaultSpeechVoice
+}
 
 func speechVoiceModel() string {
 	if model := strings.TrimSpace(os.Getenv("ASSISTANT_VOICE_MODEL")); model != "" {
@@ -24,11 +52,27 @@ func speechVoiceModel() string {
 }
 
 func speechText(text string) string {
-	text = strings.Join(strings.Fields(strings.NewReplacer("**", "", "`", "").Replace(text)), " ")
+	text = speechLink.ReplaceAllString(text, "$1")
+	text = speechHTML.ReplaceAllString(text, " ")
+	text = speechURL.ReplaceAllString(text, "ligação")
+	text = speechLinePrefix.ReplaceAllString(text, "")
+	text = speechEmphasis.Replace(text)
+	text = strings.Join(strings.Fields(text), " ")
 	if runes := []rune(text); len(runes) > 2000 {
 		text = string(runes[:2000]) + ". A resposta completa está no chat."
 	}
 	return text
+}
+
+func speechDiagnostics(stderr string) string {
+	stderr = strings.TrimSpace(stderr)
+	if stderr == "" {
+		return "no diagnostics"
+	}
+	if runes := []rune(stderr); len(runes) > 500 {
+		stderr = string(runes[len(runes)-500:])
+	}
+	return stderr
 }
 
 // Speak holds the shared Discord output while music retains its decoder and position.
@@ -56,19 +100,28 @@ func (p *MusicPlayer) speak(ctx context.Context, text string, ready func() error
 	if text == "" {
 		return nil
 	}
-	// One Piper model load handles all emoji expressions and produces 22.05 kHz mono PCM.
+	// Python streams 22.05 kHz mono PCM; ffmpeg converts it to Discord's 48 kHz stereo.
 	streamCtx, stop := context.WithCancelCause(ctx)
 	defer stop(nil)
-	synth := musicCommand(streamCtx, "python3", "-c", speechSynthesis, speechVoiceModel())
-	synth.Stdin, synth.Stderr = strings.NewReader(text), io.Discard
+	provider, voice, model := speechProvider(), speechVoice(), speechVoiceModel()
+	var synthErr bytes.Buffer
+	synth := musicCommand(streamCtx, "python3", "-c", speechSynthesis, provider, voice, model)
+	synth.Stdin, synth.Stderr = strings.NewReader(text), &synthErr
 	audio, err := synth.StdoutPipe()
 	if err != nil {
 		return err
 	}
 	if err = synth.Start(); err != nil {
-		return fmt.Errorf("could not start Portuguese speech with Piper: %w", err)
+		return fmt.Errorf("could not start Portuguese speech with %s: %w", provider, err)
 	}
-	defer func() { stop(nil); _ = audio.Close(); _ = synth.Wait() }()
+	defer func() {
+		stop(nil)
+		_ = audio.Close()
+		_ = synth.Wait()
+		if diagnostics := strings.TrimSpace(synthErr.String()); diagnostics != "" {
+			log.Printf("speech synthesis provider=%s: %s", provider, diagnostics)
+		}
+	}()
 	cmd := musicCommand(streamCtx, "ffmpeg", "-hide_banner", "-loglevel", "error",
 		"-f", "s16le", "-ar", "22050", "-ac", "1", "-i", "pipe:0",
 		"-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1")
@@ -87,7 +140,7 @@ func (p *MusicPlayer) speak(ctx context.Context, text string, ready func() error
 	}
 	if buffered.Buffered() == 0 {
 		if err = synth.Wait(); err != nil {
-			return fmt.Errorf("could not synthesize Portuguese speech with Piper: %w", err)
+			return fmt.Errorf("could not synthesize Portuguese speech with %s: %w (%s)", provider, err, speechDiagnostics(synthErr.String()))
 		}
 		return cmd.Wait()
 	}
@@ -114,5 +167,8 @@ func (p *MusicPlayer) speak(ctx context.Context, text string, ready func() error
 	if err = cmd.Wait(); err != nil {
 		return err
 	}
-	return synth.Wait()
+	if err = synth.Wait(); err != nil {
+		return fmt.Errorf("could not synthesize Portuguese speech with %s: %w (%s)", provider, err, speechDiagnostics(synthErr.String()))
+	}
+	return nil
 }

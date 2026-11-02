@@ -41,7 +41,7 @@ class SpeechExpressionTests(unittest.TestCase):
         for index in range(30):
             self.assertIn(f"Frase {index}", " ".join(text for text, _ in segments))
 
-    def test_pitch_changes_preserve_duration_and_crying_modulates_voice(self):
+    def test_expression_only_modulates_the_intended_voices(self):
         rate = 22050
         # An audible 200 Hz tone, one second of S16LE mono audio.
         import array
@@ -50,31 +50,52 @@ class SpeechExpressionTests(unittest.TestCase):
         samples = array.array("h", (int(8000 * math.sin(2 * math.pi * 200 * i / rate)) for i in range(rate)))
         if samples.itemsize != 2:
             self.skipTest("requires 16-bit samples")
-        for mood in ("happy", "laugh", "cry"):
+        for mood in ("neutral", "happy", "laugh", "sad", "angry"):
+            with self.subTest(mood=mood):
+                self.assertEqual(expressive_audio(samples.tobytes(), EXPRESSIONS[mood], rate), samples.tobytes())
+        for mood in ("nervous", "cry"):
             with self.subTest(mood=mood):
                 audio = expressive_audio(samples.tobytes(), EXPRESSIONS[mood], rate)
                 self.assertGreater(len(audio), len(samples) * 2 * 0.9)
                 self.assertLess(len(audio), len(samples) * 2 * 1.1)
                 self.assertNotEqual(audio, samples.tobytes())
-        self.assertEqual(expressive_audio(samples.tobytes(), EXPRESSIONS["neutral"], rate), samples.tobytes())
 
     def test_one_model_load_multiple_expressions_and_one_chuckle_per_group(self):
         class Chunk:
             audio_int16_bytes = b"\x01\x00" * 2205
 
-        with patch("piper.PiperVoice.load") as load, patch("speech_synthesis.expressive_audio", side_effect=lambda audio, *_: audio):
+        with patch("piper.PiperVoice.load") as load, patch("os.path.exists", return_value=True), patch("speech_synthesis.expressive_audio", side_effect=lambda audio, *_: audio):
             voice = load.return_value
             voice.config.sample_rate = 22050
             voice.synthesize.return_value = [Chunk()]
             output = io.BytesIO()
-            synthesize("voice.onnx", "Boa 😂😂. Que pena 😢.", output)
+            synthesize("piper", "", "voice.onnx", "Boa 😂😂. Que pena 😢.", output)
             load.assert_called_once_with("voice.onnx")
             self.assertEqual(voice.synthesize.call_count, 2)
             first, second = voice.synthesize.call_args_list
             self.assertEqual(first.args[0], "Boa. Ah, ah!")
             self.assertEqual(first.args[1].length_scale, EXPRESSIONS["laugh"].length)
             self.assertEqual(second.args[0], "Que pena.")
-            self.assertEqual(second.args[1].volume, EXPRESSIONS["sad"].volume)
+            self.assertEqual(second.args[1].volume, 1.0)
+            self.assertGreater(len(output.getvalue()), 2 * len(Chunk.audio_int16_bytes))
+
+    def test_edge_failure_falls_back_to_local_piper(self):
+        from unittest.mock import AsyncMock
+
+        class Chunk:
+            audio_int16_bytes = b"\x01\x00" * 2205
+
+        with patch("os.path.exists", return_value=True), \
+                patch("piper.PiperVoice.load") as load, \
+                patch("speech_synthesis.edge_pcm", new=AsyncMock(side_effect=RuntimeError("offline"))), \
+                patch("speech_synthesis.expressive_audio", side_effect=lambda audio, *_: audio), \
+                patch("sys.stderr", new=io.StringIO()):
+            voice = load.return_value
+            voice.config.sample_rate = 22050
+            voice.synthesize.return_value = [Chunk()]
+            output = io.BytesIO()
+            synthesize("edge", "pt-PT-RaquelNeural", "voice.onnx", "Olá 😊. Adeus 😢.", output)
+            self.assertEqual(voice.synthesize.call_count, 2)
             self.assertGreater(len(output.getvalue()), 2 * len(Chunk.audio_int16_bytes))
 
     def test_first_chunk_is_flushed_before_synthesizing_the_next(self):
@@ -94,12 +115,14 @@ class SpeechExpressionTests(unittest.TestCase):
             self.assertTrue(output.flushed)
             self.assertEqual(output.getvalue(), Chunk.audio_int16_bytes)
             yield Chunk()
+            self.assertTrue(output.flushed)
+            yield Chunk()
 
-        with patch("piper.PiperVoice.load") as load:
+        with patch("piper.PiperVoice.load") as load, patch("os.path.exists", return_value=True):
             voice = load.return_value
             voice.config.sample_rate = 22050
             voice.synthesize.side_effect = chunks
-            synthesize("voice.onnx", "Primeira frase. Segunda frase.", output)
+            synthesize("piper", "", "voice.onnx", "Primeira frase. Segunda frase.", output)
         self.assertGreater(len(output.getvalue()), 2 * len(Chunk.audio_int16_bytes))
 
 

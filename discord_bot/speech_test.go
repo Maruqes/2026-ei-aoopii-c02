@@ -17,6 +17,7 @@ import (
 
 func speechPlayer(t *testing.T) *MusicPlayer {
 	t.Helper()
+	t.Setenv("ASSISTANT_TTS_PROVIDER", "piper")
 	for _, command := range []string{"python3", "piper", "ffmpeg"} {
 		if _, err := exec.LookPath(command); err != nil {
 			t.Skip(command + " is not installed")
@@ -132,7 +133,7 @@ func TestSpeechOutputIsExclusiveAndMusicResumes(t *testing.T) {
 	}
 }
 
-func TestSpeechSlowsDownAndPausesBetweenSentences(t *testing.T) {
+func TestSpeechKeepsNaturalPaceWithSentencePauses(t *testing.T) {
 	p := speechPlayer(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -151,11 +152,11 @@ func TestSpeechSlowsDownAndPausesBetweenSentences(t *testing.T) {
 		t.Fatal(err)
 	}
 	spokenSeconds := float64(len(p.vc.OpusSend)) * 0.02
-	// Allow phoneme-duration randomness while requiring slower speech and a sentence pause.
-	if spokenSeconds < normalSeconds*1.1+0.3 {
-		t.Fatalf("speech is too rushed: normal=%.2fs spoken=%.2fs", normalSeconds, spokenSeconds)
+	// Natural pacing: close to the model default, never the old 30-55% slowdown.
+	if spokenSeconds < normalSeconds*0.95 || spokenSeconds > normalSeconds*1.6+0.6 {
+		t.Fatalf("speech pace is unnatural: normal=%.2fs spoken=%.2fs", normalSeconds, spokenSeconds)
 	}
-	t.Logf("normal=%.2fs, slower voice with pauses=%.2fs", normalSeconds, spokenSeconds)
+	t.Logf("normal=%.2fs, natural voice with pauses=%.2fs", normalSeconds, spokenSeconds)
 }
 
 func TestSpeechCancellationReleasesOutputAndChildProcesses(t *testing.T) {
@@ -188,8 +189,17 @@ func TestSpeechCancellationReleasesOutputAndChildProcesses(t *testing.T) {
 }
 
 func TestSpeechTextIsBoundedAndFailureReleasesPlayer(t *testing.T) {
-	if got := speechText("**Olá**\n`macaco`"); got != "Olá macaco" {
-		t.Fatal(got)
+	cases := map[string]string{
+		"**Olá**\n`macaco`":              "Olá macaco",
+		"[documentação](https://x.test)": "documentação",
+		"## Título\n- ponto":             "Título ponto",
+		"<@123> olá":                     "olá",
+		"vê https://example.com agora":   "vê ligação agora",
+	}
+	for input, want := range cases {
+		if got := speechText(input); got != want {
+			t.Fatalf("speechText(%q) = %q, want %q", input, got, want)
+		}
 	}
 	if got := speechText(strings.Repeat("á", 2100)); !strings.HasSuffix(got, "A resposta completa está no chat.") || len([]rune(got)) > 2040 {
 		t.Fatal("unbounded speech input")
@@ -201,5 +211,28 @@ func TestSpeechTextIsBoundedAndFailureReleasesPlayer(t *testing.T) {
 	}
 	if p.IsBusy() {
 		t.Fatal("failed synthesis retained playback")
+	}
+}
+
+func TestSpeechProviderAndVoiceDefaults(t *testing.T) {
+	t.Setenv("ASSISTANT_TTS_PROVIDER", "")
+	t.Setenv("ASSISTANT_VOICE", "")
+	if got := speechProvider(); got != "edge" {
+		t.Fatalf("default provider = %q, want edge", got)
+	}
+	if got := speechVoice(); got != defaultSpeechVoice {
+		t.Fatalf("default voice = %q, want %q", got, defaultSpeechVoice)
+	}
+	t.Setenv("ASSISTANT_TTS_PROVIDER", "PIPER")
+	t.Setenv("ASSISTANT_VOICE", "pt-PT-DuarteNeural")
+	if got := speechProvider(); got != "piper" {
+		t.Fatalf("provider override = %q, want piper", got)
+	}
+	if got := speechVoice(); got != "pt-PT-DuarteNeural" {
+		t.Fatalf("voice override = %q", got)
+	}
+	t.Setenv("ASSISTANT_TTS_PROVIDER", "unknown")
+	if got := speechProvider(); got != "edge" {
+		t.Fatalf("unknown provider = %q, want edge", got)
 	}
 }
