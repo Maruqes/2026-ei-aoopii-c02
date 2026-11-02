@@ -9,6 +9,12 @@ from urllib import error, request
 
 from data.repository import UserProfile
 
+# Structured JSON replies (group bulk analysis and member profiles) carry seven
+# prose fields plus four observation arrays. At the conversational 2500-token
+# budget the model regularly hits finish_reason=length and the whole call is
+# wasted, so JSON calls get their own bounded, larger budget.
+STRUCTURED_OUTPUT_TOKENS = 4096
+
 
 @dataclass(frozen=True)
 class LoreEvent:
@@ -85,6 +91,13 @@ class ConversationClient:
     """Bounded, hierarchical evidence extraction shared by all providers."""
 
     context_chars = 24000
+    max_output_tokens = 2500
+
+    def output_budget(self, json_format: bool) -> int:
+        """Structured JSON needs a larger ceiling than conversational prose."""
+        if json_format:
+            return max(self.max_output_tokens, STRUCTURED_OUTPUT_TOKENS)
+        return self.max_output_tokens
 
     def analyze_group_bulk(self, *, observations: str, previous_bulks: str, reaction_allowed: bool) -> dict:
         system = (
@@ -490,7 +503,7 @@ class OpenAICompatibleClient(ConversationClient):
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            max_completion_tokens=self.max_output_tokens,
+            max_completion_tokens=self.output_budget(json_format),
             **kwargs,
         )
         choice = response.choices[0] if response.choices else None
@@ -635,7 +648,7 @@ class OllamaClient(ConversationClient):
                 {"role": "user", "content": user},
             ],
             "stream": False,
-            "options": {"num_predict": self.max_output_tokens},
+            "options": {"num_predict": self.output_budget(json_format)},
         }
         if json_format:
             payload["format"] = "json"

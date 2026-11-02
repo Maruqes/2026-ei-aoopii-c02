@@ -1870,11 +1870,11 @@ class DataRepository:
                 )
             conn.commit()
 
-    def recoverable_realtime_units(self) -> list[tuple[int, str]]:
+    def recoverable_realtime_units(self) -> list[tuple[int, str, datetime]]:
         with closing(connect(self.database_url)) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT id, recording_filename FROM voice_recordings WHERE status = 'fallback_pending'"
+                    "SELECT id, recording_filename, created_at FROM voice_recordings WHERE status = 'fallback_pending'"
                 )
                 return cur.fetchall()
 

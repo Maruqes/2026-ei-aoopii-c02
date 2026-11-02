@@ -168,3 +168,22 @@ def test_missing_key_names_the_environment_variable(fake_openai):
     with pytest.raises(RuntimeError, match="OPENCODE_API_KEY"):
         client.test_model()
     assert fake_openai.instances == []
+
+
+def test_structured_json_gets_a_larger_output_budget(fake_openai):
+    from app.llm import STRUCTURED_OUTPUT_TOKENS
+
+    client = OpenCodeGoClient(
+        api_key="test-key",
+        base_url="https://opencode.ai/inference/go/openai/v1",
+        models_base_url="https://opencode.ai/inference/go/v1",
+        model="deepseek-v4.1-flash",
+    )
+    client.test_model()
+    assert fake_openai.completions[-1]["max_completion_tokens"] == 2500
+
+    client._chat(system="system", user="user", json_format=True)
+    request = fake_openai.completions[-1]
+    assert request["response_format"] == {"type": "json_object"}
+    assert request["max_completion_tokens"] == max(2500, STRUCTURED_OUTPUT_TOKENS)
+    assert request["max_completion_tokens"] >= 4096

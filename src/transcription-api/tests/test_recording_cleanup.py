@@ -331,3 +331,61 @@ def test_forget_before_first_transcription_commit_respects_worker_and_removes_pe
         client.close()
     with pytest.raises(ValueError, match="removed"):
         insert(repository, voice, recording_id)
+
+
+def test_unusable_fallback_units_are_failed_instead_of_retried(tmp_path):
+    import os
+    import time
+    from datetime import timedelta
+
+    from app.recording_cleanup import (
+        REALTIME_RECOVERY_GRACE_SECONDS,
+        recover_realtime_wavs,
+    )
+
+    class Repo:
+        def __init__(self, filename, created_at):
+            self.filename = filename
+            self.created_at = created_at
+            self.failed = []
+            self.admitted = []
+
+        def recoverable_realtime_units(self):
+            return [(16670, self.filename, self.created_at)]
+
+        def mark_recording_failed(self, recording_id, error):
+            self.failed.append((recording_id, error))
+
+        def admit_realtime_recovery(self, recording_id):
+            self.admitted.append(recording_id)
+
+    now = datetime.now(timezone.utc)
+
+    # A missing WAV gets a grace period for a live writer, then fails cleanly.
+    recent = Repo("gone.wav", now)
+    recover_realtime_wavs(recent, tmp_path)
+    assert recent.failed == []
+    stale = Repo(
+        "gone.wav", now - timedelta(seconds=REALTIME_RECOVERY_GRACE_SECONDS + 1)
+    )
+    recover_realtime_wavs(stale, tmp_path)
+    assert [unit for unit, _ in stale.failed] == [16670]
+    assert "never written" in stale.failed[0][1]
+
+    # A zero-byte stale WAV can never be transcribed, so it must not loop.
+    empty = tmp_path / "empty.wav"
+    empty.touch()
+    old = time.time() - 120
+    os.utime(empty, (old, old))
+    unusable = Repo("empty.wav", now)
+    recover_realtime_wavs(unusable, tmp_path)
+    assert [unit for unit, _ in unusable.failed] == [16670]
+    assert "unusable fallback WAV" in unusable.failed[0][1]
+    assert unusable.admitted == []
+
+    # A file modified moments ago may still be written by the bot.
+    fresh = tmp_path / "fresh.wav"
+    fresh.touch()
+    writing = Repo("fresh.wav", now)
+    recover_realtime_wavs(writing, tmp_path)
+    assert writing.failed == [] and writing.admitted == []

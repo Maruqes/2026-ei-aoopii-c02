@@ -12,6 +12,9 @@ from pathlib import Path
 logger = logging.getLogger("uvicorn.error")
 MEDIA_SUFFIXES = (".speechmatics.json", ".speechmatics.tmp", ".deepgram.json", ".deepgram.json.tmp", ".deepgram-mono.wav")
 SIDECAR_SUFFIXES = (*MEDIA_SUFFIXES, ".request.json")
+# A fallback WAV that never appears within this window cannot be recovered; a
+# live writer needs the time to create and flush it after an API restart.
+REALTIME_RECOVERY_GRACE_SECONDS = 60
 
 
 def recording_paths(
@@ -136,11 +139,28 @@ class RecordingCleanup:
 
 
 def recover_realtime_wavs(repository, directory: Path) -> None:
-    """A stale fallback WAV has no live capture writer; repair crash-truncated headers."""
-    for recording_id, filename in repository.recoverable_realtime_units():
+    """Repair stale fallback WAVs and retire units that can never be transcribed.
+
+    ``fallback_pending`` means "streaming ended; the batch path should pick the
+    WAV up". A live writer may still be flushing it, so recent files are left
+    alone. A missing file or an invalid header older than the grace period can
+    never become audio, and retrying it every two seconds hid that fact.
+    """
+    now = time.time()
+    for recording_id, filename, created_at in repository.recoverable_realtime_units():
         try:
             path = recording_paths(directory, filename)[0]
-            if time.time() - path.stat().st_mtime < 15:
+            if not path.exists():
+                # The bot writes the WAV after the row exists; wait out a restart.
+                if now - created_at.timestamp() >= REALTIME_RECOVERY_GRACE_SECONDS:
+                    repository.mark_recording_failed(
+                        recording_id, "fallback WAV was never written"
+                    )
+                    logger.warning(
+                        "Realtime unit failed without a WAV unit=%s", recording_id
+                    )
+                continue
+            if now - path.stat().st_mtime < 15:
                 continue
             with path.open("r+b") as wav:
                 header = bytearray(wav.read(44))
@@ -156,7 +176,14 @@ def recover_realtime_wavs(repository, directory: Path) -> None:
             repository.admit_realtime_recovery(recording_id)
             logger.info("Realtime WAV recovered unit=%s", recording_id)
         except FileNotFoundError:
-            # Retain the unit for operator inspection/retry; never fake completion.
-            pass
-        except Exception:
-            logger.warning("Realtime recovery deferred unit=%s", recording_id)
+            # Disappeared between the checks; the next sweep settles it.
+            continue
+        except OSError as exc:
+            # Permissions, disk pressure or a concurrent writer: retry later.
+            logger.warning("Realtime recovery deferred unit=%s: %s", recording_id, exc)
+        except ValueError as exc:
+            # The stream ended without usable audio; keep the failure visible.
+            repository.mark_recording_failed(
+                recording_id, f"unusable fallback WAV: {exc}"
+            )
+            logger.warning("Realtime unit failed unit=%s: %s", recording_id, exc)
