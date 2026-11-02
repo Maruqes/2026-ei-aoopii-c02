@@ -2,10 +2,10 @@
 
 Synthesizes replies with a natural European Portuguese neural voice. It uses Microsoft
 Edge TTS (`pt-PT-RaquelNeural` by default, `pt-PT-DuarteNeural` as an alternative),
-streams audio in segments and shapes expression from emojis with native rate, pitch
-and volume. If Edge is unreachable, the same reply falls back to the local Piper
-Tugão voice at a natural pace. Music yields the output while speaking and resumes
-afterwards.
+streams audio as it arrives and shapes expression from emojis with native rate, pitch
+and volume. The first frame reaches Discord without waiting for the whole reply, and a
+stalled Edge request is retried once before the local Piper fallback takes over.
+Music yields the output while speaking and resumes afterwards.
 
 **Configuration:** `ASSISTANT_VOICE_ENABLED` turns voice on/off;
 `ASSISTANT_TTS_PROVIDER` selects `edge` (default) or `piper`;

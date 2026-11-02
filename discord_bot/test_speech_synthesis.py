@@ -2,7 +2,7 @@ import io
 import unittest
 from unittest.mock import patch
 
-from speech_synthesis import EXPRESSIONS, expressive_audio, speech_segments, synthesize
+from speech_synthesis import EXPRESSIONS, edge_segment_audio, expressive_audio, speech_segments, synthesize
 
 
 class SpeechExpressionTests(unittest.TestCase):
@@ -87,7 +87,7 @@ class SpeechExpressionTests(unittest.TestCase):
 
         with patch("os.path.exists", return_value=True), \
                 patch("piper.PiperVoice.load") as load, \
-                patch("speech_synthesis.edge_pcm", new=AsyncMock(side_effect=RuntimeError("offline"))), \
+                patch("speech_synthesis.edge_segment_audio", new=AsyncMock(side_effect=RuntimeError("offline"))), \
                 patch("speech_synthesis.expressive_audio", side_effect=lambda audio, *_: audio), \
                 patch("sys.stderr", new=io.StringIO()):
             voice = load.return_value
@@ -97,6 +97,31 @@ class SpeechExpressionTests(unittest.TestCase):
             synthesize("edge", "pt-PT-RaquelNeural", "voice.onnx", "Olá 😊. Adeus 😢.", output)
             self.assertEqual(voice.synthesize.call_count, 2)
             self.assertGreater(len(output.getvalue()), 2 * len(Chunk.audio_int16_bytes))
+
+    def test_edge_stalled_first_chunk_is_retried_once(self):
+        import asyncio
+
+        attempts = []
+
+        def edge_mp3(text, voice, expression, semaphore):
+            async def stream():
+                attempts.append(text)
+                if len(attempts) == 1:
+                    await asyncio.sleep(60)  # Simulates a stalled Edge request.
+                yield b"audio"
+
+            return stream()
+
+        async def collect():
+            chunks = await edge_segment_audio(
+                "Olá", "voice", EXPRESSIONS["neutral"], asyncio.Semaphore(1)
+            )
+            return [chunk async for chunk in chunks]
+
+        with patch("speech_synthesis.edge_mp3", edge_mp3), \
+                patch("speech_synthesis.EDGE_FIRST_CHUNK_TIMEOUT", 0.01):
+            self.assertEqual(asyncio.run(collect()), [b"audio"])
+        self.assertEqual(attempts, ["Olá", "Olá"])
 
     def test_first_chunk_is_flushed_before_synthesizing_the_next(self):
         class Output(io.BytesIO):

@@ -160,8 +160,8 @@ was already in the chat, the history identifies the interrupted voice. "Cancela"
 utterance ends the conversation; leaving the call also cancels immediately.
 
 The question joins segments by the same author and ends after a continuous period
-without sound from that author. Set `ASSISTANT_SILENCE_SECONDS=5` in `.env` to wait
-5 seconds (default; accepts 0.5–20 seconds, with a period in decimal values).
+without sound from that author. Set `ASSISTANT_SILENCE_SECONDS=2` in `.env` to wait
+2 seconds (default; accepts 0.5–20 seconds, with a period in decimal values).
 Speaking again restarts the counter; other voices and delayed finals do not restart it.
 The counter uses received audio and recognised speech times, to include quiet
 speech. After silence, it still waits for finals corresponding to the audio.

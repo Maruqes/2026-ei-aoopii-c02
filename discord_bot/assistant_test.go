@@ -625,6 +625,8 @@ func TestAssistantStillRejectsWordTimesBeyondReceivedAudio(t *testing.T) {
 }
 
 func TestAssistantSendsWholeSlowQuestionAcrossDelayedFinals(t *testing.T) {
+	// Five-second window so the delayed-final timings stay explicit.
+	t.Setenv("ASSISTANT_SILENCE_SECONDS", "5")
 	h := newAssistantHarness(t)
 	h.a.configure(assistantSettings{Enabled: true, Phrase: "Olá macaco", Revision: 1})
 	received := make(chan string, 2)
@@ -788,6 +790,8 @@ func TestAssistantRetiredStreamFailureCancelsOnlyUnfinishedCapture(t *testing.T)
 }
 
 func TestAssistantPartialTimingCannotActivateOrSupplyQuestion(t *testing.T) {
+	// Five-second window so the delayed-final timings stay explicit.
+	t.Setenv("ASSISTANT_SILENCE_SECONDS", "5")
 	h := newAssistantHarness(t)
 	audio := h.audio["ana"]
 	audio.frames = 4 * sampleRate
@@ -826,6 +830,8 @@ func TestAssistantPartialTimingCannotActivateOrSupplyQuestion(t *testing.T) {
 }
 
 func TestAssistantSilenceUsesOnlyAuthorAudioAndDoesNotRestartForLateFinal(t *testing.T) {
+	// Five-second window so the delayed-final timings stay explicit.
+	t.Setenv("ASSISTANT_SILENCE_SECONDS", "5")
 	h := newAssistantHarness(t)
 	h.final("ana", "wake", "Hey Bot", 0, 1)
 	h.final("ana", "first", "Explica Go", 1, 2)
@@ -873,14 +879,14 @@ func TestAssistantConfigurableSilence(t *testing.T) {
 		value string
 		want  time.Duration
 	}{
-		{"", 5 * time.Second},
+		{"", 2 * time.Second},
 		{"1.25", 1250 * time.Millisecond},
 		{"8", 8 * time.Second},
-		{"NaN", 5 * time.Second},
-		{"Inf", 5 * time.Second},
-		{"0", 5 * time.Second},
-		{"21", 5 * time.Second},
-		{"invalid", 5 * time.Second},
+		{"NaN", 2 * time.Second},
+		{"Inf", 2 * time.Second},
+		{"0", 2 * time.Second},
+		{"21", 2 * time.Second},
+		{"invalid", 2 * time.Second},
 	} {
 		t.Run(tc.value, func(t *testing.T) {
 			t.Setenv("ASSISTANT_SILENCE_SECONDS", tc.value)
@@ -1250,6 +1256,8 @@ func TestAssistantAuthorInterruptsGenerationAndPreservesUnansweredQuestion(t *te
 }
 
 func TestAssistantInterruptsVoiceOnProviderSpeechAndMarksDeliveredAnswer(t *testing.T) {
+	// Five-second window so the delayed-final timings stay explicit.
+	t.Setenv("ASSISTANT_SILENCE_SECONDS", "5")
 	h := newAssistantHarness(t)
 	h.a.voiceEnabled = true
 	started, cancelled := make(chan struct{}), make(chan struct{})

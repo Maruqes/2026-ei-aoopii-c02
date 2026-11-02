@@ -25,7 +25,9 @@ type assistantSettings struct {
 	Revision  int64   `json:"revision"`
 }
 
-const assistantDefaultSilence = 5 * time.Second
+// Conversational turn-taking: two seconds of silence closes the question. The
+// turn still waits for missing finals before asking, so this is not a hard cut.
+const assistantDefaultSilence = 2 * time.Second
 
 type assistantMessage struct {
 	Role        string `json:"role"`

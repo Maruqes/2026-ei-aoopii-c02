@@ -12,6 +12,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"gopkg.in/hraban/opus.v2"
 )
@@ -114,6 +115,7 @@ func (p *MusicPlayer) speak(ctx context.Context, text string, ready func() error
 	if err = synth.Start(); err != nil {
 		return fmt.Errorf("could not start Portuguese speech with %s: %w", provider, err)
 	}
+	synthStarted := time.Now()
 	defer func() {
 		stop(nil)
 		_ = audio.Close()
@@ -144,6 +146,8 @@ func (p *MusicPlayer) speak(ctx context.Context, text string, ready func() error
 		}
 		return cmd.Wait()
 	}
+	// First decoded frame: the audible start, after Edge, the retry hedge and ffmpeg.
+	log.Printf("speech first audio provider=%s latency_ms=%d", provider, time.Since(synthStarted).Milliseconds())
 	encoder, err := opus.NewEncoder(sampleRate, channels, opus.AppVoIP)
 	if err != nil {
 		return err

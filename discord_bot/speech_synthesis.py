@@ -14,6 +14,10 @@ from typing import NamedTuple
 SAMPLE_RATE = 22050  # Contract with the Go bot and its ffmpeg/Opus pipeline.
 DEFAULT_EDGE_VOICE = "pt-PT-RaquelNeural"
 EDGE_CONCURRENCY = 4
+# Edge occasionally stalls for several seconds before its first audio chunk.
+# Hedging with a retry keeps the tail out of the caller's first sound.
+EDGE_FIRST_CHUNK_TIMEOUT = 2.5
+EDGE_ATTEMPTS = 2
 
 
 class Expression(NamedTuple):
@@ -180,18 +184,8 @@ def write_chunks(chunks, output, previous_pause):
     return wrote
 
 
-def decode_mp3(audio):
-    result = subprocess.run(
-        ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
-         "-f", "mp3", "-i", "pipe:0", "-f", "s16le", "-ar", str(SAMPLE_RATE), "-ac", "1", "pipe:1"],
-        input=audio, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
-    if result.returncode != 0:
-        raise RuntimeError("ffmpeg could not decode Edge audio: " + result.stderr.decode("utf-8", "replace").strip())
-    return result.stdout
-
-
-async def edge_pcm(text, voice, expression, semaphore):
+async def edge_mp3(text, voice, expression, semaphore):
+    """Yield Edge MP3 bytes as they arrive instead of waiting for the whole reply."""
     import edge_tts
 
     async with semaphore:
@@ -202,13 +196,80 @@ async def edge_pcm(text, voice, expression, semaphore):
             pitch=f"{expression.pitch:+d}Hz",
             volume=f"{expression.volume:+d}%",
         )
-        audio = bytearray()
         async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                audio.extend(chunk["data"])
-    if not audio:
-        raise RuntimeError("Edge TTS returned no audio")
-    return await asyncio.to_thread(decode_mp3, bytes(audio))
+            if chunk["type"] == "audio" and chunk["data"]:
+                yield chunk["data"]
+
+
+async def edge_segment_audio(text, voice, expression, semaphore):
+    """Bound the wait for the first chunk; retry once when Edge stalls."""
+    for _ in range(EDGE_ATTEMPTS):
+        stream = edge_mp3(text, voice, expression, semaphore)
+        try:
+            first = await asyncio.wait_for(stream.__anext__(), EDGE_FIRST_CHUNK_TIMEOUT)
+        except (StopAsyncIteration, asyncio.TimeoutError):
+            await stream.aclose()
+            continue
+        except BaseException:
+            await stream.aclose()
+            raise
+        return _prepend(first, stream)
+    raise RuntimeError("Edge TTS returned no audio")
+
+
+async def _prepend(first, rest):
+    try:
+        yield first
+        async for chunk in rest:
+            yield chunk
+    finally:
+        await rest.aclose()
+
+
+async def write_edge_segment(chunks, output):
+    """Decode each chunk while it arrives so the first frame is not delayed.
+
+    ffmpeg's mp3 demuxer keeps the stream intact across pipe chunks; ``-fflags
+    nobuffer`` is deliberately absent because it drops the start of the audio.
+    """
+    decoder = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+        "-f", "mp3", "-i", "pipe:0",
+        "-f", "s16le", "-ar", str(SAMPLE_RATE), "-ac", "1", "pipe:1",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    wrote = False
+
+    async def relay():
+        nonlocal wrote
+        while True:
+            data = await decoder.stdout.read(4096)
+            if not data:
+                return
+            wrote = True
+            output.write(data)
+            output.flush()  # Let Discord start speaking before the reply is complete.
+
+    relay_task = asyncio.create_task(relay())
+    try:
+        async for chunk in chunks:
+            decoder.stdin.write(chunk)
+            await decoder.stdin.drain()
+        decoder.stdin.close()
+        await relay_task
+        code = await decoder.wait()
+        if code != 0:
+            stderr = (await decoder.stderr.read()).decode("utf-8", "replace").strip()
+            raise RuntimeError("ffmpeg could not decode Edge audio: " + stderr)
+    finally:
+        if not relay_task.done():
+            relay_task.cancel()
+        if decoder.returncode is None:
+            decoder.kill()
+            await decoder.wait()
+    return wrote
 
 
 def synthesize_piper(segments, model, output):
@@ -221,33 +282,34 @@ def synthesize_piper(segments, model, output):
 
 async def synthesize_edge(segments, voice, model, output):
     semaphore = asyncio.Semaphore(EDGE_CONCURRENCY)
-    tasks = [asyncio.create_task(edge_pcm(text, voice, expression, semaphore)) for text, expression in segments]
     piper = None
     edge_failed = False
     previous_pause = 0.0
-    try:
-        for index, (text, expression) in enumerate(segments):
-            pcm = None
-            if not edge_failed:
-                try:
-                    pcm = await tasks[index]
-                except Exception as exc:
-                    edge_failed = True
-                    print(f"Edge TTS failed; using Piper for the rest of this reply: {exc}", file=sys.stderr)
-                    for pending in tasks[index + 1:]:
-                        pending.cancel()
-            if pcm is not None:
-                if write_chunks([pcm], output, previous_pause):
-                    previous_pause = expression.pause
-                continue
-            if piper is None:
-                piper = PiperSynthesizer(model)
-            if write_chunks(await asyncio.to_thread(lambda t=text, e=expression: list(piper.chunks(t, e))), output, previous_pause):
-                previous_pause = expression.pause
-    finally:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+    # Sequential streaming stays ahead of playback: Edge needs about 1.3 s for a
+    # 13 s reply, while Discord consumes it in real time. The first sound no
+    # longer waits for the whole answer.
+    for text, expression in segments:
+        wrote = False
+        if not edge_failed:
+            if previous_pause:
+                output.write(silence(previous_pause))
+                output.flush()
+                previous_pause = 0.0
+            try:
+                chunks = await edge_segment_audio(text, voice, expression, semaphore)
+                wrote = await write_edge_segment(chunks, output)
+                if not wrote:
+                    raise RuntimeError("Edge TTS returned no audio")
+            except Exception as exc:
+                edge_failed = True
+                print(f"Edge TTS failed; using Piper for the rest of this reply: {exc}", file=sys.stderr)
+        if wrote:
+            previous_pause = expression.pause
+            continue
+        if piper is None:
+            piper = PiperSynthesizer(model)
+        if write_chunks(await asyncio.to_thread(lambda t=text, e=expression: list(piper.chunks(t, e))), output, previous_pause):
+            previous_pause = expression.pause
 
 
 def synthesize(provider, voice, model, text, output):
