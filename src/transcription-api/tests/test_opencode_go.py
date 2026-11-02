@@ -181,9 +181,12 @@ def test_structured_json_gets_a_larger_output_budget(fake_openai):
     )
     client.test_model()
     assert fake_openai.completions[-1]["max_completion_tokens"] == 2500
+    assert "reasoning_effort" not in fake_openai.completions[-1]
 
     client._chat(system="system", user="user", json_format=True)
     request = fake_openai.completions[-1]
     assert request["response_format"] == {"type": "json_object"}
     assert request["max_completion_tokens"] == max(2500, STRUCTURED_OUTPUT_TOKENS)
     assert request["max_completion_tokens"] >= 4096
+    # Reasoning tokens would otherwise consume the whole JSON budget.
+    assert request["reasoning_effort"] == "none"

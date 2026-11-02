@@ -10,9 +10,10 @@ from urllib import error, request
 from data.repository import UserProfile
 
 # Structured JSON replies (group bulk analysis and member profiles) carry seven
-# prose fields plus four observation arrays. At the conversational 2500-token
-# budget the model regularly hits finish_reason=length and the whole call is
-# wasted, so JSON calls get their own bounded, larger budget.
+# prose fields plus four observation arrays, and reasoning models spend their
+# budget before writing any of it. Conversational replies keep the configured
+# ceiling; JSON calls get a larger one and, where the provider supports it,
+# reasoning off so the whole budget does not go to hidden thinking tokens.
 STRUCTURED_OUTPUT_TOKENS = 4096
 
 
@@ -486,6 +487,10 @@ class OpenAICompatibleClient(ConversationClient):
     def test_model(self) -> str:
         return self._chat(system="Reply briefly.", user="Ola!")
 
+    def structured_params(self) -> dict:
+        """Provider knobs that keep structured JSON inside its budget."""
+        return {}
+
     def _chat(self, *, system: str, user: str, json_format: bool = False) -> str:
         if not self.api_key:
             raise RuntimeError(
@@ -496,6 +501,7 @@ class OpenAICompatibleClient(ConversationClient):
         kwargs = {}
         if json_format:
             kwargs["response_format"] = {"type": "json_object"}
+            kwargs.update(self.structured_params())
 
         response = client.chat.completions.create(
             model=self.model,
@@ -570,6 +576,11 @@ class OpenCodeGoClient(OpenAICompatibleClient):
         self.models_base_url = models_base_url.rstrip("/")
         self._models_client_instance = None
         self._models_client_lock = threading.Lock()
+
+    def structured_params(self) -> dict:
+        # Reasoning models otherwise spend the whole JSON budget thinking and
+        # return finish_reason=length with no content at all.
+        return {"reasoning_effort": "none"}
 
     def _models_client(self):
         # The catalog lives under a different base URL, so it cannot reuse the
