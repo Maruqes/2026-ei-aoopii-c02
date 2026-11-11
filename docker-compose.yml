@@ -4,9 +4,6 @@ services:
     build:
       context: .
       dockerfile: src/transcription-api/Dockerfile.chatgpt-login
-      network: host
-      entitlements:
-        - network.host
     network_mode: host
     environment:
       LLM_PROVIDER: chatgpt
@@ -37,9 +34,6 @@ services:
     build:
       context: .
       dockerfile: src/transcription-api/Dockerfile
-      network: host
-      entitlements:
-        - network.host
       args:
         PYTORCH_INDEX_URL: ${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
     container_name: discord-anthropologist-api
@@ -153,9 +147,6 @@ services:
     build:
       context: .
       dockerfile: discord_bot/Dockerfile
-      network: host
-      entitlements:
-        - network.host
     container_name: discord-anthropologist-bot
     restart: unless-stopped
     environment:
