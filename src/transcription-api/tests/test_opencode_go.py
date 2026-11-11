@@ -190,3 +190,47 @@ def test_structured_json_gets_a_larger_output_budget(fake_openai):
     assert request["max_completion_tokens"] >= 4096
     # Reasoning tokens would otherwise consume the whole JSON budget.
     assert request["reasoning_effort"] == "none"
+
+
+def test_truncated_prose_retries_once_without_reasoning(fake_openai, monkeypatch):
+    client = OpenCodeGoClient(
+        api_key="test-key",
+        base_url="https://opencode.ai/inference/go/openai/v1",
+        models_base_url="https://opencode.ai/inference/go/v1",
+        model="deepseek-v4.1-flash",
+    )
+    replies = iter(["length", "stop"])
+    real_create = FakeOpenAI._create_completion
+
+    def create(self, **kwargs):
+        response = real_create(self, **kwargs)
+        response.choices[0].finish_reason = next(replies)
+        return response
+
+    monkeypatch.setattr(FakeOpenAI, "_create_completion", create)
+
+    assert client._chat(system="s", user="u") == "Ola!"
+    first, second = fake_openai.completions[-2:]
+    assert "reasoning_effort" not in first
+    assert second["reasoning_effort"] == "none"
+
+
+def test_prose_still_truncated_after_retry_raises(fake_openai, monkeypatch):
+    client = OpenCodeGoClient(
+        api_key="test-key",
+        base_url="https://opencode.ai/inference/go/openai/v1",
+        models_base_url="https://opencode.ai/inference/go/v1",
+        model="deepseek-v4.1-flash",
+    )
+    real_create = FakeOpenAI._create_completion
+
+    def create(self, **kwargs):
+        response = real_create(self, **kwargs)
+        response.choices[0].finish_reason = "length"
+        return response
+
+    monkeypatch.setattr(FakeOpenAI, "_create_completion", create)
+
+    with pytest.raises(RuntimeError, match="truncated"):
+        client._chat(system="s", user="u")
+    assert len(fake_openai.completions) == 2

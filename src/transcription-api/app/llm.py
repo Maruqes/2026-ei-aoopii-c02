@@ -505,17 +505,26 @@ class OpenAICompatibleClient(ConversationClient):
             kwargs["response_format"] = {"type": "json_object"}
             kwargs.update(self.structured_params())
 
-        response = client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            max_completion_tokens=self.output_budget(json_format),
-            **kwargs,
-        )
-        choice = response.choices[0] if response.choices else None
-        if getattr(choice, "finish_reason", None) == "length":
+        def complete(**extra):
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                max_completion_tokens=self.output_budget(json_format),
+                **kwargs,
+                **extra,
+            )
+            return response.choices[0] if response.choices else None
+
+        choice = complete()
+        truncated = getattr(choice, "finish_reason", None) == "length"
+        if truncated and not json_format and self.structured_params():
+            # Hidden reasoning can consume the whole prose budget too.
+            choice = complete(**self.structured_params())
+            truncated = getattr(choice, "finish_reason", None) == "length"
+        if truncated:
             raise RuntimeError(
                 "LLM output was truncated; increase LLM_MAX_OUTPUT_TOKENS"
             )
