@@ -154,10 +154,12 @@ class ConversationClient:
         self, *, question: str, language: str = "pt", guild_context: str = "",
         history: list[dict] | None = None, current_speaker: str = "",
     ) -> str:
+        from .assistant_functions import get_assistant_function_prompt
+
         system = (
             "You are a helpful general voice assistant. Answer the question concisely. "
-            "You cannot execute actions, search the internet or call tools. "
-            "Never claim to have done those things. Explain uncertainty when relevant. "
+            + get_assistant_function_prompt()
+            + " Explain uncertainty when relevant. "
             "You know server history only through the supplied group memory. "
             + response_language_instruction(language) + discord_answer_style() + direct_response_style()
         )

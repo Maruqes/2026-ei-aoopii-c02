@@ -1192,12 +1192,12 @@ func TestAssistantInactivityIgnoresOtherVoicesNoiseAndLateText(t *testing.T) {
 }
 
 func TestAssistantGoodbyeAndQuotedGoodbye(t *testing.T) {
-	for _, goodbye := range []string{"ADEUS, MACACO!", "Obrigado, adeus macaco.", "Obrigada, adeus macaco!"} {
+	for _, goodbye := range []string{"ADEUS, MACACO!", "Obrigado, adeus macaco.", "Obrigada, adeus macaco!", "talk talk talk talk talk adeus macaco", "adeus macaco e depois falamos"} {
 		t.Run(goodbye, func(t *testing.T) {
 			h := newAssistantHarness(t)
-			h.final("ana", "wake", "Hey Bot O que significa «adeus macaco»?", 0, 2)
+			h.final("ana", "wake", "Hey Bot O que significa ola?", 0, 2)
 			h.a.tick(h.now.Add(7 * time.Second))
-			h.answers <- "É uma despedida."
+			h.answers <- "É uma saudação."
 			h.wait(t, h.waiting)
 			h.final("bob", "bye", "Adeus macaco", 3, 4)
 			h.final("ana", "bye", goodbye, 4, 5)
@@ -1206,9 +1206,42 @@ func TestAssistantGoodbyeAndQuotedGoodbye(t *testing.T) {
 			h.mu.Lock()
 			defer h.mu.Unlock()
 			if len(h.questions) != 1 || !strings.Contains(h.messages[len(h.messages)-1], "Até à próxima!") {
-				t.Fatalf("farewell used LLM or quote ended the conversation: %v", h.messages)
+				t.Fatalf("farewell used LLM or did not close: %v", h.messages)
 			}
 		})
+	}
+}
+
+func TestAssistantGoodbyePhraseIsConfigurable(t *testing.T) {
+	h := newAssistantHarness(t)
+	h.a.configure(assistantSettings{Enabled: true, Phrase: "Hey Bot", GoodbyePhrase: "até logo amigo", Revision: 1})
+	h.a.mu.Lock()
+	h.a.conversation = nil
+	h.a.request = nil
+	h.a.mu.Unlock()
+	h.final("ana", "wake", "Hey Bot Explica Go?", 0, 2)
+	h.a.tick(h.now.Add(7 * time.Second))
+	h.answers <- "Go é fixe."
+	h.wait(t, h.waiting)
+	// Old default must no longer close; it is answered as a normal turn.
+	h.final("ana", "bye-old", "Adeus macaco", 3, 4)
+	h.a.tick(h.now.Add(10 * time.Second))
+	h.answers <- "Ainda aqui."
+	h.wait(t, func() bool { h.a.mu.Lock(); defer h.a.mu.Unlock(); return h.a.request == nil })
+	h.a.mu.Lock()
+	stillOpen := h.a.conversation != nil
+	h.a.mu.Unlock()
+	if !stillOpen {
+		t.Fatal("old goodbye closed after custom phrase was set")
+	}
+	// Custom phrase closes even with surrounding talk.
+	h.final("ana", "bye-new", "talk talk até logo amigo", 5, 6)
+	h.a.tick(h.now.Add(13 * time.Second))
+	h.wait(t, func() bool { h.a.mu.Lock(); defer h.a.mu.Unlock(); return h.a.conversation == nil })
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.questions) != 2 || !strings.Contains(h.messages[len(h.messages)-1], "Até à próxima!") {
+		t.Fatalf("custom goodbye did not close: %v", h.messages)
 	}
 }
 

@@ -29,7 +29,7 @@ Use `/digest` to catch up on a text channel, `/recap` for calls, `/oracle` to se
 group's history, `/profile` and `/prompt` for lore, and `/guess` for quote trivia.
 `/health`, `/keys` and `/retry` expose progress, consumption and recovery.
 
-Use `/play url:<YouTube video link>` to play audio in your call, `/pause` to pause or
+Use `/play query:<YouTube video link or song name>` to play audio in your call (search text plays the 1st YouTube result), `/pause` to pause or
 resume, `/skip` to advance, `/queue` to inspect the queue and `/musicstop` to clear it
 without stopping conversation recording. Playback accepts public videos up to one
 hour, with at most 20 queued tracks. Docker includes yt-dlp, FFmpeg and Node.js.
@@ -105,15 +105,17 @@ recovery, debug and tests, see [the API documentation](src/transcription-api/REA
 With Realtime active (`/streaming mode:on`), the assistant is available by default
 to humans with a reservation in the call. Say "Olá macaco" to hear "Diz" and receive
 the confirmation in the chat. Ask the question and keep the conversation going without repeating activation;
-it also accepts "Olá macaco, explica polimorfismo…". "Adeus macaco" or "obrigado,
-adeus macaco" ends with a short goodbye. The assistant replies in PT-PT,
+it also accepts "Olá macaco, explica polimorfismo…". "Adeus macaco" (or "talk talk adeus macaco")
+ends with a short goodbye — any mention of the farewell phrase in the turn closes it.
+The assistant replies in PT-PT,
 with 2–4 sentences by default and more detail on request, using the last five minutes
 of the current call and up to 12 recent dialogue turns. Each conversation is saved and updates the profile and
 lore of the speaker in the background, without waiting for the call to end. The bot's
 replies are identified context, never facts about the person. It does not run commands.
 
-- `/assistant status`: state, phrase, destination and participants with/without Realtime.
-- `/assistant phrase value:"Olá macaco"`: phrase with 2–5 words, up to 50 characters.
+- `/assistant status`: state, phrase, goodbye phrase, destination and participants with/without Realtime.
+- `/assistant phrase value:"Olá macaco"`: wake phrase with 2–5 words, up to 50 characters.
+- `/assistant goodbye value:"Adeus macaco"`: farewell phrase with 2–5 words, up to 50 characters.
 - `/assistant channel value:#bot`: destination for confirmations and replies.
 - `/assistant enable` and `/assistant disable`: turn on/off per server.
 

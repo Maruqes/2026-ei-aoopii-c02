@@ -17,6 +17,67 @@ import (
 
 const testMusicURL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
+func TestMusicSearchParsesFirstResult(t *testing.T) {
+	data := []byte(`{"entries":[{"id":"dQw4w9WgXcQ","title":"first"},{"id":"9bZkp7q19f0","title":"second"}]}`)
+	got, err := parseYouTubeSearch(data)
+	if err != nil || got != testMusicURL {
+		t.Fatalf("search = %q, %v", got, err)
+	}
+	for _, empty := range []string{`{"entries":[]}`, `{"entries":[{"id":"short"}]}`, `not json`} {
+		if _, err := parseYouTubeSearch([]byte(empty)); err == nil {
+			t.Fatalf("invalid search accepted: %s", empty)
+		}
+	}
+	if _, err := parseYouTubeSearch([]byte(`{"entries":[]}`)); !errors.Is(err, ErrMusicNoResults) {
+		t.Fatalf("empty search should report no results: %v", err)
+	}
+}
+
+func TestMusicEnqueueTextSearchesAndPlaysFirst(t *testing.T) {
+	p := offlineMusicPlayer(t, func(ctx context.Context, _ MusicTrack) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	p.search = func(ctx context.Context, query string) (string, error) {
+		if query != "music1" {
+			t.Errorf("search query = %q", query)
+		}
+		return testMusicURL, nil
+	}
+	track, _, err := p.EnqueueText("music1", "searcher")
+	if err != nil || track.URL != testMusicURL || track.Requester != "searcher" {
+		t.Fatalf("search enqueue: %#v %v", track, err)
+	}
+	if _, _, err := p.EnqueueText("https://youtube.com.evil.test/watch?v=dQw4w9WgXcQ", "x"); !errors.Is(err, ErrMusicInvalidURL) {
+		t.Fatalf("spoofed URL searched instead of rejected: %v", err)
+	}
+	if _, _, err := p.EnqueueText("   ", "x"); !errors.Is(err, ErrMusicInvalidURL) {
+		t.Fatalf("blank input accepted: %v", err)
+	}
+	p.search = func(context.Context, string) (string, error) { return "", ErrMusicNoResults }
+	if _, _, err := p.EnqueueText("unknown song xyz", "x"); !errors.Is(err, ErrMusicNoResults) {
+		t.Fatalf("missing results not reported: %v", err)
+	}
+}
+
+func TestPlayInputAcceptsQueryAndLegacyURL(t *testing.T) {
+	query := playInputFromOptions([]*discordgo.ApplicationCommandInteractionDataOption{
+		{Name: "query", Type: discordgo.ApplicationCommandOptionString, Value: "music1"},
+	})
+	if query != "music1" {
+		t.Fatalf("query option = %q", query)
+	}
+	legacy := playInputFromOptions([]*discordgo.ApplicationCommandInteractionDataOption{
+		{Name: "url", Type: discordgo.ApplicationCommandOptionString, Value: testMusicURL},
+	})
+	if legacy != testMusicURL {
+		t.Fatalf("legacy url option = %q", legacy)
+	}
+	if !isYouTubeURLIntent("https://youtube.com/watch?v=dQw4w9WgXcQ") || isYouTubeURLIntent("music1") {
+		t.Fatal("URL intent detection is wrong")
+	}
+}
+
 func TestMusicYouTubeURLCanonicalization(t *testing.T) {
 	for _, raw := range []string{
 		testMusicURL + "&list=PLsomething&t=45",

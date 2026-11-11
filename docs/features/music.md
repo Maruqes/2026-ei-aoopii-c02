@@ -1,8 +1,8 @@
 # F12 — Music in the call
 
-Plays audio from public YouTube videos and keeps a queue in the call. It uses yt-dlp and FFmpeg; conversation recording continues during playback.
+Plays audio from public YouTube videos and keeps a queue in the call. It uses yt-dlp and FFmpeg; conversation recording continues during playback. `/play` accepts a YouTube link or free search text (search plays the first match).
 
-**Usage:** `/play url:...`, `/pause`, `/skip`, `/queue` and `/musicstop`. Controls require being in the same voice channel as the bot.
+**Usage:** `/play query:...`, `/pause`, `/skip`, `/queue` and `/musicstop`. Controls require being in the same voice channel as the bot.
 
 **Where it lives:**
 

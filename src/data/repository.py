@@ -1706,16 +1706,17 @@ class DataRepository:
         with closing(connect(self.database_url)) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT assistant_enabled, assistant_phrase, assistant_channel_id, assistant_revision "
+                    "SELECT assistant_enabled, assistant_phrase, assistant_goodbye_phrase, assistant_channel_id, assistant_revision "
                     "FROM guild_transcription_settings WHERE guild_id = %s",
                     (guild_id,),
                 )
-                row = cur.fetchone() or (True, "Olá macaco", None, 0)
-        return dict(zip(("enabled", "phrase", "channel_id", "revision"), row))
+                row = cur.fetchone() or (True, "Olá macaco", "adeus macaco", None, 0)
+        return dict(zip(("enabled", "phrase", "goodbye_phrase", "channel_id", "revision"), row))
 
     def update_assistant_settings(self, guild_id: str, changes: dict) -> dict:
         # Column names are allowlisted here; values are always bound parameters.
         columns = {"enabled": "assistant_enabled", "phrase": "assistant_phrase",
+                   "goodbye_phrase": "assistant_goodbye_phrase",
                    "channel_id": "assistant_channel_id"}
         if not changes or not changes.keys() <= columns.keys():
             raise ValueError("Invalid assistant settings")
@@ -1730,12 +1731,12 @@ class DataRepository:
                     "UPDATE guild_transcription_settings SET " + assignments +
                     ", assistant_revision = assistant_revision + 1, updated_at = NOW() "
                     "WHERE guild_id = %s RETURNING assistant_enabled, assistant_phrase, "
-                    "assistant_channel_id, assistant_revision",
+                    "assistant_goodbye_phrase, assistant_channel_id, assistant_revision",
                     (*changes.values(), guild_id),
                 )
                 row = cur.fetchone()
             conn.commit()
-        return dict(zip(("enabled", "phrase", "channel_id", "revision"), row))
+        return dict(zip(("enabled", "phrase", "goodbye_phrase", "channel_id", "revision"), row))
 
     def start_realtime_unit(
         self, session_id: int, filename: str, metadata: dict, token: str, key_name: str

@@ -29,8 +29,8 @@ func TestMusicCommandsAcknowledgeAndRegister(t *testing.T) {
 				t.Fatalf("%s does not acknowledge before playback calls", name)
 			}
 		}
-		if len(commands["play"].Options) != 1 || !commands["play"].Options[0].Required || commands["play"].Options[0].Name != "url" {
-			t.Fatal("play needs a required video URL")
+		if len(commands["play"].Options) != 1 || !commands["play"].Options[0].Required || commands["play"].Options[0].Name != "query" {
+			t.Fatal("play needs a required video URL or search query")
 		}
 	}
 }

@@ -44,6 +44,28 @@ func voiceChannelID(state *voiceConnectionState) string {
 	return state.vc.ChannelID
 }
 
+func playInputFromOptions(options []*discordgo.ApplicationCommandInteractionDataOption) string {
+	var fallback string
+	for _, option := range options {
+		if option == nil {
+			continue
+		}
+		if option.Name == "query" || option.Name == "url" {
+			if value, ok := option.Value.(string); ok && strings.TrimSpace(value) != "" {
+				return strings.TrimSpace(value)
+			}
+			// StringValue panics on non-string options; guard with the type check above.
+			continue
+		}
+		if fallback == "" && option.Type == discordgo.ApplicationCommandOptionString {
+			if value, ok := option.Value.(string); ok && strings.TrimSpace(value) != "" {
+				fallback = strings.TrimSpace(value)
+			}
+		}
+	}
+	return fallback
+}
+
 func musicHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	lang := currentBotLanguage()
 	channelID := musicCallerChannel(s, i)
@@ -52,14 +74,14 @@ func musicHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		return
 	}
 	name := i.ApplicationCommandData().Name
-	var rawURL string
+	var playInput string
 	if name == "play" {
-		for _, option := range i.ApplicationCommandData().Options {
-			if option.Name == "url" {
-				rawURL = option.StringValue()
-			}
+		playInput = playInputFromOptions(i.ApplicationCommandData().Options)
+		if strings.TrimSpace(playInput) == "" {
+			respondText(s, i, textForLanguage(lang, "Escreve um link do YouTube ou o nome da música: /play query:<link ou pesquisa>.", "Enter a YouTube link or song name: /play query:<link or search>."))
+			return
 		}
-		if _, err := canonicalYouTubeURL(rawURL); err != nil {
+		if _, err := canonicalYouTubeURL(playInput); err != nil && isYouTubeURLIntent(playInput) {
 			respondText(s, i, musicErrorForLanguage(lang, err))
 			return
 		}
@@ -76,7 +98,7 @@ func musicHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		state = getVoiceConnection(i.GuildID)
 	}
 	if state == nil || state.music == nil {
-		respondText(s, i, textForLanguage(lang, "Não há um leitor ativo nesta call. Usa /play com um link do YouTube; o bot precisa das permissões Ligar e Falar.", "There is no active player in this call. Use /play with a YouTube link; the bot needs Connect and Speak permissions."))
+		respondText(s, i, textForLanguage(lang, "Não há um leitor ativo nesta call. Usa /play com um link do YouTube ou pesquisa; o bot precisa das permissões Ligar e Falar.", "There is no active player in this call. Use /play with a YouTube link or search; the bot needs Connect and Speak permissions."))
 		return
 	}
 	if voiceChannelID(state) != channelID {
@@ -85,7 +107,7 @@ func musicHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}
 	switch name {
 	case "play":
-		track, position, err := state.music.Enqueue(rawURL, i.Member.User.ID)
+		track, position, err := state.music.EnqueueText(playInput, i.Member.User.ID)
 		if err != nil {
 			log.Printf("YouTube queue failed: %v", err)
 			respondText(s, i, fmt.Sprintf(textForLanguage(lang, "Não consegui adicionar esse áudio: %s", "Could not add that audio: %s"), musicErrorForLanguage(lang, err)))
@@ -139,7 +161,7 @@ func musicDuration(seconds float64) string {
 
 func musicQueueText(lang botLanguage, snapshot MusicSnapshot) string {
 	if snapshot.Current == nil && len(snapshot.Queue) == 0 {
-		return textForLanguage(lang, "A fila está vazia. Usa /play url:<link do YouTube>.", "The queue is empty. Use /play url:<YouTube link>.")
+		return textForLanguage(lang, "A fila está vazia. Usa /play query:<link do YouTube ou pesquisa>.", "The queue is empty. Use /play query:<YouTube link or search>.")
 	}
 	var lines []string
 	if snapshot.Current != nil {
@@ -159,7 +181,9 @@ func musicErrorForLanguage(lang botLanguage, err error) string {
 	// Provider logs can contain signed streaming URLs. Keep Discord replies generic.
 	switch {
 	case errors.Is(err, ErrMusicInvalidURL):
-		return textForLanguage(lang, "Usa um link de vídeo do YouTube: youtube.com/watch?v=… ou youtu.be/… (também aceita Shorts).", "Use a YouTube video URL: youtube.com/watch?v=… or youtu.be/… (Shorts are also accepted).")
+		return textForLanguage(lang, "Usa um link de vídeo do YouTube (youtube.com/watch?v=… ou youtu.be/…) ou escreve o nome da música para pesquisar.", "Use a YouTube video URL (youtube.com/watch?v=… or youtu.be/…) or type a song name to search.")
+	case errors.Is(err, ErrMusicNoResults):
+		return textForLanguage(lang, "Não encontrei nada no YouTube para essa pesquisa. Tenta outras palavras.", "No YouTube results for that search. Try different keywords.")
 	case errors.Is(err, ErrMusicQueueFull):
 		return textForLanguage(lang, "A fila está cheia (20 áudios). Usa /skip ou /musicstop para libertar espaço.", "The queue is full (20 tracks). Use /skip or /musicstop to make room.")
 	case errors.Is(err, ErrMusicDuration):

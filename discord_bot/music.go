@@ -36,6 +36,7 @@ var (
 	ErrMusicLive           = errors.New("live streams and playlists are not supported")
 	ErrMusicClosed         = errors.New("music player closed")
 	ErrMusicNothingPlaying = errors.New("nothing is playing")
+	ErrMusicNoResults      = errors.New("no YouTube results for that search")
 )
 
 // MusicTrack contains public metadata only; signed CDN URLs never reach Discord.
@@ -73,6 +74,7 @@ type MusicPlayer struct {
 	lookupStop  context.CancelFunc
 	onError     func(MusicTrack, error)
 	resolve     func(context.Context, string, string) (MusicTrack, error)
+	search      func(context.Context, string) (string, error)
 	play        func(context.Context, MusicTrack) error
 	deps        func() error
 	output      chan struct{}
@@ -102,6 +104,7 @@ func newMusicPlayer(vc *discordgo.VoiceConnection) *MusicPlayer {
 	}
 	p.lookupCtx, p.lookupStop = context.WithCancel(ctx)
 	p.resolve, p.play = resolveYouTubeMusic, p.stream
+	p.search = searchYouTubeFirst
 	p.deps = func() error {
 		for _, name := range []string{"yt-dlp", "ffmpeg", "node"} {
 			if _, err := exec.LookPath(name); err != nil {
@@ -261,6 +264,75 @@ func parseYouTubeMusic(data []byte, canonical, requester string) (MusicTrack, er
 		streamURL: info.URL, resolvedAt: time.Now()}, nil
 }
 
+func isYouTubeURLIntent(raw string) bool {
+	lowered := strings.ToLower(strings.TrimSpace(raw))
+	return strings.Contains(lowered, "://") || strings.Contains(lowered, "youtu.be") ||
+		strings.Contains(lowered, "youtube.com") || strings.HasPrefix(lowered, "http")
+}
+
+// searchYouTubeFirst resolves free text to the canonical URL of the first
+// YouTube match, using yt-dlp's built-in search operator.
+func searchYouTubeFirst(parent context.Context, query string) (string, error) {
+	query = strings.Join(strings.Fields(query), " ")
+	if count := len([]rune(query)); count < 2 || count > 100 {
+		return "", ErrMusicNoResults
+	}
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+	cmd := musicCommand(ctx, "yt-dlp", "--ignore-config", "--no-plugin-dirs", "--js-runtimes", "node",
+		"--no-playlist", "--no-cache-dir", "--no-progress", "--socket-timeout", "15", "--retries", "1",
+		"--dump-single-json", "--skip-download", "--flat-playlist", "--", "ytsearch1:"+query)
+	cleanup, err := isolateMusicCommand(cmd)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+	var output musicOutput
+	cmd.Stdout = &output
+	// Provider stderr includes signed URLs and arbitrary remote text; never publish it.
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("YouTube search interrupted: %w", ctx.Err())
+		}
+		return "", ErrMusicUnavailable
+	}
+	return parseYouTubeSearch(output.Bytes())
+}
+
+func parseYouTubeSearch(data []byte) (string, error) {
+	var result struct {
+		Entries []struct {
+			ID         string `json:"id"`
+			URL        string `json:"url"`
+			WebpageURL string `json:"webpage_url"`
+		} `json:"entries"`
+		ID         string `json:"id"`
+		WebpageURL string `json:"webpage_url"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", fmt.Errorf("%w: invalid search result", ErrMusicUnavailable)
+	}
+	for _, entry := range result.Entries {
+		if youtubeVideoID.MatchString(entry.ID) {
+			return "https://www.youtube.com/watch?v=" + entry.ID, nil
+		}
+		if canonical, err := canonicalYouTubeURL(entry.WebpageURL); err == nil {
+			return canonical, nil
+		}
+		if canonical, err := canonicalYouTubeURL(entry.URL); err == nil {
+			return canonical, nil
+		}
+	}
+	if youtubeVideoID.MatchString(result.ID) {
+		return "https://www.youtube.com/watch?v=" + result.ID, nil
+	}
+	if canonical, err := canonicalYouTubeURL(result.WebpageURL); err == nil {
+		return canonical, nil
+	}
+	return "", ErrMusicNoResults
+}
+
 func (p *MusicPlayer) notifyLocked() {
 	close(p.changed)
 	p.changed = make(chan struct{})
@@ -271,6 +343,65 @@ func (p *MusicPlayer) Enqueue(rawURL, requester string) (MusicTrack, int, error)
 	if err != nil {
 		return MusicTrack{}, 0, err
 	}
+	return p.enqueueCanonical(canonical, requester)
+}
+
+// EnqueueText accepts either a YouTube URL or free search text. Search text
+// resolves to the first YouTube match before joining the queue.
+func (p *MusicPlayer) EnqueueText(input, requester string) (MusicTrack, int, error) {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return MusicTrack{}, 0, ErrMusicInvalidURL
+	}
+	if canonical, err := canonicalYouTubeURL(trimmed); err == nil {
+		return p.enqueueCanonical(canonical, requester)
+	}
+	if isYouTubeURLIntent(trimmed) {
+		return MusicTrack{}, 0, ErrMusicInvalidURL
+	}
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return MusicTrack{}, 0, ErrMusicClosed
+	}
+	if len(p.queue)+p.resolving >= musicQueueLimit {
+		p.mu.Unlock()
+		return MusicTrack{}, 0, ErrMusicQueueFull
+	}
+	p.resolving++
+	lookupCtx, generation := p.lookupCtx, p.generation
+	search := p.search
+	p.mu.Unlock()
+	defer func() { p.mu.Lock(); p.resolving--; p.mu.Unlock() }()
+	if err := p.deps(); err != nil {
+		return MusicTrack{}, 0, err
+	}
+	if search == nil {
+		search = searchYouTubeFirst
+	}
+	canonical, err := search(lookupCtx, trimmed)
+	if err != nil {
+		return MusicTrack{}, 0, err
+	}
+	track, err := p.resolve(lookupCtx, canonical, requester)
+	if err != nil {
+		return MusicTrack{}, 0, err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || generation != p.generation {
+		return MusicTrack{}, 0, ErrMusicClosed
+	}
+	position := len(p.queue)
+	if p.current != nil {
+		position++
+	}
+	p.queue = append(p.queue, track)
+	p.notifyLocked()
+	return track, position, nil
+}
+
+func (p *MusicPlayer) enqueueCanonical(canonical, requester string) (MusicTrack, int, error) {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()

@@ -22,13 +22,16 @@ from pydantic import ValidationError
 def test_invalid_phrase(phrase):
     with pytest.raises(ValidationError):
         AssistantChanges(phrase=phrase)
+    with pytest.raises(ValidationError):
+        AssistantChanges(goodbye_phrase=phrase)
 
 
 def test_settings_boundary_and_normalization():
     assert AssistantChanges(phrase="  HEY, Bot! ").phrase == "hey bot"
     assert AssistantChanges(phrase="Olá, Amigo!").phrase == "olá amigo"
     assert AssistantChanges(phrase="Ola\u0301, Macaco!").phrase == "olá macaco"
-    for changes in ({}, {"enabled": None}, {"phrase": None}, {"channel_id": "invalid"}):
+    assert AssistantChanges(goodbye_phrase="  ADEUS, Macaco! ").goodbye_phrase == "adeus macaco"
+    for changes in ({}, {"enabled": None}, {"phrase": None}, {"goodbye_phrase": None}, {"channel_id": "invalid"}):
         with pytest.raises(ValidationError):
             AssistantChanges(**changes)
 
@@ -46,7 +49,8 @@ def test_general_answer_uses_shared_transport_without_history():
     assert client.input["user"] == "O que é polimorfismo?"
     assert "European Portuguese" in client.input["system"]
     assert "Do not narrate your sources or processing" in client.input["system"]
-    assert "cannot execute actions" in client.input["system"]
+    assert "USE{" in client.input["system"]
+    assert "PLAY_MUSIC" in client.input["system"]
     assert "Guild context:" not in client.input["user"]
 
 
@@ -113,14 +117,16 @@ def test_settings_persist_atomically_and_preserve_streaming(repository):
     assert defaults == {
         "enabled": True,
         "phrase": "Olá macaco",
+        "goodbye_phrase": "adeus macaco",
         "channel_id": None,
         "revision": 0,
     }
     assert repository.streaming_preference("guild", False) is False
     saved = repository.update_assistant_settings(
-        "guild", {"phrase": "olá bot", "channel_id": "123"}
+        "guild", {"phrase": "olá bot", "goodbye_phrase": "até logo", "channel_id": "123"}
     )
     assert saved["revision"] == 1
+    assert saved["goodbye_phrase"] == "até logo"
     assert repository.streaming_preference("guild", False) is False
     assert repository.streaming_preference("guild", True) is True
     repository.set_streaming_preference("guild", True)
@@ -129,6 +135,7 @@ def test_settings_persist_atomically_and_preserve_streaming(repository):
     assert reloaded.assistant_settings("guild") == {
         "enabled": False,
         "phrase": "olá bot",
+        "goodbye_phrase": "até logo",
         "channel_id": "123",
         "revision": 2,
     }
@@ -162,13 +169,18 @@ def test_settings_api_and_question_without_server_history(repository, tmp_path):
     llm.calls = []
     with client_for(repository, tmp_path, llm) as client:
         response = client.post(
-            "/v1/guilds/g/assistant", json={"phrase": "Hey, BOT!", "channel_id": "123"}
+            "/v1/guilds/g/assistant", json={"phrase": "Hey, BOT!", "goodbye_phrase": "Até logo!", "channel_id": "123"}
         )
         assert response.status_code == 200
         assert client.get("/v1/guilds/g/assistant").json() == response.json()
         assert response.json()["phrase"] == "hey bot"
+        assert response.json()["goodbye_phrase"] == "até logo"
         assert (
             client.post("/v1/guilds/g/assistant", json={"phrase": "bot"}).status_code
+            == 422
+        )
+        assert (
+            client.post("/v1/guilds/g/assistant", json={"goodbye_phrase": "x"}).status_code
             == 422
         )
         assert (
@@ -514,7 +526,9 @@ def test_recent_context_is_bounded_isolated_and_includes_open_realtime_bulk(repo
 
 def test_oversized_previous_answer_keeps_roles_and_newest_content_within_budget():
     class Client(ConversationClient):
-        context_chars = 4000
+        # Budget raised (+656) to offset the function-calling system prompt
+        # while preserving the original truncation exercise.
+        context_chars = 4656
 
         def _chat(self, **kwargs):
             assert len(kwargs["system"]) + len(kwargs["user"]) + 128 <= self.context_chars

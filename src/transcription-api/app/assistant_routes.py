@@ -17,6 +17,7 @@ from .profile_updater import run_text_profile_sync
 class AssistantChanges(BaseModel):
     enabled: bool | None = None
     phrase: str | None = Field(default=None, max_length=50)
+    goodbye_phrase: str | None = Field(default=None, max_length=50)
     channel_id: str | None = None
 
     @model_validator(mode="after")
@@ -25,16 +26,18 @@ class AssistantChanges(BaseModel):
         if not changes or any(
             value is None for key, value in changes.items() if key != "channel_id"
         ):
-            raise ValueError("Provide enabled, phrase or channel_id")
-        if self.phrase is not None:
-            words = re.findall(
-                r"[^\W_]+", unicodedata.normalize("NFC", self.phrase).lower()
-            )
-            if not 2 <= len(words) <= 5 or any(
-                not any(c.isalpha() for c in word) for word in words
-            ):
-                raise ValueError("Phrase must contain 2 to 5 useful words")
-            self.phrase = " ".join(words)
+            raise ValueError("Provide enabled, phrase, goodbye_phrase or channel_id")
+        for field in ("phrase", "goodbye_phrase"):
+            value = getattr(self, field)
+            if value is not None:
+                words = re.findall(
+                    r"[^\W_]+", unicodedata.normalize("NFC", value).lower()
+                )
+                if not 2 <= len(words) <= 5 or any(
+                    not any(c.isalpha() for c in word) for word in words
+                ):
+                    raise ValueError("Phrase must contain 2 to 5 useful words")
+                setattr(self, field, " ".join(words))
         if self.channel_id is not None and not re.fullmatch(
             r"[0-9]{1,20}", self.channel_id
         ):
@@ -156,6 +159,11 @@ def install_assistant_routes(
                 if request.history:
                     kwargs["history"] = [m.model_dump() for m in request.history]
                 answer = await asyncio.to_thread(bounded.answer_question, **kwargs)
+                # Execute USE{} calls from this fresh answer only (never from
+                # history/guild_context/transcript). Strips raw blocks.
+                from .assistant_functions import execute_assistant_answer
+
+                answer, _intents = execute_assistant_answer(answer)
         except TimeoutError:
             raise HTTPException(504, "Assistant timed out") from None
         if inserted is not None:

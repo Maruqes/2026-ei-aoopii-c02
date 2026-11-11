@@ -160,7 +160,7 @@ func buildApplicationCommands(lang botLanguage) []*discordgo.ApplicationCommand 
 			Options: []*discordgo.ApplicationCommandOption{{Name: "mode", Type: discordgo.ApplicationCommandOptionString, Description: "on, off or status", Required: true,
 				Choices: []*discordgo.ApplicationCommandOptionChoice{{Name: "on", Value: "on"}, {Name: "off", Value: "off"}, {Name: "status", Value: "status"}}}}},
 		{Name: "play", Description: textForLanguage(lang, "Toca o áudio de um vídeo do YouTube na tua call.", "Play a YouTube video's audio in your voice channel."), Options: []*discordgo.ApplicationCommandOption{
-			{Type: discordgo.ApplicationCommandOptionString, Name: "url", Description: textForLanguage(lang, "Link do vídeo do YouTube (até 1 hora).", "YouTube video link (up to 1 hour)."), Required: true},
+			{Type: discordgo.ApplicationCommandOptionString, Name: "query", Description: textForLanguage(lang, "Link do vídeo do YouTube ou nome da música (toca o 1.º resultado).", "YouTube video link or song name (plays the 1st result)."), Required: true},
 		}},
 		{Name: "pause", Description: textForLanguage(lang, "Pausa ou retoma o áudio na call.", "Pause or resume voice playback.")},
 		{Name: "skip", Description: textForLanguage(lang, "Salta para o próximo áudio da fila.", "Skip to the next track in the queue.")},

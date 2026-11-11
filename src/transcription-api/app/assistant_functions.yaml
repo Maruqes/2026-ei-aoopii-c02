@@ -1,0 +1,18 @@
+# Voice assistant function catalog (v1: music controls only).
+# To add a function:
+#   1) Append a `- name: ...` block below (uppercase name, description, params, example).
+#   2) Add the Python handler in `assistant_functions.py` + one line in `HANDLERS`.
+# No other edits needed. Names must match `USE{NAME(...)}` exactly.
+functions:
+  - name: PLAY_MUSIC
+    description: Queue/search a track to play in the voice channel
+    params:
+      - name: search
+        type: string
+        required: true
+        max_length: 200
+    example: "USE{PLAY_MUSIC(lofi hip hop)}"
+  - name: STOP_MUSIC
+    description: Stop current playback and clear the queue
+    params: []
+    example: "USE{STOP_MUSIC()}"

@@ -321,7 +321,7 @@ choose a smaller value for a small-context local model.
 - `/health`: show recording, summary and profile queues, failures and the active model.
 - `/keys`: inspect measured Batch hours and an optional configured budget.
 - `/guess`: guess a speaker from an actual captured voice quote.
-- `/play url:...`: play a public YouTube video in the caller's voice channel.
+- `/play query:...`: play a public YouTube video in the caller's voice channel, or search text (plays the 1st result).
 - `/pause`, `/skip`, `/queue`, `/musicstop`: pause/resume, advance, inspect or clear playback.
 
 YouTube playback runs in the Go bot using yt-dlp, FFmpeg and Node.js (included in its

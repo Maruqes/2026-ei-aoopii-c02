@@ -19,10 +19,11 @@ import (
 )
 
 type assistantSettings struct {
-	Enabled   bool    `json:"enabled"`
-	Phrase    string  `json:"phrase"`
-	ChannelID *string `json:"channel_id"`
-	Revision  int64   `json:"revision"`
+	Enabled       bool    `json:"enabled"`
+	Phrase        string  `json:"phrase"`
+	GoodbyePhrase string  `json:"goodbye_phrase"`
+	ChannelID     *string `json:"channel_id"`
+	Revision      int64   `json:"revision"`
 }
 
 // Conversational turn-taking: two seconds of silence closes the question. The
@@ -334,6 +335,9 @@ func (a *assistantController) configure(settings assistantSettings) {
 	defer a.mu.Unlock()
 	if a.configured && settings.Revision <= a.settings.Revision {
 		return
+	}
+	if strings.TrimSpace(settings.GoodbyePhrase) == "" {
+		settings.GoodbyePhrase = "adeus macaco"
 	}
 	a.reset()
 	a.settings, a.configured = settings, true
@@ -860,10 +864,26 @@ func assistantQuestionTokens(tokens []assistantWord, phrase []string) string {
 	}
 	return strings.Join(words, " ")
 }
-func assistantGoodbye(text string) bool {
-	switch strings.Join(assistantWords(text), " ") {
-	case "adeus macaco", "obrigado adeus macaco", "obrigada adeus macaco", "muito obrigado adeus macaco", "muito obrigada adeus macaco":
-		return true
+func assistantGoodbye(text, goodbyePhrase string) bool {
+	phrase := assistantWords(goodbyePhrase)
+	if len(phrase) < 2 {
+		phrase = []string{"adeus", "macaco"}
+	}
+	words := assistantWords(text)
+	if len(words) < len(phrase) {
+		return false
+	}
+	// Match anywhere in the turn so "talk talk adeus macaco" closes.
+	// Uses the same fuzzy matching as the wake phrase (one recognition
+	// edit, up to two interleaving words, joined/split words).
+	tokens := make([]assistantWord, len(words))
+	for i, word := range words {
+		tokens[i] = assistantWord{Text: word, Raw: word}
+	}
+	for start := 0; start < len(tokens); start++ {
+		if assistantPhraseEnd(tokens, start, phrase) >= 0 {
+			return true
+		}
 	}
 	return false
 }
@@ -958,7 +978,7 @@ func (a *assistantController) tick(now time.Time) {
 	}
 	log.Printf("assistant turn closed session=%d user=%s silence_ms=%d capture_ms=%d", a.state.sessionID, request.user, now.Sub(quietSince).Milliseconds(), quietSince.Sub(request.captureStarted).Milliseconds())
 	history := append([]assistantMessage{}, conversation.history...)
-	goodbye := assistantGoodbye(request.text)
+	goodbye := assistantGoodbye(request.text, a.settings.GoodbyePhrase)
 	conversation.closing = goodbye
 	if !goodbye {
 		conversation.remember(assistantMessage{Role: "user", Content: request.text, turn: request})
@@ -1076,10 +1096,13 @@ func (a *assistantController) updateCoverage(now time.Time) {
 
 func assistantCommand() *discordgo.ApplicationCommand {
 	options := []*discordgo.ApplicationCommandOption{}
-	for _, name := range []string{"status", "phrase", "channel", "enable", "disable"} {
+	for _, name := range []string{"status", "phrase", "goodbye", "channel", "enable", "disable"} {
 		option := &discordgo.ApplicationCommandOption{Type: discordgo.ApplicationCommandOptionSubCommand, Name: name, Description: "Assistente: " + name}
 		if name == "phrase" {
 			option.Options = []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionString, Name: "value", Description: "Wake phrase, 2 to 5 words", Required: true, MaxLength: 50}}
+		}
+		if name == "goodbye" {
+			option.Options = []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionString, Name: "value", Description: "Goodbye phrase, 2 to 5 words", Required: true, MaxLength: 50}}
 		}
 		if name == "channel" {
 			option.Options = []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionChannel, Name: "value", Description: "Response text channel", Required: true, ChannelTypes: []discordgo.ChannelType{discordgo.ChannelTypeGuildText}}}
@@ -1111,6 +1134,8 @@ func assistantHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		changes["enabled"] = false
 	case "phrase":
 		changes["phrase"] = option.Options[0].StringValue()
+	case "goodbye":
+		changes["goodbye_phrase"] = option.Options[0].StringValue()
 	case "channel":
 		channel := option.Options[0].ChannelValue(s)
 		if channel == nil || channel.GuildID != i.GuildID || channel.Type != discordgo.ChannelTypeGuildText {
@@ -1169,5 +1194,5 @@ func assistantHook(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			coverage = "Realtime: a aguardar sincronização das reservas."
 		}
 	}
-	respondLongText(s, i, fmt.Sprintf("Assistente ativo: %t · Frase: %s · Destino: %s\n%s", config.Enabled, config.Phrase, channel, coverage))
+	respondLongText(s, i, fmt.Sprintf("Assistente ativo: %t · Frase: %s · Despedida: %s · Destino: %s\n%s", config.Enabled, config.Phrase, config.GoodbyePhrase, channel, coverage))
 }
