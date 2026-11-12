@@ -1,13 +1,16 @@
-"""Config-driven function registry + stub handlers for the voice assistant.
+"""Config-driven function registry + validators for the voice assistant.
 
 To add a function:
   1) Append a `- name: ...` block to `assistant_functions.yaml`.
   2) Add `def <name_lower>(...) -> dict` below returning
-     `{"spoken": ..., "intent": ...}`.
+     `{"spoken": ..., "intent": ...}`. For actions the Discord bot executes
+     (music), return `"spoken": ""` and the intent payload — the bot speaks
+     the real outcome (same strings as /play and /musicstop).
   3) Add one line in `HANDLERS` mapping the uppercase name to the function.
 
 No other edits needed. Handlers are pure/sync (<50ms, logging only, no I/O)
-so the 30s voice route budget is preserved.
+so the 30s voice route budget is preserved. Real side effects happen in the
+Go bot (`discord_bot/assistant_music.go`), never here.
 """
 
 from __future__ import annotations
@@ -36,20 +39,29 @@ class ToolValidationError(ValueError):
 
 
 def play_music(search: str) -> dict:
-    """Stub handler: validate a music search, return spoken + intent."""
+    """Validate a music search, return the intent for the Discord bot to execute.
+
+    Returns empty spoken: the bot appends the real playback confirmation
+    (track title/position from EnqueueText, same strings as /play). Keeping
+    Python silent avoids double-speaking "Queued: X" + the real title.
+    """
     query = (search or "").strip()
     if not query:
         raise ToolValidationError("PLAY_MUSIC requires a non-empty search query")
     if len(query) > 200:
         raise ToolValidationError("PLAY_MUSIC search is too long (max 200 chars)")
     logger.info("PLAY_MUSIC query=%r", query)
-    return {"spoken": f"Queued: {query}", "intent": {"action": "play", "query": query}}
+    return {"spoken": "", "intent": {"action": "play", "query": query}}
 
 
 def stop_music() -> dict:
-    """Stub handler: stop playback, return spoken + intent."""
+    """Validate a stop request, return the intent for the Discord bot.
+
+    Returns empty spoken: the bot appends the real confirmation after Clear
+    (same strings as /musicstop). Keeps voice recording running.
+    """
     logger.info("STOP_MUSIC")
-    return {"spoken": "Stopped playback.", "intent": {"action": "stop"}}
+    return {"spoken": "", "intent": {"action": "stop"}}
 
 
 HANDLERS = {
@@ -132,6 +144,21 @@ def render_function_catalog(functions: dict[str, dict] | None = None) -> str:
         line = f"- {signature}"
         if desc:
             line += f" — {desc}"
+        details: list[str] = []
+        for p in params:
+            if not isinstance(p, dict):
+                continue
+            pname = str(p.get("name", "arg"))
+            req = "required non-empty" if p.get("required") else "optional"
+            max_length = p.get("max_length")
+            if isinstance(max_length, int):
+                details.append(f"{pname}: {req}, max {max_length} chars")
+            else:
+                details.append(f"{pname}: {req}")
+        if details:
+            line += f". Args: {'; '.join(details)}"
+        else:
+            line += ". Args: none"
         line += f". Example: {example}"
         lines.append(line)
     return "\n".join(lines)

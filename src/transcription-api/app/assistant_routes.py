@@ -161,13 +161,15 @@ def install_assistant_routes(
                 answer = await asyncio.to_thread(bounded.answer_question, **kwargs)
                 # Execute USE{} calls from this fresh answer only (never from
                 # history/guild_context/transcript). Strips raw blocks.
+                # Intents are returned so the Discord bot can run the real
+                # side effects (EnqueueText/Clear, same as /play and /musicstop).
                 from .assistant_functions import execute_assistant_answer
 
-                answer, _intents = execute_assistant_answer(answer)
+                answer, intents = execute_assistant_answer(answer)
         except TimeoutError:
             raise HTTPException(504, "Assistant timed out") from None
         if inserted is not None:
             await asyncio.to_thread(
                 repository.save_assistant_answer, inserted.message_id, answer
             )
-        return {"question": text, "answer": answer}
+        return {"question": text, "answer": answer, "intents": intents}

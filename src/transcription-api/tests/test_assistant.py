@@ -80,7 +80,7 @@ def test_word_positions_preserve_punctuation():
 @pytest.mark.parametrize("repeats", [1, 300])
 def test_general_answer_reads_memory_without_turning_bot_words_into_facts(repeats):
     class Client(ConversationClient):
-        context_chars = 4000
+        context_chars = 5500
 
         def _chat(self, **kwargs):
             assert (
@@ -199,6 +199,7 @@ def test_settings_api_and_question_without_server_history(repository, tmp_path):
         assert response.json() == {
             "question": "Explica polimorfismo?",
             "answer": "Resposta.",
+            "intents": [],
         }
     assert llm.calls == [
         ({"question": "Explica polimorfismo?", "language": "pt"}, 30, 0)
@@ -441,7 +442,7 @@ def test_dialogue_requires_identity_and_accepts_unanswered_turns():
 
 def test_dialogue_prompt_preserves_recent_roles_and_question_without_summarization():
     class Client(ConversationClient):
-        context_chars = 4500
+        context_chars = 6000
 
         def __init__(self):
             self.calls = []
@@ -526,9 +527,9 @@ def test_recent_context_is_bounded_isolated_and_includes_open_realtime_bulk(repo
 
 def test_oversized_previous_answer_keeps_roles_and_newest_content_within_budget():
     class Client(ConversationClient):
-        # Budget raised (+656) to offset the function-calling system prompt
+        # Budget raised (+~1400) to offset the function-calling system prompt
         # while preserving the original truncation exercise.
-        context_chars = 4656
+        context_chars = 6056
 
         def _chat(self, **kwargs):
             assert len(kwargs["system"]) + len(kwargs["user"]) + 128 <= self.context_chars

@@ -126,13 +126,13 @@ def test_strip_leaves_malformed_text():
 
 def test_dispatch_play_ok():
     result = dispatch("PLAY_MUSIC", ["lofi hip hop"])
-    assert result["spoken"] == "Queued: lofi hip hop"
+    assert result["spoken"] == ""
     assert result["intent"] == {"action": "play", "query": "lofi hip hop"}
 
 
 def test_dispatch_stop_ok():
     result = dispatch("STOP_MUSIC", [])
-    assert result["spoken"] == "Stopped playback."
+    assert result["spoken"] == ""
     assert result["intent"] == {"action": "stop"}
 
 
@@ -184,8 +184,9 @@ def test_execute_multi_order_and_stripped():
         af.HANDLERS["STOP_MUSIC"] = orig_stop
     assert order == ["play:lofi", "stop"]
     assert "USE{" not in spoken
-    assert "Queued: lofi" in spoken
-    assert "Stopped playback." in spoken
+    # Python stays silent on validated music intents; the Discord bot speaks
+    # the real outcome (same strings as /play and /musicstop).
+    assert "Ok!" in spoken and "done" in spoken
     assert intents == [{"action": "play", "query": "lofi"}, {"action": "stop"}]
 
 
@@ -209,10 +210,10 @@ def test_execute_empty_search_fallback():
 
 
 def test_execute_only_block_synthesizes_confirmation():
-    spoken, _ = execute_assistant_answer("USE{STOP_MUSIC()}")
-    assert spoken.strip() != ""
+    spoken, intents = execute_assistant_answer("USE{STOP_MUSIC()}")
+    assert spoken.strip() == "Done."
     assert "USE{" not in spoken
-    assert "Stopped playback." in spoken
+    assert intents == [{"action": "stop"}]
 
 
 def test_execute_only_failing_block_returns_fallback():

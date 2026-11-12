@@ -147,19 +147,30 @@ func newAssistantController(s *discordgo.Session, state *voiceConnectionState) *
 		return nil
 	}
 	a.ask = func(ctx context.Context, userID, question string, history []assistantMessage) (string, error) {
-		var result struct {
-			Answer string `json:"answer"`
-		}
+		var result assistantQuestionResponse
 		user := state.userInfo(userID)
 		err := state.transcriptionClient.postJSON(ctx, "/v1/assistant/question", map[string]any{
 			"question": question, "session_id": state.sessionID, "discord_id": userID,
 			"username": user.Username, "display_name": user.DisplayName,
 			"history": history,
 		}, &result)
-		if err == nil && strings.TrimSpace(result.Answer) == "" {
-			err = fmt.Errorf("empty assistant answer")
+		if err != nil {
+			return "", err
 		}
-		return result.Answer, err
+		answer := result.Answer
+		// Run validated voice intents with the real player (same calls as
+		// /play and /musicstop) and append the spoken outcome.
+		if suffix := a.runAssistantIntents(userID, result.Intents); suffix != "" {
+			if strings.TrimSpace(answer) == "" {
+				answer = suffix
+			} else {
+				answer += "\n" + suffix
+			}
+		}
+		if strings.TrimSpace(answer) == "" {
+			return "", fmt.Errorf("empty assistant answer")
+		}
+		return answer, nil
 	}
 	return a
 }

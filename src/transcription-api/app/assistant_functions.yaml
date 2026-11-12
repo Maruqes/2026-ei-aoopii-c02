@@ -5,7 +5,7 @@
 # No other edits needed. Names must match `USE{NAME(...)}` exactly.
 functions:
   - name: PLAY_MUSIC
-    description: Queue/search a track to play in the voice channel
+    description: Play/queue a track in the voice channel. Use when the user asks to play, put on, queue, or hear a song, artist, or mood
     params:
       - name: search
         type: string
@@ -13,6 +13,6 @@ functions:
         max_length: 200
     example: "USE{PLAY_MUSIC(lofi hip hop)}"
   - name: STOP_MUSIC
-    description: Stop current playback and clear the queue
+    description: Stop current playback and clear the queue. Use when the user asks to stop, turn off, or silence the music
     params: []
     example: "USE{STOP_MUSIC()}"
